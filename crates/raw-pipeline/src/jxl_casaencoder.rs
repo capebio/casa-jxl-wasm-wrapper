@@ -377,14 +377,27 @@ impl Encoder {
                 "alpha supplied both interleaved and as a planar channel".into(),
             ));
         }
-        let px = frame.width as usize * frame.height as usize;
-        let expected_color = px * frame.interleaved_channels() as usize;
-        if frame.color.len() != expected_color {
-            return Err(EncodeError::Size {
-                expected: expected_color,
-                got: frame.color.len(),
-            });
+        // Checked multiply: on 32-bit/WASM targets width*height*channels can overflow
+        // usize and wrap to a small value that spuriously matches frame.color.len(),
+        // allowing a wrong-sized buffer to slip past this guard into libjxl.
+        let px = (frame.width as usize).checked_mul(frame.height as usize);
+        let expected_color = px.and_then(|p| p.checked_mul(frame.interleaved_channels() as usize));
+        match expected_color {
+            Some(expected) if frame.color.len() == expected => {}
+            Some(expected) => {
+                return Err(EncodeError::Size {
+                    expected,
+                    got: frame.color.len(),
+                });
+            }
+            None => {
+                return Err(EncodeError::Size {
+                    expected: usize::MAX,
+                    got: frame.color.len(),
+                });
+            }
         }
+        let px = px.unwrap(); // safe: checked above
         for e in frame.extra {
             if e.data.len() != px {
                 return Err(EncodeError::Size {
@@ -435,7 +448,7 @@ impl Encoder {
         // Lossless requires the original profile to be preserved bit-exact.
         info.uses_original_profile =
             if lossless || self.opts.uses_original_profile { JXL_TRUE } else { JXL_FALSE };
-        check(ffi::JxlEncoderSetBasicInfo(enc, &info), "JxlEncoderSetBasicInfo")?;
+        check_enc(ffi::JxlEncoderSetBasicInfo(enc, &info), "JxlEncoderSetBasicInfo", enc)?;
 
         // ── declare planar extra channels (mandatory init) ─────────────────
         // Interleaved alpha is handled by libjxl from alpha_bits + the 4th
@@ -516,7 +529,7 @@ impl Encoder {
             align: 0,
         };
         let color_bytes = std::mem::size_of_val(frame.color);
-        check(
+        check_enc(
             ffi::JxlEncoderAddImageFrame(
                 fs,
                 &pf,
@@ -524,6 +537,7 @@ impl Encoder {
                 color_bytes,
             ),
             "JxlEncoderAddImageFrame",
+            enc,
         )?;
 
         // ── supply planar extra-channel buffers (zero-copy) ────────────────
@@ -550,7 +564,13 @@ impl Encoder {
         ffi::JxlEncoderCloseInput(enc);
 
         // ── drain output (grow loop, double on NeedMoreOutput) ─────────────
-        let mut out = vec![0u8; 1 << 16];
+        // Pre-size the drain buffer to ~2 bytes/pixel so that most images fit
+        // without a realloc. Clamp to [64 KiB, 256 MiB] for safety.
+        let hint_bytes = (frame.width as usize)
+            .saturating_mul(frame.height as usize)
+            .saturating_mul(2)
+            .clamp(1 << 16, 256 << 20);
+        let mut out = vec![0u8; hint_bytes];
         let mut pos = 0usize;
         loop {
             let mut next = out.as_mut_ptr().add(pos);
@@ -593,6 +613,22 @@ fn check(status: ffi::JxlEncoderStatus, what: &str) -> Result<(), EncodeError> {
         Ok(())
     } else {
         Err(EncodeError::Jxl(format!("{what} failed")))
+    }
+}
+
+/// Like `check` but also surfaces the libjxl error code for diagnostics.
+unsafe fn check_enc(
+    status: ffi::JxlEncoderStatus,
+    what: &str,
+    enc: *mut ffi::JxlEncoder,
+) -> Result<(), EncodeError> {
+    if status == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
+        Ok(())
+    } else {
+        Err(EncodeError::Jxl(format!(
+            "{what} failed (code {})",
+            encoder_error_code(enc)
+        )))
     }
 }
 

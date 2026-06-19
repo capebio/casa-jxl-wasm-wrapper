@@ -6,7 +6,7 @@ export interface CacheOptions {
 }
 export interface JxlCache {
     init(): Promise<void>;
-    get(key: string): Promise<ArrayBuffer | undefined>;
+    get(key: string): Promise<ArrayBuffer | SharedArrayBuffer | undefined>;
     set(key: string, buffer: ArrayBuffer): Promise<void>;
     delete(key: string): Promise<void>;
     has(key: string): Promise<boolean>;
@@ -14,7 +14,22 @@ export interface JxlCache {
     stats(): any;
 }
 export declare function safeCacheName(key: string): string;
-export declare function cacheNameFor(key: string): Promise<string>;
+/**
+ * Synchronous cache filename. No crypto, no await.
+ *
+ * Was `async` over `crypto.subtle.digest('SHA-256', …)`: native C++, but ASYNC,
+ * which infected every persistent call site (get/set/delete/remove) with an
+ * await and a per-key digest. You don't need crypto strength to *name* a cache
+ * file. A synchronous two-lane FNV-1a (64-bit) removes the async infection and is
+ * ~98.7% faster on the hashing itself (flipflop: `cache-name-hash`, 286ms→3.4ms
+ * over 4096 keys). Pushing it into WASM was measured and is *slower* (the boundary
+ * copy beats the cheap hash — flipflop: `cache-hash-wasm`, +37–52%), so it stays
+ * in JS as Doc 5 prescribed.
+ *
+ * The two namespaces are prefixed (`raw-` / `hash-`) so a short user key of the
+ * literal form `hash-<hex>` can never collide with a hashed long key (handoff A5 / B7).
+ */
+export declare function cacheNameFor(key: string): string;
 export declare class JxlCacheBrowser implements JxlCache {
     private readonly opts;
     private readonly memoryCache;
@@ -35,7 +50,7 @@ export declare class JxlCacheBrowser implements JxlCache {
     constructor(opts: CacheOptions);
     init(): Promise<void>;
     private doInit;
-    get(key: string): Promise<ArrayBuffer | undefined>;
+    get(key: string): Promise<SharedArrayBuffer | undefined>;
     has(key: string): Promise<boolean>;
     set(key: string, buffer: ArrayBuffer): Promise<void>;
     delete(key: string): Promise<void>;

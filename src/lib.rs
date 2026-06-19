@@ -553,7 +553,12 @@ const OUT_FULL_16: u32 = 8; // full-resolution RGB16 (M3: RAW {2048,full} pyrami
 // stay in sensor orientation; consumer reads `orientation` to know how to display
 // (or to pass to JXL encoder via basic info). Saves the 60–200 MB intermediate
 // rotate when feeding the encoder (JXL stores orientation as metadata).
-const OUT_NO_ORIENT: u32 = 16; // bit 4. Was 8 — collided with OUT_FULL_16 (added 5 days later, b2cb8dc9 vs 1674aa11). Split to its own bit so full-res-16 and skip-orientation are independent. No caller sets bit 8 (all pass 7 = RGB8|LIGHTBOX|THUMB), so this changes no current behavior.
+// bit 4. Previously bit 8, accidentally shared with OUT_FULL_16 — b2cb8dc9 added
+// OUT_NO_ORIENT=8, then 1674aa11 added OUT_FULL_16=8 five days later. Split to its own
+// bit so full-res-16 and skip-orientation are independent. No caller sets bit 8 (all
+// pass 7 = RGB8|LIGHTBOX|THUMB), so this changed no behavior. The mhc three-sweep review
+// and the lib.rs review caught this independently and both corrected it to 16.
+const OUT_NO_ORIENT: u32 = 16;
 
 struct LookOverrides {
     wb_r: f32,

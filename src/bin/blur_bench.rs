@@ -189,9 +189,12 @@ fn v_pass_tiled<const TILE: usize>(src: &[u16], w: usize, h: usize, k: &[f32], d
                 let mut sp = unsafe { src.as_ptr().add(row + x0 * 3) };
                 for xi in 0..tile {
                     // Read 3 consecutive u16 via ptr (LE mem layout).
-                    let v0 = unsafe { *sp as f32 * kv }; sp = unsafe { sp.add(1) };
-                    let v1 = unsafe { *sp as f32 * kv }; sp = unsafe { sp.add(1) };
-                    let v2 = unsafe { *sp as f32 * kv }; sp = unsafe { sp.add(1) };
+                    let v0 = unsafe { *sp as f32 * kv };
+                    sp = unsafe { sp.add(1) };
+                    let v1 = unsafe { *sp as f32 * kv };
+                    sp = unsafe { sp.add(1) };
+                    let v2 = unsafe { *sp as f32 * kv };
+                    sp = unsafe { sp.add(1) };
                     acc[xi][0] += v0;
                     acc[xi][1] += v1;
                     acc[xi][2] += v2;
@@ -421,9 +424,7 @@ mod tests {
         let w = 17;
         let h = 9;
         let n = w * h * 3;
-        let src: Vec<u16> = (0..n)
-            .map(|i| ((i * 251 + 17) % 65536) as u16)
-            .collect();
+        let src: Vec<u16> = (0..n).map(|i| ((i * 251 + 17) % 65536) as u16).collect();
         let kernel = k13();
         let mut expected = vec![0u16; n];
         let mut actual = vec![0u16; n];
@@ -439,9 +440,7 @@ mod tests {
         let w = 19;
         let h = 11;
         let n = w * h * 3;
-        let src: Vec<u16> = (0..n)
-            .map(|i| ((i * 193 + 29) % 65536) as u16)
-            .collect();
+        let src: Vec<u16> = (0..n).map(|i| ((i * 193 + 29) % 65536) as u16).collect();
         let kernel = k13();
         let mut expected = vec![0u16; n];
         let mut actual = vec![0u16; n];

@@ -13,7 +13,7 @@ export declare class JxlCacheNode implements JxlCache {
     constructor(opts: CacheOptions);
     init(): Promise<void>;
     private doInit;
-    get(key: string): Promise<ArrayBuffer | undefined>;
+    get(key: string): Promise<SharedArrayBuffer | undefined>;
     private getPersistent;
     has(key: string): Promise<boolean>;
     set(key: string, buffer: ArrayBuffer): Promise<void>;

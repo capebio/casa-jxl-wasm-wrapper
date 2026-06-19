@@ -145,15 +145,17 @@ fn bayer_pixel(
 ///   (odd  row, odd  col) = B
 pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     validate(raw, width, height)?;
-    // Lens 22: on wasm32 use the explicit wasm128 SIMD version of the bilinear unroll (8-wide v128
-    // for the avg4/avg2 in the interior; parity bitselect to handle even/odd cols without deinterleave).
-    // Bit-identical to the scalar unroll path. Used in production for fast/LOD/preview bilinear paths
-    // (lib.rs previews, rggb calls on wasm). MHC (quality) is separate scalar path.
+    // Lens 22: on wasm32 use the shuffle SIMD variant — 3 direct v128 stores per 8-pixel chunk
+    // instead of 3 stack arrays + 24 scalar stores. Bit-identical to demosaic_rggb_simd.
+    // MHC (quality) is separate scalar path.
     #[cfg(target_arch = "wasm32")]
     {
-        return demosaic_rggb_simd(raw, width, height);
+        return demosaic_rggb_shuffle_simd(raw, width, height);
     }
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
     demosaic_rggb_into(raw, width, height, &mut rgb)?;
     Ok(rgb)
 }
@@ -199,7 +201,10 @@ fn bilinear_interleaved_pair(
 /// Output is bit-identical to `demosaic_rggb`.
 pub fn demosaic_rggb_into(raw: &[u16], width: usize, height: usize, out: &mut [u16]) -> Result<(), String> {
     validate(raw, width, height)?;
-    if out.len() != width * height * 3 {
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    if out.len() != n3 {
         return Err(format!("demosaic: out len {} != {}*{}*3", out.len(), width, height));
     }
 
@@ -293,158 +298,26 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
 
 #[cfg(target_arch = "wasm32")]
 pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
-    use core::arch::wasm32::*;
-    validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
-    let h_max = height - 1;
-    let w_max = width - 1;
-    // lane parity mask: even lanes (cols) all-ones → bitselect picks the "even-column" candidate.
-    static PARITY_EVEN: [u16; 8] = [0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0];
-
-    let do_row = |row: usize, out_row: &mut [u16]| {
-        let rn = if row == 0 { 0 } else { row - 1 };
-        let rs = if row == h_max { h_max } else { row + 1 };
-        let north = &raw[rn * width..rn * width + width];
-        let here = &raw[row * width..row * width + width];
-        let south = &raw[rs * width..rs * width + width];
-
-        // Left border col 0 (scalar, identical to demosaic_rggb).
-        {
-            let (r, g, b) = bayer_pixel(raw, width, row, 0, rn, rs, 0, 1.min(w_max), (0, 0));
-            out_row[0] = r; out_row[1] = g; out_row[2] = b;
-        }
-        // Very narrow rows: bayer_pixel loop, exactly matching demosaic_rggb's `width < 4` branch.
-        // (4..=11 wide rows fall through: no SIMD block fits, the unrolled pair tail below handles them.)
-        if width < 4 {
-            for col in 1..w_max {
-                let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, (col + 1).min(w_max), (0, 0));
-                let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
-            }
-            if width > 1 {
-                let col = w_max;
-                let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, col, (0, 0));
-                let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
-            }
-            return;
-        }
-        // col 1 scalar prologue (matches demosaic_rggb).
-        {
-            let (r, g, b) = bayer_pixel(raw, width, row, 1, rn, rs, 0, 2, (0, 0));
-            out_row[3] = r; out_row[4] = g; out_row[5] = b;
-        }
-
-        let parity = unsafe { v128_load(PARITY_EVEN.as_ptr() as *const v128) };
-        let row_par = row & 1;
-        // avg of 4 u16 lanes, >>2 (widen to i32 to avoid overflow, narrow back; values ≤ 65535 so exact).
-        let avg4 = |a: v128, b: v128, c: v128, d: v128| -> v128 {
-            let lo = u32x4_shr(
-                i32x4_add(i32x4_add(i32x4_extend_low_u16x8(a), i32x4_extend_low_u16x8(b)),
-                          i32x4_add(i32x4_extend_low_u16x8(c), i32x4_extend_low_u16x8(d))), 2);
-            let hi = u32x4_shr(
-                i32x4_add(i32x4_add(i32x4_extend_high_u16x8(a), i32x4_extend_high_u16x8(b)),
-                          i32x4_add(i32x4_extend_high_u16x8(c), i32x4_extend_high_u16x8(d))), 2);
-            u16x8_narrow_i32x4(lo, hi)
-        };
-        let avg2 = |a: v128, b: v128| -> v128 {
-            let lo = u32x4_shr(i32x4_add(i32x4_extend_low_u16x8(a), i32x4_extend_low_u16x8(b)), 1);
-            let hi = u32x4_shr(i32x4_add(i32x4_extend_high_u16x8(a), i32x4_extend_high_u16x8(b)), 1);
-            u16x8_narrow_i32x4(lo, hi)
-        };
-
-        let mut col = 2usize;
-        while col + 8 <= w_max {
-            let (rv, gv, bv) = unsafe {
-                let ld = |s: &[u16], idx: usize| v128_load(s.as_ptr().add(idx) as *const v128);
-                let h = ld(here, col);
-                let hm1 = ld(here, col - 1);
-                let hp1 = ld(here, col + 1);
-                let n = ld(north, col);
-                let nm1 = ld(north, col - 1);
-                let np1 = ld(north, col + 1);
-                let s = ld(south, col);
-                let sm1 = ld(south, col - 1);
-                let sp1 = ld(south, col + 1);
-                if row_par == 0 {
-                    // even row: R = even→h, odd→avg2(hm1,hp1); G = even→avg4(n,s,hm1,hp1), odd→h;
-                    //           B = even→avg4(nm1,np1,sm1,sp1), odd→avg2(n,s)
-                    let rv = v128_bitselect(h, avg2(hm1, hp1), parity);
-                    let gv = v128_bitselect(avg4(n, s, hm1, hp1), h, parity);
-                    let bv = v128_bitselect(avg4(nm1, np1, sm1, sp1), avg2(n, s), parity);
-                    (rv, gv, bv)
-                } else {
-                    // even lane = (1,0) G-blue site: R=avg(N,S), G=raw, B=avg(W,E).
-                    // odd  lane = (1,1) BLUE site: R=avg(4 diag reds), G=avg(4
-                    // greens N,S,W,E), B=raw. (Odd lane was wrongly G=h → pink veil.)
-                    let rv = v128_bitselect(avg2(n, s), avg4(nm1, np1, sm1, sp1), parity);
-                    let gv = v128_bitselect(h, avg4(n, s, hm1, hp1), parity);
-                    let bv = v128_bitselect(avg2(hm1, hp1), h, parity);
-                    (rv, gv, bv)
-                }
-            };
-            let mut rr = [0u16; 8];
-            let mut gg = [0u16; 8];
-            let mut bb = [0u16; 8];
-            unsafe {
-                v128_store(rr.as_mut_ptr() as *mut v128, rv);
-                v128_store(gg.as_mut_ptr() as *mut v128, gv);
-                v128_store(bb.as_mut_ptr() as *mut v128, bv);
-            }
-            for j in 0..8 {
-                let o = (col + j) * 3;
-                out_row[o] = rr[j]; out_row[o + 1] = gg[j]; out_row[o + 2] = bb[j];
-            }
-            col += 8;
-        }
-        // Tail: scalar pair loop — SIMD↔scalar boundary seamless (bit-identical values).
-        while col + 1 < w_max {
-            bilinear_interleaved_pair(north, here, south, col, row_par, out_row);
-            col += 2;
-        }
-        if col < w_max {
-            let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, (col + 1).min(w_max), (0, 0));
-            let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
-        }
-        // Right border.
-        if width > 1 {
-            let col = w_max;
-            let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, col, (0, 0));
-            let o = col * 3; out_row[o] = r; out_row[o + 1] = g; out_row[o + 2] = b;
-        }
-    };
-
-    // Single-threaded: the flip-flop isolates SIMD-vs-autovec at one thread (production wasm is also
-    // single-thread unless parallel-wasm). Bit-identical to demosaic_rggb's per-row output.
-    rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
-    Ok(rgb)
+    // DM-002: delegate to shuffle variant which uses i8x16_shuffle for direct interleaved stores
+    // instead of the old stack-array round-trip (3 v128_store + 24 scalar reads + 24 scalar stores).
+    demosaic_rggb_shuffle_simd(raw, width, height)
 }
 
-/// Scalar reference for planar: deinterleave of `demosaic_rggb` output.
-/// Used for bit-exact pin of planar_simd.
+/// Scalar reference for planar: single-pass direct-planar write.
+/// Eliminates the intermediate interleaved allocation and second deinterleave pass.
+/// Bit-identical output to the previous two-pass version.
 pub fn demosaic_rggb_planar(raw: &[u16], width: usize, height: usize) -> Result<(Vec<u16>, Vec<u16>, Vec<u16>), String> {
-    let interleaved = demosaic_rggb(raw, width, height)?;
+    validate(raw, width, height)?;
     let n = width * height;
-    let mut r = vec![0u16; n];
-    let mut g = vec![0u16; n];
-    let mut b = vec![0u16; n];
-    // Lens 23: pointer advance for deinterleave (avoids *3 mul + indexing in hot loop).
-    // (The caller of planar for previews already benefits from SIMD in the demosaic_rggb call on wasm.)
-    unsafe {
-        let mut src = interleaved.as_ptr();
-        let mut pr = r.as_mut_ptr();
-        let mut pg = g.as_mut_ptr();
-        let mut pb = b.as_mut_ptr();
-        let end = src.add(n * 3);
-        while src < end {
-            *pr = *src; pr = pr.add(1); src = src.add(1);
-            *pg = *src; pg = pg.add(1); src = src.add(1);
-            *pb = *src; pb = pb.add(1); src = src.add(1);
-        }
-    }
-    Ok((r, g, b))
+    let mut r_plane = vec![0u16; n];
+    let mut g_plane = vec![0u16; n];
+    let mut b_plane = vec![0u16; n];
+    demosaic_rggb_planar_into(raw, width, height, &mut r_plane, &mut g_plane, &mut b_plane)?;
+    Ok((r_plane, g_plane, b_plane))
 }
 
-/// T3 planar: like `demosaic_rggb_planar` but writes into caller-owned buffers (each exactly w*h u16s).
-/// Enables reuse, avoids alloc/zero for lb/thumb or tone SoA paths. Bit-identical.
+/// T3 planar: writes directly into caller-owned SoA buffers (each exactly w*h u16s).
+/// Single-pass — no intermediate interleaved allocation. Bit-identical to demosaic_rggb_planar.
 pub fn demosaic_rggb_planar_into(
     raw: &[u16],
     width: usize,
@@ -458,18 +331,79 @@ pub fn demosaic_rggb_planar_into(
     if out_r.len() != n || out_g.len() != n || out_b.len() != n {
         return Err(format!("demosaic planar into: plane len != {}*{}", width, height));
     }
-    let interleaved = demosaic_rggb(raw, width, height)?;
-    // Lens 23: pointer deinterleave (consistent with planar).
-    unsafe {
-        let mut src = interleaved.as_ptr();
-        let mut pr = out_r.as_mut_ptr();
-        let mut pg = out_g.as_mut_ptr();
-        let mut pb = out_b.as_mut_ptr();
-        let end = src.add(n * 3);
-        while src < end {
-            *pr = *src; pr = pr.add(1); src = src.add(1);
-            *pg = *src; pg = pg.add(1); src = src.add(1);
-            *pb = *src; pb = pb.add(1); src = src.add(1);
+    let h_max = height - 1;
+    let w_max = width - 1;
+
+    // Single-pass direct planar write: mirrors demosaic_rggb_into row structure but
+    // writes r_plane[row*width+col], g_plane[...], b_plane[...] directly. Eliminates
+    // the W*H*3*2 byte intermediate alloc + second deinterleave pass.
+    for row in 0..height {
+        let rn = if row == 0 { 0 } else { row - 1 };
+        let rs = if row == h_max { h_max } else { row + 1 };
+        let north = &raw[rn * width..rn * width + width];
+        let here  = &raw[row * width..row * width + width];
+        let south = &raw[rs * width..rs * width + width];
+        let base  = row * width;
+
+        // Left border col 0.
+        {
+            let (r, g, b) = bayer_pixel(raw, width, row, 0, rn, rs, 0, 1.min(w_max), (0, 0));
+            out_r[base] = r; out_g[base] = g; out_b[base] = b;
+        }
+
+        if width < 4 {
+            for col in 1..w_max {
+                let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, col + 1, (0, 0));
+                out_r[base + col] = r; out_g[base + col] = g; out_b[base + col] = b;
+            }
+            if width > 1 {
+                let col = w_max;
+                let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, col, (0, 0));
+                out_r[base + col] = r; out_g[base + col] = g; out_b[base + col] = b;
+            }
+            continue;
+        }
+
+        // col 1 scalar prologue.
+        {
+            let (r, g, b) = bayer_pixel(raw, width, row, 1, rn, rs, 0, 2, (0, 0));
+            out_r[base + 1] = r; out_g[base + 1] = g; out_b[base + 1] = b;
+        }
+
+        let row_par = row & 1;
+        let mut col = 2usize;
+        while col + 1 < w_max {
+            if row_par == 0 {
+                // even row: col=R site, col+1=G-red site
+                out_r[base + col] = here[col];
+                out_g[base + col] = ((north[col] as u32 + south[col] as u32 + here[col-1] as u32 + here[col+1] as u32) >> 2) as u16;
+                out_b[base + col] = ((north[col-1] as u32 + north[col+1] as u32 + south[col-1] as u32 + south[col+1] as u32) >> 2) as u16;
+                out_r[base + col + 1] = ((here[col] as u32 + here[col+2] as u32) >> 1) as u16;
+                out_g[base + col + 1] = here[col+1];
+                out_b[base + col + 1] = ((north[col+1] as u32 + south[col+1] as u32) >> 1) as u16;
+            } else {
+                // odd row: col=G-blue site, col+1=B site
+                out_r[base + col] = ((north[col] as u32 + south[col] as u32) >> 1) as u16;
+                out_g[base + col] = here[col];
+                out_b[base + col] = ((here[col-1] as u32 + here[col+1] as u32) >> 1) as u16;
+                out_r[base + col + 1] = ((north[col] as u32 + north[col+2] as u32 + south[col] as u32 + south[col+2] as u32) >> 2) as u16;
+                out_g[base + col + 1] = ((north[col+1] as u32 + south[col+1] as u32 + here[col] as u32 + here[col+2] as u32) >> 2) as u16;
+                out_b[base + col + 1] = here[col+1];
+            }
+            col += 2;
+        }
+
+        // Tail single col before right border.
+        if col < w_max {
+            let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, (col + 1).min(w_max), (0, 0));
+            out_r[base + col] = r; out_g[base + col] = g; out_b[base + col] = b;
+        }
+
+        // Right border col w_max.
+        if width > 1 {
+            let col = w_max;
+            let (r, g, b) = bayer_pixel(raw, width, row, col, rn, rs, col - 1, col, (0, 0));
+            out_r[base + col] = r; out_g[base + col] = g; out_b[base + col] = b;
         }
     }
     Ok(())
@@ -484,6 +418,7 @@ pub fn demosaic_rggb_planar_simd(raw: &[u16], width: usize, height: usize) -> Re
 pub fn demosaic_rggb_planar_simd(raw: &[u16], width: usize, height: usize) -> Result<(Vec<u16>, Vec<u16>, Vec<u16>), String> {
     use core::arch::wasm32::*;
     validate(raw, width, height)?;
+    // validate() already checked width*height doesn't overflow, so this cannot fail.
     let n = width * height;
     let mut r_plane = vec![0u16; n];
     let mut g_plane = vec![0u16; n];
@@ -540,6 +475,8 @@ pub fn demosaic_rggb_planar_simd(raw: &[u16], width: usize, height: usize) -> Re
             u16x8_narrow_i32x4(lo, hi)
         };
         let mut col = 2usize;
+        // col+8 <= w_max ensures col+8 < width, so ld(here, col+1..col+8) are all in-bounds.
+        // Up to 8 columns before the right border fall through to the scalar tail — acceptable trade-off.
         while col + 8 <= w_max {
             let (rv, gv, bv) = unsafe {
                 let ld = |s: &[u16], idx: usize| v128_load(s.as_ptr().add(idx) as *const v128);
@@ -629,7 +566,10 @@ pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> R
 pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     use core::arch::wasm32::*;
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
     let h_max = height - 1;
     let w_max = width - 1;
     static PARITY_EVEN: [u16; 8] = [0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0];
@@ -678,6 +618,8 @@ pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> R
             u16x8_narrow_i32x4(lo, hi)
         };
         let mut col = 2usize;
+        // col+8 <= w_max ensures col+8 < width, so ld(here, col+1..col+8) are all in-bounds.
+        // Up to 8 columns before the right border fall through to the scalar tail — acceptable trade-off.
         while col + 8 <= w_max {
             let (rv, gv, bv) = unsafe {
                 let ld = |s: &[u16], idx: usize| v128_load(s.as_ptr().add(idx) as *const v128);
@@ -754,7 +696,10 @@ pub fn demosaic_rggb_half(raw: &[u16], width: usize, height: usize) -> Result<Ve
     if hw == 0 || hh == 0 {
         return Err(format!("demosaic: {}×{} too small for half-res", width, height));
     }
-    let mut rgb = vec![0u16; hw * hh * 3];
+    let n3 = hw.checked_mul(hh)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: half {}×{}×3 overflows usize", hw, hh))?;
+    let mut rgb = vec![0u16; n3];
     let do_row = |qr: usize, out_row: &mut [u16]| {
         let top = &raw[(2 * qr) * width..(2 * qr) * width + width];
         let bot = &raw[(2 * qr + 1) * width..(2 * qr + 1) * width + width];
@@ -781,7 +726,10 @@ pub fn demosaic_bayer(raw: &[u16], width: usize, height: usize, phase: (u8, u8))
     -> Result<Vec<u16>, String>
 {
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
 
     let h_max = height - 1;
     let w_max = width  - 1;
@@ -907,7 +855,10 @@ pub fn demosaic_bayer_mhc(
     phase: (u8, u8),
 ) -> Result<Vec<u16>, String> {
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
     let phase = (phase.0 as usize, phase.1 as usize);
@@ -975,7 +926,9 @@ pub fn demosaic_bayer_mhc_band(
     if ctx.len() < ctx_min {
         return Err(format!("demosaic: band ctx too small ({} < {}×{})", ctx.len(), width, ctx_h));
     }
-    let out_len = num_rows * width * 3;
+    let out_len = num_rows.checked_mul(width)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: band {}×{}×3 overflows usize", num_rows, width))?;
     if rgb_out.len() < out_len {
         return Err(format!("demosaic: band rgb_out too small ({} < {})", rgb_out.len(), out_len));
     }
@@ -983,8 +936,15 @@ pub fn demosaic_bayer_mhc_band(
     let h_max = (ctx_h - 1) as isize;
     let phase = (phase.0 as usize, phase.1 as usize);
 
+    // Safety: ctx_row is checked below against ctx_h-1; col is clamped to width-1.
+    // The unsafe at() call uses get_unchecked only when the bounds have been validated above.
     for local_row in 0..num_rows {
         let ctx_row = halo + first_local + local_row;
+        if ctx_row >= ctx_h {
+            return Err(format!(
+                "demosaic: band ctx_row {} out of bounds (ctx_h={})", ctx_row, ctx_h
+            ));
+        }
         let r = ctx_row as isize;
         let r_n = clamp(r - 1, 0, h_max);
         let r_s = clamp(r + 1, 0, h_max);
@@ -1036,7 +996,10 @@ pub fn demosaic_bayer_mhc_band(
 /// All results clamped to [0, 65535].
 pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
 
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
@@ -1072,7 +1035,10 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
                 let o = col * 3;
                 out_row[o] = rr as u16; out_row[o+1] = gg as u16; out_row[o+2] = bb as u16;
             }
-            for col in int_end..width {
+            // Start from int_end.max(int_start) to avoid re-computing pixels already written
+            // by the left-border loop when width is very small (e.g. width == 1 where int_end = 0
+            // < int_start = 1, so the border loops would both cover col 0).
+            for col in int_end.max(int_start)..width {
                 let c = col as isize;
                 let (rr, gg, bb) = mhc_pixel_phased(raw, width, r_c, r_n, r_s, r_n2, r_s2, col,
                     clamp(c-1,0,w_max), clamp(c+1,0,w_max),
@@ -1116,7 +1082,7 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
                 let b_v = sum_b4 >> 2;
                 out_row[o]     = rc as u16;
                 out_row[o+1]   = g_mhc.clamp(0,65535) as u16;
-                out_row[o+2]   = b_v as u16;
+                out_row[o+2]   = b_v.clamp(0,65535) as u16;
 
                 // even row, odd col (0,1): GR site
                 let gc  = here[col+1] as i32;
@@ -1234,7 +1200,9 @@ pub fn demosaic_rggb_mhc_band(
     if ctx.len() < ctx_min {
         return Err(format!("demosaic: band ctx too small ({} < {}×{})", ctx.len(), width, ctx_h));
     }
-    let out_len = num_rows * width * 3;
+    let out_len = num_rows.checked_mul(width)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: band {}×{}×3 overflows usize", num_rows, width))?;
     if rgb_out.len() < out_len {
         return Err(format!("demosaic: band rgb_out too small ({} < {})", rgb_out.len(), out_len));
     }
@@ -1246,6 +1214,11 @@ pub fn demosaic_rggb_mhc_band(
 
     for br in 0..num_rows {
         let local = halo + first_local + br;
+        if local >= ctx_h {
+            return Err(format!(
+                "demosaic: band local row {} out of bounds (ctx_h={})", local, ctx_h
+            ));
+        }
         let global_row = global_row0 + first_local + br;
         let r = local as isize;
         let r_n  = clamp(r - 1, 0, h_max) as usize;
@@ -1255,23 +1228,104 @@ pub fn demosaic_rggb_mhc_band(
         let r_c  = local;
 
         let out_base = br * width * 3;
+        // DM-003: hoist 5 row slices before the column loop so the column loop uses direct
+        // slice indexing instead of per-call `at()` stride-multiply. Mirrors the unrolled
+        // interior of `demosaic_rggb_mhc` (lines 1054-1058 in the full-frame path).
+        let row_n2    = &ctx[r_n2 * width..r_n2 * width + width];
+        let row_north = &ctx[r_n  * width..r_n  * width + width];
+        let row_here  = &ctx[r_c  * width..r_c  * width + width];
+        let row_south = &ctx[r_s  * width..r_s  * width + width];
+        let row_s2    = &ctx[r_s2 * width..r_s2 * width + width];
         // Lens 23: pointer advance for the output row writes in the band hot loop (DNG fused path).
         // Avoids repeated mul + indexing; complements the SIMD black and bilinear paths.
         let mut out_ptr = unsafe { rgb_out.as_mut_ptr().add(out_base) };
         for col in 0..width {
             let c = col as isize;
-            let (rr, gg, bb) = mhc_pixel_phased(
-                ctx, width, r_c, r_n, r_s, r_n2, r_s2, col,
-                clamp(c-1,0,w_max), clamp(c+1,0,w_max),
-                clamp(c-2,0,w_max), clamp(c+2,0,w_max), (0, 0),
-            );
+            // Use pre-hoisted slices for direct indexing; fall back to clamped column access
+            // at boundaries (col 0/1 and col w_max-1/w_max) via the clamp helpers below.
+            let c_w  = clamp(c-1, 0, w_max);
+            let c_e  = clamp(c+1, 0, w_max);
+            let c_w2 = clamp(c-2, 0, w_max);
+            let c_e2 = clamp(c+2, 0, w_max);
+            let (rr, gg, bb) = {
+                // Inline the 4-arm match using pre-hoisted row slices — same logic as
+                // mhc_pixel_phased but avoids 5 stride-multiplies per pixel.
+                let ld = |row: &[u16], idx: usize| unsafe { *row.get_unchecked(idx) as i32 };
+                match (r_c & 1, col & 1) {
+                    (0, 0) => {
+                        let rc  = ld(row_here,  col);
+                        let gn  = ld(row_north, col);
+                        let ge  = ld(row_here,  c_e);
+                        let gs  = ld(row_south, col);
+                        let gw  = ld(row_here,  c_w);
+                        let rn2 = ld(row_n2,    col);
+                        let re2 = ld(row_here,  c_e2);
+                        let rs2 = ld(row_s2,    col);
+                        let rw2 = ld(row_here,  c_w2);
+                        let g_mhc = (2*(gn+ge+gs+gw) + 4*rc - rn2-re2-rs2-rw2) >> 3;
+                        let b_v = (ld(row_north,c_w)+ld(row_north,c_e)
+                                  +ld(row_south,c_w)+ld(row_south,c_e)) >> 2;
+                        (rc, g_mhc.clamp(0,65535), b_v.clamp(0,65535))
+                    }
+                    (0, 1) => {
+                        let gc  = ld(row_here,  col);
+                        let re  = ld(row_here,  c_e);
+                        let rw  = ld(row_here,  c_w);
+                        let bn  = ld(row_north, col);
+                        let bs  = ld(row_south, col);
+                        let ge2 = ld(row_here,  c_e2);
+                        let gw2 = ld(row_here,  c_w2);
+                        let gn2 = ld(row_n2,    col);
+                        let gs2 = ld(row_s2,    col);
+                        let r_v = (2*(re+rw) + 2*gc - ge2-gw2) >> 2;
+                        let b_v = (2*(bn+bs) + 2*gc - gn2-gs2) >> 2;
+                        (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
+                    }
+                    (1, 0) => {
+                        let gc  = ld(row_here,  col);
+                        let rn  = ld(row_north, col);
+                        let rs  = ld(row_south, col);
+                        let be  = ld(row_here,  c_e);
+                        let bw  = ld(row_here,  c_w);
+                        let gn2 = ld(row_n2,    col);
+                        let gs2 = ld(row_s2,    col);
+                        let ge2 = ld(row_here,  c_e2);
+                        let gw2 = ld(row_here,  c_w2);
+                        let r_v = (2*(rn+rs) + 2*gc - gn2-gs2) >> 2;
+                        let b_v = (2*(be+bw) + 2*gc - ge2-gw2) >> 2;
+                        (r_v.clamp(0,65535), gc, b_v.clamp(0,65535))
+                    }
+                    _ => {
+                        let bc  = ld(row_here,  col);
+                        let gn  = ld(row_north, col);
+                        let ge  = ld(row_here,  c_e);
+                        let gs  = ld(row_south, col);
+                        let gw  = ld(row_here,  c_w);
+                        let bn2 = ld(row_n2,    col);
+                        let be2 = ld(row_here,  c_e2);
+                        let bs2 = ld(row_s2,    col);
+                        let bw2 = ld(row_here,  c_w2);
+                        let g_mhc = (2*(gn+ge+gs+gw) + 4*bc - bn2-be2-bs2-bw2) >> 3;
+                        let r_v = (2*(ld(row_north,c_e)+ld(row_north,c_w)
+                                     +ld(row_south,c_e)+ld(row_south,c_w))
+                                   + 4*bc - bn2-be2-bs2-bw2) >> 3;
+                        let lap_ = 4*bc - bn2 - be2 - bs2 - bw2;
+                        let _ = lap_;
+                        (r_v.clamp(0,65535), g_mhc.clamp(0,65535), bc)
+                    }
+                }
+            };
             unsafe {
                 *out_ptr = rr as u16; out_ptr = out_ptr.add(1);
                 *out_ptr = gg as u16; out_ptr = out_ptr.add(1);
                 *out_ptr = bb as u16; out_ptr = out_ptr.add(1);
             }
         }
-        let _ = global_row; // parity not needed in scalar path (mhc_pixel uses r_c &1)
+        // PRECONDITION: `halo` must be even so that `r_c & 1 == global_row & 1`.
+        // `mhc_pixel_phased` derives parity from the local context row `r_c`; for an odd halo the
+        // local parity would be inverted vs. the global frame parity, silently swapping R and B
+        // across the band. All current callers pass halo=2 (even), satisfying this contract.
+        let _ = global_row; // confirmed unused; parity comes from r_c (see precondition above)
     }
     Ok(())
 }
@@ -1284,7 +1338,10 @@ pub fn demosaic_rggb_mhc_with_saliency(raw: &[u16], width: usize, height: usize)
     -> Result<(Vec<u16>, Vec<u32>, usize /* grid_w */), String>
 {
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
 
     let grid_w = (width + SALIENCY_BLOCK - 1) / SALIENCY_BLOCK;
     let grid_h = (height + SALIENCY_BLOCK - 1) / SALIENCY_BLOCK;
@@ -1388,10 +1445,10 @@ pub fn demosaic_rggb_mhc_with_saliency(raw: &[u16], width: usize, height: usize)
                     clamp(c-2,0,w_max), clamp(c+2,0,w_max));
                 let o = out_base + col * 3;
                 rgb_band[o] = rr as u16; rgb_band[o+1] = gg as u16; rgb_band[o+2] = bb as u16;
-                if lap != 0 {
-                    let bx = col / SALIENCY_BLOCK;
-                    grid_row[bx] = grid_row[bx].saturating_add(lap);
-                }
+                // DM-004: remove avoidable branch on 50% of pixels (G sites return lap==0).
+                // saturating_add(0) is a no-op so the branch is eliminated with no semantic change.
+                let bx = col / SALIENCY_BLOCK;
+                grid_row[bx] = grid_row[bx].saturating_add(lap);
             }
         }
     };
@@ -1429,7 +1486,10 @@ pub fn demosaic_rggb_mhc_matrix(raw: &[u16], width: usize, height: usize, m: &[i
             return Err("demosaic: matrix coeff |m| > 8<<12".to_string());
         }
     }
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
 
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
@@ -1562,6 +1622,10 @@ mod tests {
         // SIMD path (delegates to scalar on native) must agree byte-for-byte.
         let rgb_simd = demosaic_rggb_simd(&raw, w, h).unwrap();
         assert_eq!(rgb, rgb_simd, "simd path must match scalar");
+        // Shuffle SIMD path (delegates to simd on native) must agree byte-for-byte.
+        // On wasm32 this exercises the i8x16_shuffle interleave constants directly.
+        let rgb_shuffle = demosaic_rggb_shuffle_simd(&raw, w, h).unwrap();
+        assert_eq!(rgb, rgb_shuffle, "shuffle simd path must match scalar (validates shuffle constants)");
     }
 
     #[test]
@@ -1648,6 +1712,40 @@ mod tests {
         let grbg_raw = vec![20u16, 10, 40, 30];
         let rgb = demosaic_bayer_mhc(&grbg_raw, 2, 2, (0, 1)).unwrap();
         assert_eq!(rgb[3], 10, "phase-aware mhc must keep direct R sample at GRBG (0,1)");
+    }
+
+    /// DM-010: demosaic_bayer_mhc_band with GRBG phase must keep the direct R sample.
+    /// Verifies that the band path honours the phase parameter the same way the full-frame
+    /// demosaic_bayer_mhc does; a phase bug would silently swap R and B over the band.
+    #[test]
+    fn m12_bayer_mhc_band_grbg_preserves_red_site() {
+        // 4×4 GRBG raw: R at (0,1), (0,3), (2,1), (2,3) = value 10.
+        // G at (0,0),(0,2),(2,0),(2,2) and (1,1),(1,3),(3,1),(3,3).
+        // B at (1,0),(1,2),(3,0),(3,2). Others G.
+        let w = 4usize;
+        let h = 4usize;
+        let mut raw = vec![0u16; w * h];
+        for r in 0..h {
+            for c in 0..w {
+                raw[r * w + c] = match ((r + 0) & 1, (c + 1) & 1) {
+                    // phase (0,1): R at (row&1==0, col&1==1)
+                    (0, 0) => 10,  // R site (col odd in GRBG)
+                    (1, 1) => 5,   // B site
+                    _ => 20,        // G sites
+                };
+            }
+        }
+        // Full-frame reference.
+        let rgb_full = demosaic_bayer_mhc(&raw, w, h, (0, 1)).unwrap();
+
+        // Band path: halo=2, ctx=entire image, first_local=0, num_rows=h.
+        let mut rgb_band = vec![0u16; w * h * 3];
+        demosaic_bayer_mhc_band(&raw, w, h, 0, (0, 1), 0, h, &mut rgb_band).unwrap();
+        assert_eq!(rgb_band, rgb_full, "band GRBG must match full-frame GRBG");
+
+        // The direct R sample at (0,1) must appear as R in the output.
+        // output pixel (0,1): offset = 1*3 = 3 for R.
+        assert_eq!(rgb_full[3], 10, "band GRBG phase: R sample at sensor (0,1) must be R at output");
     }
 
     #[test]

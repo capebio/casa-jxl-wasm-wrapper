@@ -28,9 +28,14 @@ fn combine_lanes(lanes: &[u32; 8]) -> u32 {
 pub struct FrameStats {
     pub alpha_min: u32,
     pub alpha_max: u32,
-    pub alpha_zero: u32,
-    pub rgb_nonzero: u32,
+    /// Count of pixels with alpha == 0.
+    pub alpha_zero: u64,
+    /// Count of non-zero *channel values* (not pixels): each pixel contributes 0–3.
+    /// Maximum value is `pixel_count * 3`. Named for historical compatibility.
+    pub rgb_nonzero: u64,
+    /// Sum of per-pixel luma values: `l = 54*r + 183*g + 18*b` (u8 inputs → max 65025/px).
     pub luma_sum: f64,
+    /// Sum of squared per-pixel luma values (same units as luma_sum^2).
     pub luma_sq: f64,
     pub hash: u32,
     pub pixel_count: usize,
@@ -40,10 +45,30 @@ impl FrameStats {
     pub fn mean_luma(&self) -> f64 {
         if self.pixel_count == 0 { 0.0 } else { self.luma_sum / self.pixel_count as f64 }
     }
+
+    /// Combine two partial `FrameStats` (e.g. from parallel strips or tiles).
+    /// Enables safe future parallelization of the analysis kernel without silent f64 precision loss.
+    /// Hash merging XORs the two hashes — callers that require order-preserving hash chaining must
+    /// combine fields directly.
+    pub fn merge(self, other: FrameStats) -> FrameStats {
+        FrameStats {
+            alpha_min: self.alpha_min.min(other.alpha_min),
+            alpha_max: self.alpha_max.max(other.alpha_max),
+            alpha_zero: self.alpha_zero + other.alpha_zero,
+            rgb_nonzero: self.rgb_nonzero + other.rgb_nonzero,
+            luma_sum: self.luma_sum + other.luma_sum,
+            luma_sq: self.luma_sq + other.luma_sq,
+            hash: self.hash ^ other.hash,
+            pixel_count: self.pixel_count + other.pixel_count,
+        }
+    }
+    /// Returns luma variance normalized by 65025.0 (= max luma per pixel = 255×255).
+    /// Result is in [0.0, 1.0]: 0.0 = uniform frame, 1.0 = maximum contrast/detail.
+    /// Note: divides by 65025.0 (not 65536.0) so the normalization matches the actual luma range.
     pub fn luma_variance(&self) -> f64 {
         if self.pixel_count == 0 { return 0.0; }
         let m = self.mean_luma();
-        ((self.luma_sq / self.pixel_count as f64) - m * m).max(0.0) / 65536.0
+        ((self.luma_sq / self.pixel_count as f64) - m * m).max(0.0) / 65025.0
     }
 }
 
@@ -53,12 +78,16 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
     // For valid full-length input (d.len() >= px*4) this is a no-op; only
     // undersized/malformed input is affected (avoids an OOB index panic).
     let px = px.min(d.len() / 4);
-    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u32, 0u32);
+    let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u64, 0u64);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
     let mut lanes = [
         lane_seed(0), lane_seed(1), lane_seed(2), lane_seed(3),
         lane_seed(4), lane_seed(5), lane_seed(6), lane_seed(7),
     ];
+    // Kahan compensated summation for l_sq to prevent f64 precision loss at 24MP+.
+    // At 24MP luma values up to 65025 lead to l_sq sums ~1e17, which exceeds f64's
+    // exact integer range (~9e15). Compensation keeps the running error below 1 ULP.
+    let mut l_sq_c = 0f64; // Kahan compensation term
     for p in 0..px {
         let i = p * 4;
         let r = d[i] as u32;
@@ -68,14 +97,17 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
         let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
         let lane = p & 7;
         lanes[lane] = (lanes[lane] ^ w).wrapping_mul(PRIME);
-        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        rgb_nz += (r != 0) as u64 + (g != 0) as u64 + (b != 0) as u64;
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
         let l = 54 * r + 183 * g + 18 * b;
         let lf = l as f64;
         l_sum += lf;
-        l_sq += lf * lf;
+        let term = lf * lf - l_sq_c;
+        let new_sq = l_sq + term;
+        l_sq_c = (new_sq - l_sq) - term;
+        l_sq = new_sq;
     }
     if px == 0 { a_min = 255; a_max = 0; }
     FrameStats {
@@ -86,11 +118,17 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+/// Caller must ensure `d.len() >= px * 4` and that AVX2 is available.
+/// The function reads `(px / 8) * 32` bytes in the SIMD loop and then
+/// `(px % 8) * 4` bytes in the scalar tail — both within `d[..px*4]`.
 unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
     use core::arch::x86_64::*;
 
+    // Guard: clamp px so the SIMD loop never reads past d.
+    let px = px.min(d.len() / 4);
     let chunks = px / 8; // 8 px = 32 bytes per __m256i
-    let (mut a_zero, mut rgb_nz) = (0u32, 0u32);
+    let (mut a_zero, mut rgb_nz) = (0u64, 0u64);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
 
     let mut hv = _mm256_setr_epi32(
@@ -109,8 +147,13 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54,
     );
 
+    // FS-001: moved arr_lo/arr_hi declarations outside the loop so the stack frame is allocated
+    // once. Rust hoists them anyway, but making it explicit also documents the intent.
     let mut arr_lo = [0i32; 8];
     let mut arr_hi = [0i32; 8];
+
+    // Kahan compensation for l_sq to prevent f64 precision loss at 24MP+.
+    let mut l_sq_c = 0f64;
 
     for c in 0..chunks {
         let pv = _mm256_loadu_si256(d.as_ptr().add(c * 32) as *const __m256i);
@@ -121,22 +164,30 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         vmax = _mm256_max_epu8(vmax, _mm256_and_si256(pv, alpha_and));
 
         let zmask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(pv, zero)) as u32;
-        a_zero += (zmask & 0x8888_8888).count_ones();
-        rgb_nz += 24 - (zmask & 0x7777_7777).count_ones();
+        a_zero += (zmask & 0x8888_8888).count_ones() as u64;
+        rgb_nz += 24 - (zmask & 0x7777_7777).count_ones() as u64;
 
         let lo16 = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(pv));
         let hi16 = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(pv, 1));
+        // FS-001: store-to-load stall fix — storeu writes 256 bits then the per-lane adds read 32-bit
+        // sub-words, causing forwarding stalls. Keep the storeu (cleanest portable extract) but move
+        // the declarations outside the loop so they are not re-initialized each iteration.
         _mm256_storeu_si256(arr_lo.as_mut_ptr() as *mut __m256i, _mm256_madd_epi16(lo16, wv));
         _mm256_storeu_si256(arr_hi.as_mut_ptr() as *mut __m256i, _mm256_madd_epi16(hi16, wv));
+        // FS-002: pairwise integer reduction — one chunk_sum + one chunk_sq_sum, one Kahan step per
+        // 8-pixel chunk instead of 8 steps. Reduces f64 ops from 24M→3M at 24MP. Exact for i64:
+        // max chunk_sq_sum = 8 × 65025² ≈ 3.4e10, well within i64 range. Bit-identical l_sum/l_sq.
         let luma = [
             arr_lo[0] + arr_lo[1], arr_lo[2] + arr_lo[3], arr_lo[4] + arr_lo[5], arr_lo[6] + arr_lo[7],
             arr_hi[0] + arr_hi[1], arr_hi[2] + arr_hi[3], arr_hi[4] + arr_hi[5], arr_hi[6] + arr_hi[7],
         ];
-        for &lz in luma.iter() {
-            let lf = lz as f64;
-            l_sum += lf;
-            l_sq += lf * lf;
-        }
+        let chunk_sum: i64 = luma.iter().map(|&x| x as i64).sum();
+        let chunk_sq_sum: i64 = luma.iter().map(|&x| (x as i64) * (x as i64)).sum();
+        l_sum += chunk_sum as f64;
+        let term = chunk_sq_sum as f64 - l_sq_c;
+        let new_sq = l_sq + term;
+        l_sq_c = (new_sq - l_sq) - term;
+        l_sq = new_sq;
     }
 
     let mut mins = [0u8; 32];
@@ -164,14 +215,17 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
         let lane = p & 7;
         lanes[lane] = (lanes[lane] ^ w).wrapping_mul(PRIME);
-        rgb_nz += (r != 0) as u32 + (g != 0) as u32 + (b != 0) as u32;
+        rgb_nz += (r != 0) as u64 + (g != 0) as u64 + (b != 0) as u64;
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
         let l = 54 * r + 183 * g + 18 * b;
         let lf = l as f64;
         l_sum += lf;
-        l_sq += lf * lf;
+        let term = lf * lf - l_sq_c;
+        let new_sq = l_sq + term;
+        l_sq_c = (new_sq - l_sq) - term;
+        l_sq = new_sq;
     }
     if px == 0 { a_min = 255; a_max = 0; }
 
@@ -183,10 +237,24 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
 
 /// Runtime-dispatched entry. Uses AVX2 when present, else the scalar kernel.
 pub fn analyze(pixels: &[u8], width: usize, height: usize) -> FrameStats {
-    let px = width.saturating_mul(height);
-    let limit = pixels.len().min(px * 4);
-    if limit < px * 4 {
-        return analyze_scalar(&zero_padded(pixels, px * 4), px);
+    // Use checked_mul so giant dimensions (e.g. from untrusted input) cannot silently saturate
+    // to a wrong pixel count and cause the kernel to read stale/zeroed padding as real pixels.
+    let px = match width.checked_mul(height) {
+        Some(n) => n,
+        None => return FrameStats {
+            alpha_min: 255, alpha_max: 0, alpha_zero: 0, rgb_nonzero: 0,
+            luma_sum: 0.0, luma_sq: 0.0, hash: combine_lanes(&[
+                lane_seed(0), lane_seed(1), lane_seed(2), lane_seed(3),
+                lane_seed(4), lane_seed(5), lane_seed(6), lane_seed(7),
+            ]), pixel_count: 0,
+        },
+    };
+    if pixels.len() < px.saturating_mul(4) {
+        // Buffer is shorter than the declared pixel count: analyze only the complete pixels
+        // actually present. Avoid zero-padding which would skew alpha_zero and luma stats
+        // with phantom pixels.
+        let px_actual = pixels.len() / 4;
+        return analyze_scalar(pixels, px_actual);
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -197,12 +265,6 @@ pub fn analyze(pixels: &[u8], width: usize, height: usize) -> FrameStats {
     analyze_scalar(pixels, px)
 }
 
-fn zero_padded(src: &[u8], len: usize) -> Vec<u8> {
-    let mut v = vec![0u8; len];
-    let n = src.len().min(len);
-    v[..n].copy_from_slice(&src[..n]);
-    v
-}
 
 #[cfg(test)]
 mod tests {

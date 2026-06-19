@@ -27,16 +27,47 @@ pub(crate) fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
         }
     }
 
-    // Vertical
-    for x in 0..w {
-        let mut sum = tmp[x] * (r as f32 + 1.0);
+    // Vertical: process TILE columns at a time to improve cache locality.
+    // The naive column-by-column loop accesses memory at stride w (up to 16 KB
+    // per step at w=4096), thrashing L1. Tiling processes TILE adjacent columns
+    // together so each y-step reads/writes TILE consecutive floats — reducing
+    // cache-line evictions by TILE×.
+    const TILE: usize = 8;
+    let mut x = 0usize;
+    while x + TILE <= w {
+        let mut sums = [0f32; TILE];
+        for t in 0..TILE {
+            sums[t] = tmp[x + t] * (r as f32 + 1.0);
+        }
         for k in 1..=r {
-            sum += tmp[k.min(h - 1) * w + x];
+            let row = k.min(h - 1) * w;
+            for t in 0..TILE {
+                sums[t] += tmp[row + x + t];
+            }
         }
         for y in 0..h {
-            dst[y * w + x] = sum * inv;
-            let add = tmp[(y + r + 1).min(h - 1) * w + x];
-            let sub = tmp[y.saturating_sub(r) * w + x];
+            let drow = y * w;
+            for t in 0..TILE {
+                dst[drow + x + t] = sums[t] * inv;
+            }
+            let add_row = (y + r + 1).min(h - 1) * w;
+            let sub_row = y.saturating_sub(r) * w;
+            for t in 0..TILE {
+                sums[t] += tmp[add_row + x + t] - tmp[sub_row + x + t];
+            }
+        }
+        x += TILE;
+    }
+    // Scalar remainder for columns that don't fill a full tile.
+    for col in x..w {
+        let mut sum = tmp[col] * (r as f32 + 1.0);
+        for k in 1..=r {
+            sum += tmp[k.min(h - 1) * w + col];
+        }
+        for y in 0..h {
+            dst[y * w + col] = sum * inv;
+            let add = tmp[(y + r + 1).min(h - 1) * w + col];
+            let sub = tmp[y.saturating_sub(r) * w + col];
             sum += add - sub;
         }
     }

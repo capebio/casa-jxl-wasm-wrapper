@@ -172,8 +172,10 @@ fn extract_wb_from_raw(data: &[u8], off: usize, cnt: u32, le: bool) -> Option<(f
 /// Parse SOF3 marker inside a LJPEG stream. Returns (precision, height, width, ncomp).
 /// Segment lengths are bounds-checked before advancing to prevent malformed-marker traversal.
 fn parse_ljpeg_sof(data: &[u8], strip_off: usize, strip_len: usize) -> Option<(u8, u16, u16, u8)> {
-    let end = (strip_off + strip_len).min(data.len());
-    let buf = &data[strip_off..end];
+    // SEC-005: strip_off + strip_len can overflow usize on wasm32 when
+    // file-supplied values are near usize::MAX.
+    let end = strip_off.checked_add(strip_len)?.min(data.len());
+    let buf = data.get(strip_off..end)?;
     let mut i = 0;
     while i + 3 < buf.len() {
         if buf[i] != 0xFF { i += 1; continue; }
@@ -478,6 +480,42 @@ fn decode_impl(
         None
     };
     let ljpeg_ms = t_ljpeg.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+
+    // -----------------------------------------------------------------------
+    // CR2 slice reassembly (Canon multi-slice). The LJPEG decodes to a buffer where the N+1
+    // vertical slices are STACKED in stream order (slice 0's whole nw×sof_h block, then slice 1's,
+    // …); they must be reordered into a single side-by-side raster of width `decoded_width`.
+    // Without this, multi-slice CR2s (e.g. 5D-era, CR2Slices=[2,1728,1888], ncomp=4) decode to
+    // scrambled garbage. Single-slice files (have_slices=false) are already in raster order and
+    // skip this. Algorithm mirrors dcraw's lossless_jpeg slice distribution; components (ncomp) are
+    // absorbed into `stride` so they need no separate de-interleave.
+    if have_slices {
+        let n = cr2_slices[0] as usize;
+        let nw = cr2_slices[1] as usize;
+        let lw = cr2_slices[2] as usize;
+        let high = sof_h;
+        let block = nw.checked_mul(high).ok_or_else(|| anyhow!("CR2: slice block overflow"))?;
+        let mut raster = vec![0u16; stride * high];
+        for jidx in 0..(stride * high) {
+            let mut i = jidx / block; // which slice
+            let last = i >= n;
+            if last {
+                i = n;
+            }
+            let local = jidx - i * block;
+            let sw = if last { lw } else { nw };
+            if sw == 0 {
+                break;
+            }
+            let row = local / sw;
+            let col = local % sw + i * nw;
+            if row < high && col < stride {
+                raster[row * stride + col] = raw_buf[jidx];
+            }
+        }
+        raw_buf.clear();
+        raw_buf.extend_from_slice(&raster);
+    }
 
     // -----------------------------------------------------------------------
     // Black/white levels: IFD value overrides precision-table default (item 1)

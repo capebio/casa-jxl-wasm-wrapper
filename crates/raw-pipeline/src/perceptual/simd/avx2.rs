@@ -28,6 +28,11 @@ pub unsafe fn scale_err_avx2(
     kx: f32, ky: f32, kb: f32,
     rsqrt_path: bool,
 ) -> f32 {
+    // Guard n==0: dividing by n below would produce NaN, matching the scalar oracle
+    // in butteraugli.rs which also early-returns 0.0 for degenerate empty levels.
+    if n == 0 {
+        return 0.0;
+    }
     // Length precondition: every input plane must cover all n elements. The
     // loadu/scalar-tail reads index up to n-1 via raw pointer add, so a short
     // slice would read past its allocation (UB). For the in-call-graph caller
@@ -77,6 +82,9 @@ pub unsafe fn scale_err_avx2(
         // term = e2 * sqrt(e2 + eps)
         let root = if rsqrt_path {
             // sqrt(z) = z * rsqrt(z); one Newton step on rsqrt for accuracy.
+            // Note: rsqrt is computed on z = e2+eps (not e2), so the Newton refinement
+            // and the final sqrt are both consistent with z. Changing eps would need
+            // to be applied to z before the rsqrt call, not after — do not split them.
             let z = _mm256_add_ps(e2, veps);
             let y0 = _mm256_rsqrt_ps(z);
             // y1 = y0 * (1.5 - 0.5*z*y0*y0)  (one Newton step on 1/sqrt(z))
@@ -96,7 +104,8 @@ pub unsafe fn scale_err_avx2(
     }
     sum += hsum256(acc) as f64;
     sum = scale_err_tail(mask, rx, ry, rb, tx, ty, tb, n, kx, ky, kb, i, sum);
-    ((sum / n as f64).powf(1.0 / 3.0)) as f32
+    // cbrt() is faster and more accurate than powf(1.0/3.0) (two transcendentals).
+    ((sum / n as f64).cbrt()) as f32
 }
 
 /// AVX2 PSNR sum-of-squared-diffs over packed u8. Returns the integer sum (exact
@@ -110,7 +119,9 @@ pub unsafe fn scale_err_avx2(
 /// hit the flush at most once at the end, so their result is bit-identical.
 #[target_feature(enable = "avx2")]
 pub unsafe fn ssd_avx2(a: &[u8], b: &[u8]) -> u64 {
-    debug_assert_eq!(a.len(), b.len());
+    // Use assert_eq! (not debug_assert_eq!) to match ssim_moments_avx2's assert! —
+    // mismatched buffers would cause OOB SIMD reads in release builds (silent UB).
+    assert_eq!(a.len(), b.len(), "ssd_avx2: buffers must have equal length");
     let len = a.len();
     // Drain the i32 lane accumulator into u64 before any lane can wrap.
     // 130050 · 16000 = 2.0808e9 < 2³¹−1 (2.1475e9), with margin.
@@ -148,11 +159,17 @@ pub unsafe fn ssd_avx2(a: &[u8], b: &[u8]) -> u64 {
 }
 
 /// Horizontal sum of eight i32 lanes (all non-negative here) widened to u64.
+///
+/// Uses `v as u32 as u64` (unsigned widening) rather than `v as u64` (sign-extending
+/// cast) so that a future increase of FLUSH_EVERY past the i32-safe ceiling cannot
+/// silently produce huge u64 values from a wrapped-negative i32 lane.
+/// The safe FLUSH_EVERY ceiling is ⌊(2³¹−1) / (2 · 255²)⌋ ≈ 16494; current value
+/// FLUSH_EVERY=16000 keeps the worst-case lane well under i32::MAX.
 #[inline]
 unsafe fn hsum256i_u64(acc: __m256i) -> u64 {
     let mut tmp = [0i32; 8];
     _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
-    tmp.iter().map(|&v| v as u64).sum()
+    tmp.iter().map(|&v| v as u32 as u64).sum()
 }
 
 /// SSIM moment accumulation over RGBA test+ref. Produces three per-channel sums
@@ -163,7 +180,8 @@ unsafe fn hsum256i_u64(acc: __m256i) -> u64 {
 /// bench), so the scalar loop is kept here — inside the avx2 module purely so the
 /// dispatcher has one call site. Correctness == scalar oracle by construction.
 /// Carries `#[target_feature(enable = "avx2")]` only for call-site uniformity; it
-/// uses no AVX2 intrinsics.
+/// uses no AVX2 intrinsics. This is intentional: FMA is also not needed here.
+/// Do not add AVX2 intrinsics without a measured win from the flip-flop bench.
 #[target_feature(enable = "avx2")]
 pub unsafe fn ssim_moments_avx2(
     a: &[u8], b: &[u8], np: usize,
@@ -193,12 +211,12 @@ pub unsafe fn ssim_moments_avx2(
 }
 
 /// AVX2 RGBA(u8) → planar X/Y/B using i32-gather over the sqrt-linear LUT.
-/// `lut` must point to a 256-entry f32 table. Processes 8 px/iter + scalar tail.
+/// `lut` is a 256-entry static f32 table reference. Processes 8 px/iter + scalar tail.
 #[target_feature(enable = "avx2")]
 pub unsafe fn pixels_to_xyb_avx2(
     px: &[u8],
     n: usize,
-    lut: *const f32,
+    lut: &'static [f32; 256],
     x: &mut [f32],
     y: &mut [f32],
     b: &mut [f32],
@@ -212,22 +230,30 @@ pub unsafe fn pixels_to_xyb_avx2(
         "pixels_to_xyb_avx2: px.len() must be >= n*4 and x/y/b len >= n"
     );
     let half = _mm256_set1_ps(0.5);
+    // Byte-lane masks for extracting R/G/B from packed RGBA i32 lanes.
+    // Each pixel occupies one i32 lane as [R, G, B, A] in little-endian order.
+    // After loading 8 RGBA pixels into one __m256i via cvtepu8→widen+deinterleave,
+    // we use AND masks to isolate each channel byte in the i32 lane, then shift
+    // to build the gather index (0..255).
+    let mask_r = _mm256_set1_epi32(0x0000_00FF); // byte 0 of each i32 lane
+    let mask_g = _mm256_set1_epi32(0x0000_FF00); // byte 1 of each i32 lane
+    let mask_b = _mm256_set1_epi32(0x00FF_0000); // byte 2 of each i32 lane
     let lanes = n / 8 * 8;
     let mut i = 0;
     while i < lanes {
-        // Gather the 8 R/G/B bytes (stride 4) for px[i..i+8] into i32 index vectors.
-        let mut ri = [0i32; 8];
-        let mut gi = [0i32; 8];
-        let mut bi = [0i32; 8];
-        for l in 0..8 {
-            let base = (i + l) * 4;
-            ri[l] = *px.get_unchecked(base) as i32;
-            gi[l] = *px.get_unchecked(base + 1) as i32;
-            bi[l] = *px.get_unchecked(base + 2) as i32;
-        }
-        let r = _mm256_i32gather_ps(lut, _mm256_loadu_si256(ri.as_ptr() as *const __m256i), 4);
-        let g = _mm256_i32gather_ps(lut, _mm256_loadu_si256(gi.as_ptr() as *const __m256i), 4);
-        let bb = _mm256_i32gather_ps(lut, _mm256_loadu_si256(bi.as_ptr() as *const __m256i), 4);
+        // Load 8 RGBA pixels (32 bytes) as one __m256i: each i32 lane = [R,G,B,A].
+        // A single 256-bit load replaces 24 scalar byte reads (8 pixels × 3 channels).
+        let pv = _mm256_loadu_si256(px.as_ptr().add(i * 4) as *const __m256i);
+        // Extract R indices: byte 0 of each i32 lane (already in bits [7:0], no shift needed).
+        let ri = _mm256_and_si256(pv, mask_r);
+        // Extract G indices: byte 1 → shift right 8 to bring into bits [7:0].
+        let gi = _mm256_srli_epi32::<8>(_mm256_and_si256(pv, mask_g));
+        // Extract B indices: byte 2 → shift right 16 to bring into bits [7:0].
+        let bi = _mm256_srli_epi32::<16>(_mm256_and_si256(pv, mask_b));
+        let lp = lut.as_ptr();
+        let r = _mm256_i32gather_ps(lp, ri, 4);
+        let g = _mm256_i32gather_ps(lp, gi, 4);
+        let bb = _mm256_i32gather_ps(lp, bi, 4);
         // X=(r-b)*0.5 ; Y=(r+b)*0.5+g ; B=b
         _mm256_storeu_ps(x.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_sub_ps(r, bb), half));
         _mm256_storeu_ps(
@@ -237,8 +263,8 @@ pub unsafe fn pixels_to_xyb_avx2(
         _mm256_storeu_ps(b.as_mut_ptr().add(i), bb);
         i += 8;
     }
-    let lut_s: &[f32; 256] = &*(lut as *const [f32; 256]);
-    xyb_tail(px, lut_s, n, i, x, y, b);
+    // lut is already &'static [f32; 256] — no unsafe cast needed.
+    xyb_tail(px, lut, n, i, x, y, b);
 }
 
 /// AVX2 2× box downsample of a single plane (w×h) into `dst` (dw×dh).

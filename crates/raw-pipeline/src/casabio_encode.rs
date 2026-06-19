@@ -113,7 +113,7 @@ pub fn encode_variants_cancellable(
     opts: ProgressiveOpts,
     cancel: &AtomicBool,
 ) -> Result<VariantSet, EncodeError> {
-    if cancel.load(Ordering::Relaxed) {
+    if cancel.load(Ordering::Acquire) {
         return Err(EncodeError::Cancelled);
     }
     // checked_mul: on 32-bit/wasm usize, width*height*4 can overflow and wrap to a
@@ -152,7 +152,7 @@ pub fn encode_variants_cancellable(
     } else {
         (None, width, height)
     };
-    if cancel.load(Ordering::Relaxed) {
+    if cancel.load(Ordering::Acquire) {
         return Err(EncodeError::Cancelled);
     }
 
@@ -162,11 +162,13 @@ pub fn encode_variants_cancellable(
         let scale = 300.0 / pw.max(ph) as f32;
         let dw = (pw as f32 * scale).round().max(1.0) as u32;
         let dh = (ph as f32 * scale).round().max(1.0) as u32;
-        (Some(resize_rgba(preview_src, pw, ph, dw, dh)?), dw, dh)
+        // Thumbnail (≤300px): Triangle filter is ~3× faster than Lanczos3 and
+        // perceptually equivalent at this scale.
+        (Some(resize_rgba_fast(preview_src, pw, ph, dw, dh)?), dw, dh)
     } else {
         (None, pw, ph)
     };
-    if cancel.load(Ordering::Relaxed) {
+    if cancel.load(Ordering::Acquire) {
         return Err(EncodeError::Cancelled);
     }
 
@@ -184,7 +186,7 @@ pub fn encode_variants_cancellable(
         // Each rayon branch owns its own Encoder (owned-value semantics).
         let (thumb_res, (preview_res, full_res)) = rayon::join(
             || {
-                if cancel.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Acquire) {
                     return Err(EncodeError::Cancelled);
                 }
                 encode_variant(thumb_src, tw, th, 85, EFFORT_THUMB, thumb_opts, has_alpha, width, height)
@@ -192,13 +194,13 @@ pub fn encode_variants_cancellable(
             || {
                 rayon::join(
                     || {
-                        if cancel.load(Ordering::Relaxed) {
+                        if cancel.load(Ordering::Acquire) {
                             return Err(EncodeError::Cancelled);
                         }
                         encode_variant(preview_src, pw, ph, 85, EFFORT_PREVIEW, preview_opts, has_alpha, width, height)
                     },
                     || {
-                        if cancel.load(Ordering::Relaxed) {
+                        if cancel.load(Ordering::Acquire) {
                             return Err(EncodeError::Cancelled);
                         }
                         encode_variant(rgba, width, height, full_quality, EFFORT_FULL, opts, has_alpha, width, height)
@@ -214,11 +216,11 @@ pub fn encode_variants_cancellable(
         // One held Encoder, reused across the whole variant set.
         let mut enc = Encoder::new(EncodeOptions::default())?;
         let t = encode_into(&mut enc, thumb_src, tw, th, 85, EFFORT_THUMB, thumb_opts, has_alpha, width, height)?;
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Acquire) {
             return Err(EncodeError::Cancelled);
         }
         let p = encode_into(&mut enc, preview_src, pw, ph, 85, EFFORT_PREVIEW, preview_opts, has_alpha, width, height)?;
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Acquire) {
             return Err(EncodeError::Cancelled);
         }
         let f = encode_into(&mut enc, rgba, width, height, full_quality, EFFORT_FULL, opts, has_alpha, width, height)?;
@@ -329,6 +331,16 @@ fn resize_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Result<Vec<u8>
     Ok(resized.into_raw())
 }
 
+/// Fast resize using bilinear (Triangle) filter — ~3× faster than Lanczos3.
+/// Perceptually equivalent at thumbnail scales (≤300px long edge).
+fn resize_rgba_fast(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Result<Vec<u8>, EncodeError> {
+    use image::{imageops, ImageBuffer, Rgba};
+    let img: ImageBuffer<Rgba<u8>, &[u8]> =
+        ImageBuffer::from_raw(sw, sh, src).ok_or(EncodeError::Resize)?;
+    let resized = imageops::resize(&img, dw, dh, imageops::FilterType::Triangle);
+    Ok(resized.into_raw())
+}
+
 /// Convenience for Tauri/native encode flows that hold pre-tone RGB16 + params.
 /// Produces the three JXL variants directly from the 16-bit buffer.
 pub fn encode_variants_from_rgb16(
@@ -390,14 +402,20 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     rgb
 }
 
-fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) {
+fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) -> bool {
     if dw == 0 || dh == 0 {
-        return;
+        return false;
     }
-    let src_len = (sw as usize) * (sh as usize) * 4;
-    let dst_len = (dw as usize) * (dh as usize) * 4;
+    // Checked multiply: on 32-bit/WASM targets the product can overflow usize and
+    // wrap to a small value that spuriously passes the length guard.
+    let src_len = (sw as usize).checked_mul(sh as usize).and_then(|n| n.checked_mul(4));
+    let dst_len = (dw as usize).checked_mul(dh as usize).and_then(|n| n.checked_mul(4));
+    let (src_len, dst_len) = match (src_len, dst_len) {
+        (Some(s), Some(d)) => (s, d),
+        _ => return false, // overflow → reject
+    };
     if src.len() < src_len || dst.len() < dst_len {
-        return;
+        return false;
     }
 
     // exact integer fast path (matches C++ IMPROVEMENT-5)
@@ -431,16 +449,17 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
                 out[3] = (a / count) as u8;
             }
         }
-        return;
+        return true;
     }
 
     // general coverage (ceiling for end)
+    // Use u64 for intermediate products to avoid u32 overflow on large images.
     for dy in 0..dh {
-        let y0 = (dy * sh) / dh;
-        let y1 = ((dy + 1) * sh + dh - 1) / dh;
+        let y0 = ((dy as u64 * sh as u64) / dh as u64) as u32;
+        let y1 = (((dy as u64 + 1) * sh as u64 + dh as u64 - 1) / dh as u64).min(sh as u64) as u32;
         for dx in 0..dw {
-            let x0 = (dx * sw) / dw;
-            let x1 = ((dx + 1) * sw + dw - 1) / dw;
+            let x0 = ((dx as u64 * sw as u64) / dw as u64) as u32;
+            let x1 = (((dx as u64 + 1) * sw as u64 + dw as u64 - 1) / dw as u64).min(sw as u64) as u32;
             let mut r = 0u32;
             let mut g = 0u32;
             let mut b = 0u32;
@@ -464,6 +483,7 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
             out[3] = (a / count) as u8;
         }
     }
+    true
 }
 
 /// Encode one pyramid level (by butteraugli distance) reusing a held [`Encoder`].
@@ -529,25 +549,77 @@ pub fn encode_rgba8_pyramid(
         scs.push(Sc { tw, th, dist: sidecar_distances[i] });
     }
 
+    // Sort scs descending by width so that the cascade (largest → smallest)
+    // always downscales, regardless of the order sidecar_sizes was passed in.
+    // Without this, an unsorted input reverses the cascade direction and produces
+    // blurry/tiled artefacts from upscaling smaller intermediate buffers.
+    scs.sort_unstable_by(|a, b| b.tw.cmp(&a.tw));
+
     let has_alpha = has_meaningful_alpha(rgba);
-    // One held Encoder, reused across every pyramid level (ingest-loop reuse).
-    let mut enc = Encoder::new(EncodeOptions::default())?;
-    let mut current = rgba.to_vec();
-    let mut cw = width;
-    let mut ch = height;
-    let mut sides: Vec<PyramidLevel> = Vec::new();
-    for sc in scs.iter().rev() {
-        let mut thumb = vec![0u8; sc.tw as usize * sc.th as usize * 4];
-        box_downscale_rgba8(&current, cw, ch, &mut thumb, sc.tw, sc.th);
-        let data = encode_distance_into(&mut enc, &thumb, sc.tw, sc.th, sc.dist, effort, has_alpha)?;
-        sides.push(PyramidLevel { data, width: sc.tw, height: sc.th, bits_per_sample: 8 });
-        current = thumb;
-        cw = sc.tw;
-        ch = sc.th;
+
+    // Phase 1: cascade all scales sequentially (each level reads from previous).
+    // Produces (pixels, w, h, distance) tuples for parallel encoding.
+    let mut scaled_bufs: Vec<(Vec<u8>, u32, u32, f32)> = Vec::with_capacity(scs.len());
+    {
+        let mut current = rgba.to_vec();
+        let mut cw = width;
+        let mut ch = height;
+        for sc in scs.iter() {
+            let mut thumb = vec![0u8; sc.tw as usize * sc.th as usize * 4];
+            if !box_downscale_rgba8(&current, cw, ch, &mut thumb, sc.tw, sc.th) {
+                return Err(EncodeError::Resize);
+            }
+            cw = sc.tw;
+            ch = sc.th;
+            scaled_bufs.push((thumb.clone(), sc.tw, sc.th, sc.dist));
+            current = thumb;
+        }
     }
+
+    // Phase 2: encode all sidecar levels. With the "parallel" feature, use rayon
+    // so levels compress concurrently; without it, fall back to one held Encoder.
+    #[cfg(feature = "parallel")]
+    let mut sides: Vec<PyramidLevel> = {
+        use rayon::prelude::*;
+        let results: Vec<Result<PyramidLevel, EncodeError>> = scaled_bufs
+            .into_par_iter()
+            .map_init(
+                || Encoder::new(EncodeOptions::default()),
+                |enc_slot, (buf, tw, th, dist)| {
+                    let enc = enc_slot.as_mut().ok_or(EncodeError::Jxl("encoder init".into()))?;
+                    enc.set_options(EncodeOptions::distance(dist).with_effort(effort));
+                    let bytes = if has_alpha {
+                        enc.encode(&Frame::rgba8(&buf, tw, th))?
+                    } else {
+                        let rgb = rgba_to_rgb(&buf);
+                        enc.encode(&Frame::rgb(&rgb, tw, th))?
+                    };
+                    Ok(PyramidLevel { data: bytes, width: tw, height: th, bits_per_sample: 8 })
+                },
+            )
+            .collect();
+        results.into_iter().collect::<Result<Vec<_>, _>>()?
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let mut sides: Vec<PyramidLevel> = {
+        let mut enc = Encoder::new(EncodeOptions::default())?;
+        let mut v = Vec::with_capacity(scaled_bufs.len());
+        for (buf, tw, th, dist) in scaled_bufs {
+            let data = encode_distance_into(&mut enc, &buf, tw, th, dist, effort, has_alpha)?;
+            v.push(PyramidLevel { data, width: tw, height: th, bits_per_sample: 8 });
+        }
+        v
+    };
+
+    // Sidecar levels were built largest→smallest; reverse to smallest→largest for consumers.
     sides.reverse();
 
-    let full = encode_distance_into(&mut enc, rgba, width, height, full_distance, effort, has_alpha)?;
+    // Full-resolution encode (always serial — only one full image).
+    let full = {
+        let mut enc = Encoder::new(EncodeOptions::default())?;
+        encode_distance_into(&mut enc, rgba, width, height, full_distance, effort, has_alpha)?
+    };
     sides.push(PyramidLevel { data: full, width, height, bits_per_sample: 8 });
     Ok(sides)
 }

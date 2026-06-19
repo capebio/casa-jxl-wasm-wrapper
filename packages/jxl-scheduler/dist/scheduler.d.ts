@@ -58,6 +58,7 @@ export declare class Scheduler {
     private readonly maxParkedSessions;
     private destroyed;
     private drainingQueue;
+    private drainRetryCount;
     private preemptionCount;
     private totalSessionCount;
     private _runningCount;

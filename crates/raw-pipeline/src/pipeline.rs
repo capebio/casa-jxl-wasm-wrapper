@@ -26,8 +26,8 @@ pub const MAX_PIXEL_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Validate width×height×channels fits the memory budget.
 pub fn validate_pixel_dims(width: usize, height: usize, channels: usize) -> Result<(), String> {
-    if width == 0 || height == 0 {
-        return Err(format!("pixel dimensions must be positive, got {width}×{height}"));
+    if width == 0 || height == 0 || channels == 0 {
+        return Err(format!("pixel dimensions must be positive, got {width}×{height}×{channels}"));
     }
     let bytes = width
         .checked_mul(height)
@@ -190,6 +190,9 @@ fn srgb_encode_lerp(y: f32) -> f32 {
 
 #[inline]
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    if (b - a).abs() < f32::EPSILON {
+        return if x >= b { 1.0 } else { 0.0 };
+    }
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -378,11 +381,19 @@ fn hybrid_spring_and_dimishing_fc(lr: f32, lg: f32, lb: f32, luma_l: f32) -> (f3
 /// Currently a stub that documents the structure; real population + sample can replace
 /// the runtime calc in the !c-perceptual pc branch of apply_tone_math.
 /// (Agent can expand without touching other files.)
+///
+/// PIPE-008: data is stored as three separate planar arrays (data_r, data_g, data_b),
+/// each of length SZ^3, so the 8 corner values needed for trilinear interpolation on one
+/// channel are contiguous in their plane.  The interleaved layout (old: data[idx*3+ch])
+/// scattered the 8 corners across up to 24 cache lines; the planar layout keeps each
+/// channel's 8-corner reads within at most 2 cache lines of a 17^3×4 = 4.7 KB plane.
 struct PerceptualGrid {
-    // Coarse 3D LUT for the advanced (Lens17 / layer2) to replace ln/exp/sqrt/mol/hybrid/from at runtime.
-    // Built for fixed base_scale ~1.0 / vib_zero case (common in constancy mode); for varying vib use runtime fallback.
-    // Size 9^3 keeps build cheap (~700 evals) and memory tiny. Trilinear interp ~10-15 muls vs transcendentals.
-    data: Vec<f32>, // r g b interleaved, size*size*size * 3
+    // PIPE-008: planar layout — one Vec per output channel; index = ri*SZ*SZ + gi*SZ + bi.
+    // Total memory same as before (SZ^3 * 3 * 4 bytes), but trilinear reads are now
+    // channel-sequential rather than stride-3 interleaved across all 8 corners.
+    data_r: Vec<f32>,
+    data_g: Vec<f32>,
+    data_b: Vec<f32>,
     size: usize,
 }
 
@@ -391,7 +402,9 @@ impl PerceptualGrid {
         const SZ: usize = 17; // Phase 2 of WASM/native strategy: production quality (vs 9). ~4913 evals, still cheap on init.
                               // Pure Rust path (this grid + vec4) is the default for WASM and when c-perceptual feature is off.
                               // C++ AVX2 bulk (via tile in !par loops) is optional native turbo when feature + pc flag.
-        let mut data = vec![0f32; SZ * SZ * SZ * 3];
+        let mut data_r = vec![0f32; SZ * SZ * SZ];
+        let mut data_g = vec![0f32; SZ * SZ * SZ];
+        let mut data_b = vec![0f32; SZ * SZ * SZ];
         let scale = 1.0f32; // fixed for grid; vib_zero path (mode common case). Varying sat/vib falls back or rebuilds.
         for ri in 0..SZ {
             let r = (ri as f32 / (SZ - 1) as f32) * 1.5;
@@ -405,14 +418,14 @@ impl PerceptualGrid {
                     let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, scale);
                     let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
                     let (rr, gg, bb) = from_log_euclidean(lr3, lg3, lb3);
-                    let idx = (ri * SZ * SZ + gi * SZ + bi) * 3;
-                    data[idx] = rr.clamp(0.0, 1.5);
-                    data[idx + 1] = gg.clamp(0.0, 1.5);
-                    data[idx + 2] = bb.clamp(0.0, 1.5);
+                    let idx = ri * SZ * SZ + gi * SZ + bi;
+                    data_r[idx] = rr.clamp(0.0, 1.5);
+                    data_g[idx] = gg.clamp(0.0, 1.5);
+                    data_b[idx] = bb.clamp(0.0, 1.5);
                 }
             }
         }
-        Self { data, size: SZ }
+        Self { data_r, data_g, data_b, size: SZ }
     }
 
     #[inline(always)]
@@ -431,16 +444,17 @@ impl PerceptualGrid {
         let r1 = (ri + 1).min(self.size - 1);
         let g1 = (gi + 1).min(self.size - 1);
         let b1 = (bi + 1).min(self.size - 1);
-        // 8 corner samples (interleaved)
-        let idx000 = (ri * self.size * self.size + gi * self.size + bi) * 3;
-        let idx001 = (ri * self.size * self.size + gi * self.size + b1) * 3;
-        let idx010 = (ri * self.size * self.size + g1 * self.size + bi) * 3;
-        let idx011 = (ri * self.size * self.size + g1 * self.size + b1) * 3;
-        let idx100 = (r1 * self.size * self.size + gi * self.size + bi) * 3;
-        let idx101 = (r1 * self.size * self.size + gi * self.size + b1) * 3;
-        let idx110 = (r1 * self.size * self.size + g1 * self.size + bi) * 3;
-        let idx111 = (r1 * self.size * self.size + g1 * self.size + b1) * 3;
-        // lerp r then g then b for each channel (0=r,1=g,2=b)
+        // PIPE-008: planar corner indices — each channel's 8 reads are in its own contiguous plane.
+        // Each plane is SZ^3 * 4 = 4.7 KB (SZ=17); 8 corners fit in ≤2 cache lines per channel.
+        let idx000 = ri * self.size * self.size + gi * self.size + bi;
+        let idx001 = ri * self.size * self.size + gi * self.size + b1;
+        let idx010 = ri * self.size * self.size + g1 * self.size + bi;
+        let idx011 = ri * self.size * self.size + g1 * self.size + b1;
+        let idx100 = r1 * self.size * self.size + gi * self.size + bi;
+        let idx101 = r1 * self.size * self.size + gi * self.size + b1;
+        let idx110 = r1 * self.size * self.size + g1 * self.size + bi;
+        let idx111 = r1 * self.size * self.size + g1 * self.size + b1;
+        // lerp r then g then b for each channel
         let lerp = |c000: f32, c001: f32, c010: f32, c011: f32, c100: f32, c101: f32, c110: f32, c111: f32| {
             let c00 = c000 * (1.0 - bfr) + c001 * bfr;
             let c01 = c010 * (1.0 - bfr) + c011 * bfr;
@@ -450,12 +464,12 @@ impl PerceptualGrid {
             let c1 = c10 * (1.0 - gfr) + c11 * gfr;
             c0 * (1.0 - rfr) + c1 * rfr
         };
-        let dr = lerp(self.data[idx000], self.data[idx001], self.data[idx010], self.data[idx011],
-                      self.data[idx100], self.data[idx101], self.data[idx110], self.data[idx111]);
-        let dg = lerp(self.data[idx000+1], self.data[idx001+1], self.data[idx010+1], self.data[idx011+1],
-                      self.data[idx100+1], self.data[idx101+1], self.data[idx110+1], self.data[idx111+1]);
-        let db = lerp(self.data[idx000+2], self.data[idx001+2], self.data[idx010+2], self.data[idx011+2],
-                      self.data[idx100+2], self.data[idx101+2], self.data[idx110+2], self.data[idx111+2]);
+        let dr = lerp(self.data_r[idx000], self.data_r[idx001], self.data_r[idx010], self.data_r[idx011],
+                      self.data_r[idx100], self.data_r[idx101], self.data_r[idx110], self.data_r[idx111]);
+        let dg = lerp(self.data_g[idx000], self.data_g[idx001], self.data_g[idx010], self.data_g[idx011],
+                      self.data_g[idx100], self.data_g[idx101], self.data_g[idx110], self.data_g[idx111]);
+        let db = lerp(self.data_b[idx000], self.data_b[idx001], self.data_b[idx010], self.data_b[idx011],
+                      self.data_b[idx100], self.data_b[idx101], self.data_b[idx110], self.data_b[idx111]);
         (dr, dg, db)
     }
 }
@@ -480,8 +494,13 @@ fn build_pre_lut(black: u16, white: u16, wb_eff: f32, exp_gain: f32) -> Vec<u16>
     lut
 }
 
+/// Build a power-of-two pre-LUT of size `lut_len` (≤ 65536).
+/// **Access pattern**: index via `raw_value & (lut_len - 1)` (bitwise mask).
+/// This covers the common case where `white < lut_len` so all valid raw values index directly.
+/// For the strided (compact 4096-entry) variant accessed via `raw_value >> COMPACT_LUT_SHIFT`, use
+/// `build_pre_lut_strided` instead. Do not mix the two access patterns.
 fn build_pre_lut_compact(black: u16, white: u16, wb_eff: f32, exp_gain: f32, lut_len: usize) -> Vec<u16> {
-    debug_assert!(lut_len.is_power_of_two() && lut_len <= 65536);
+    assert!(lut_len.is_power_of_two() && lut_len <= 65536, "build_pre_lut_compact: lut_len must be a power of two ≤ 65536, got {lut_len}");
     let mut lut = vec![0u16; lut_len];
     let denom = (white.saturating_sub(black)).max(1) as f32;
     let gain = wb_eff * exp_gain;
@@ -535,6 +554,10 @@ struct LutCache {
     compact_lut: bool,
 }
 
+// All fields are either plain integers, bool, or Arc<Vec<_>> which are Send.
+// This compile-time assertion catches future non-Send field additions.
+fn _assert_lut_cache_send() where LutCache: Send {}
+
 impl LutCache {
     /// Pre-LUT validity: depends ONLY on the linearisation params (black/white/WB/exposure/compact).
     /// A tone-only slider drag (contrast/shadows/highlights/whites/blacks) leaves these intact, so
@@ -562,8 +585,11 @@ impl LutCache {
 thread_local! {
     static LUT_CACHE: std::cell::RefCell<Option<LutCache>> =
         const { std::cell::RefCell::new(None) };
-    static BLUR_SCRATCH: std::cell::RefCell<(Vec<u16>, Vec<u16>)> =
-        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    // PIPE-003: third slot is the clarity/texture snapshot buffer; reused across calls to
+    // avoid a full-frame Vec allocation (~144 MB at 24 MP) when both texture and clarity
+    // are active simultaneously.
+    static BLUR_SCRATCH: std::cell::RefCell<(Vec<u16>, Vec<u16>, Vec<u16>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
     static BLUR_ROW_F32: std::cell::RefCell<Vec<f32>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static PERCEPTUAL_GRID: std::cell::RefCell<Option<PerceptualGrid>> =
@@ -571,6 +597,9 @@ thread_local! {
 }
 
 fn build_post_lut(t: &TonePost) -> Vec<u8> {
+    // MEASURED (2026-06-19): this rebuild is only ~2% of a slider-drag frame (item-0). The handoff's
+    // "powf→polynomial" idea is therefore negligible — and the unconditional sRGB EOTF powf is
+    // already replaced by a cached lerp (`srgb_encode_lerp`). Do not micro-optimize the build.
     let mut lut = vec![0u8; 65536];
     // Hoist for mul_add + clamp.
     let fill = |i: usize, o: &mut u8| {
@@ -612,7 +641,10 @@ fn build_pre_luts(
             COMPACT_LUT_SHIFT,
         )
     } else {
-        let lut_len = (params.white as usize + 1).next_power_of_two().min(65536);
+        // Use a full 65536-entry LUT so the mask `& (lut_len - 1)` never wraps raw values
+        // that exceed white (e.g. hot pixels or unclamped sensor values). With lut_len == 65536
+        // the mask `0xFFFF` is an identity for all u16 inputs.
+        let lut_len = 65536usize;
         (
             std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_r, ti.exp_gain, lut_len)),
             std::sync::Arc::new(build_pre_lut_compact(params.black, params.white, ti.wb_g, ti.exp_gain, lut_len)),
@@ -625,9 +657,10 @@ fn build_pre_luts(
 
 /// Item-0 instrumentation: time one full LUT (re)build — the cost paid on every slider drag when
 /// tone/WB/exposure change (an `ensure_lut` miss rebuilds all tables). Returns `(pre3_ms, post_ms)`:
-/// `pre3` = three pre-LUTs (`build_pre_lut` ×3, WB/exposure/black-white), `post` = the 65536-entry
+/// `pre3` = three pre-LUTs (65536-entry WB/exposure/black-white), `post` = the 65536-entry
 /// tone post-LUT (`tone_curve`, powf-heavy). Build parallelism follows the crate feature, so call
 /// it under `--no-default-features` to see the serial cost the wasm interactive path actually pays.
+/// Note: uses `build_pre_lut` (65536-entry) which matches the non-compact production path.
 pub fn bench_lut_build_ms(params: &PipelineParams) -> (f64, f64) {
     let ti = derive_tone_inputs(params);
     let t = std::time::Instant::now();
@@ -883,8 +916,19 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
 pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                             params: &PipelineParams) {
     if params.texture == 0.0 && params.clarity == 0.0 { return; }
+    // PIPE-003: When both texture and clarity are active, each must operate on the original
+    // (pre-unsharp) image.  Previously this called rgb16.to_vec() here (full-frame allocation,
+    // ~144 MB at 24 MP on every slider tick).  Instead we reuse the third BLUR_SCRATCH slot
+    // so the allocation is amortised after the first call.
     BLUR_SCRATCH.with(|scratch| {
-        let (ref mut temp, ref mut blurred) = *scratch.borrow_mut();
+        let (ref mut temp, ref mut blurred, ref mut snap_buf) = *scratch.borrow_mut();
+        let need_snap = params.texture != 0.0 && params.clarity != 0.0;
+        if need_snap {
+            snap_buf.resize(rgb16.len(), 0u16);
+            snap_buf.copy_from_slice(rgb16);
+        }
+        // `pre_snap` is Some only when both sliders are active.
+        let has_snap = need_snap;
         if params.texture != 0.0 {
             separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_5(), temp, blurred);
             #[cfg(feature = "parallel")]
@@ -908,30 +952,66 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
             }
         }
         if params.clarity != 0.0 {
-            separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_13(), temp, blurred);
-            #[cfg(feature = "parallel")]
-            rgb16.par_chunks_mut(width * 3).zip(blurred.par_chunks(width * 3)).for_each(|(r_row, b_row)| {
-                for i in 0..r_row.len() {
-                    let orig = r_row[i] as i32;
-                    let blur = b_row[i] as i32;
-                    let v = orig as f32 / 65535.0;
-                    let w = 4.0 * v * (1.0 - v);
-                    r_row[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
-                        .clamp(0, 65535) as u16;
+            // Clarity blurs the original image (not the texture-sharpened output).
+            // When has_snap (both passes active), blur the snapshot in snap_buf; else blur rgb16 as usual.
+            if has_snap {
+                separable_blur_with_bufs(snap_buf, width, height, &gaussian_kernel_13(), temp, blurred);
+                // Apply clarity: orig from snap_buf, delta from snap blur, added to texture-sharpened rgb16.
+                #[cfg(feature = "parallel")]
+                rgb16.par_chunks_mut(width * 3)
+                    .zip(snap_buf.par_chunks(width * 3))
+                    .zip(blurred.par_chunks(width * 3))
+                    .for_each(|((r_row, o_row), b_row)| {
+                    for i in 0..r_row.len() {
+                        let orig = o_row[i] as i32;
+                        let blur = b_row[i] as i32;
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
+                        r_row[i] = (r_row[i] as i32 + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                            .clamp(0, 65535) as u16;
+                    }
+                });
+                #[cfg(not(feature = "parallel"))]
+                {
+                    let n = rgb16.len();
+                    let mut i = 0;
+                    while i < n {
+                        let orig = snap_buf[i] as i32;
+                        let blur = blurred[i] as i32;
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
+                        rgb16[i] = (rgb16[i] as i32 + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                            .clamp(0, 65535) as u16;
+                        i += 1;
+                    }
                 }
-            });
-            #[cfg(not(feature = "parallel"))]
-            {
-                let n = rgb16.len();
-                let mut i = 0;
-                while i < n {
-                    let orig = rgb16[i] as i32;
-                    let blur = blurred[i] as i32;
-                    let v = orig as f32 / 65535.0;
-                    let w = 4.0 * v * (1.0 - v);
-                    rgb16[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
-                        .clamp(0, 65535) as u16;
-                    i += 1;
+            } else {
+                // Only clarity is active (no texture pass ran): blur rgb16 directly as before.
+                separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_13(), temp, blurred);
+                #[cfg(feature = "parallel")]
+                rgb16.par_chunks_mut(width * 3).zip(blurred.par_chunks(width * 3)).for_each(|(r_row, b_row)| {
+                    for i in 0..r_row.len() {
+                        let orig = r_row[i] as i32;
+                        let blur = b_row[i] as i32;
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
+                        r_row[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                            .clamp(0, 65535) as u16;
+                    }
+                });
+                #[cfg(not(feature = "parallel"))]
+                {
+                    let n = rgb16.len();
+                    let mut i = 0;
+                    while i < n {
+                        let orig = rgb16[i] as i32;
+                        let blur = blurred[i] as i32;
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
+                        rgb16[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                            .clamp(0, 65535) as u16;
+                        i += 1;
+                    }
                 }
             }
         }
@@ -1003,15 +1083,14 @@ pub fn perceptual_apply_bulk(
     vib_zero: bool,
 ) {
     let n = r.len();
-    debug_assert_eq!(g.len(), n);
-    debug_assert_eq!(b.len(), n);
-    debug_assert_eq!(out_r.len(), n);
-    debug_assert_eq!(out_g.len(), n);
-    debug_assert_eq!(out_b.len(), n);
+    assert_eq!(g.len(), n, "perceptual_apply_bulk: all slices must be the same length");
+    assert_eq!(b.len(), n, "perceptual_apply_bulk: all slices must be the same length");
+    assert_eq!(out_r.len(), n, "perceptual_apply_bulk: all slices must be the same length");
+    assert_eq!(out_g.len(), n, "perceptual_apply_bulk: all slices must be the same length");
+    assert_eq!(out_b.len(), n, "perceptual_apply_bulk: all slices must be the same length");
     if n == 0 {
         return;
     }
-    let start = std::time::Instant::now();
     unsafe {
         perceptual_apply_full_avx2(
             r.as_ptr(),
@@ -1026,9 +1105,6 @@ pub fn perceptual_apply_bulk(
             if vib_zero { 1 } else { 0 },
         );
     }
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-    // Hook for benchmarking the SoA bulk (C++ AVX2 or scalar) vs old per-pixel path.
-    eprintln!("perceptual_bulk_ms: {:.3}", elapsed_ms);
 }
 
 #[inline(always)]
@@ -1066,19 +1142,25 @@ pub fn apply_tone_math(
         }
         #[cfg(not(feature = "c-perceptual"))]
         {
-            // Rust reference now accelerated by PerceptualGrid (coarse 9^3 + trilinear) for the Lens17 advanced.
-            // Grid built for fixed scale~1 / vibz (matches common constancy mode). For varying sat/vib use full runtime (or rebuild grid).
-            // Big win: replaces per-px ln/exp/sqrt/abs with ~12 muls + loads (sub-ms target when on for AR/LLM).
-            let (rr, gg, bb) = PERCEPTUAL_GRID.with(|g| {
-                let mut opt = g.borrow_mut();
-                if opt.is_none() {
-                    *opt = Some(PerceptualGrid::new());
+            // Rust reference now accelerated by PerceptualGrid (coarse 17^3 + trilinear) for the Lens17 advanced.
+            // Grid built for fixed scale~1 / vibz in normalized [0, 1.5] space.
+            // Inputs (r2/g2/b2) are post-matrix values in [0, 65535]; normalize to [0, 1.5] before sampling.
+            // norm = 1.5/65535 maps [0, 65535] → [0, 1.5] to match the grid's build domain.
+            let norm = 1.5 / 65535.0;
+            // Ensure the grid is initialised (borrow_mut only on first call per thread).
+            PERCEPTUAL_GRID.with(|g| {
+                if g.borrow().is_none() {
+                    *g.borrow_mut() = Some(PerceptualGrid::new());
                 }
-                opt.as_ref().unwrap().sample(r2, g2, b2)
             });
-            r2 = rr;
-            g2 = gg;
-            b2 = bb;
+            // Read-only borrow for the hot pixel loop — avoids borrow_mut on every pixel.
+            let (rr, gg, bb) = PERCEPTUAL_GRID.with(|g| {
+                g.borrow().as_ref().unwrap().sample(r2 * norm, g2 * norm, b2 * norm)
+            });
+            // Grid output is in [0, 1.5]; scale back to [0, 65535] for the post-LUT.
+            r2 = rr * 65535.0;
+            g2 = gg * 65535.0;
+            b2 = bb * 65535.0;
         }
     } else {
         // 2) Saturation + vibrance around luma (hoisted coeffs, restructured div once, mul_add).
@@ -1122,10 +1204,13 @@ pub fn apply_perceptual_constancy(r: f32, g: f32, b: f32, sat: f32, vib: f32, vi
     };
     let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, base_scale);
     let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
-    // milk more: layer aware (early low layer less aggressive for progressive)
+    let (rr, gg, bb) = from_log_euclidean(lr3, lg3, lb3);
+    // Layer-aware blend: attenuate toward the linear input in linear space, not log space.
+    // Scaling log components before exp() would change the exponent (non-linear), not the
+    // perceptual "strength" of the adjustment.  Lerp in linear output instead.
     let layer_scale = 1.0 - (layer as f32 * 0.1).min(0.5);
-    let (rr, gg, bb) = from_log_euclidean(lr3 * layer_scale, lg3 * layer_scale, lb3 * layer_scale);
-    (rr.clamp(0.0, 1.5), gg.clamp(0.0, 1.5), bb.clamp(0.0, 1.5))
+    let blend = |out: f32, inp: f32| inp + (out - inp) * layer_scale;
+    (blend(rr, r).clamp(0.0, 1.5), blend(gg, g).clamp(0.0, 1.5), blend(bb, b).clamp(0.0, 1.5))
 }
 
 /// Fused-matrix fast path: `m` is already `S·M` (around-luma saturation pre-multiplied into the
@@ -1214,7 +1299,9 @@ fn apply_tone_math4(
 struct ToneInputs { pub exp_gain: f32, pub wb_r: f32, pub wb_g: f32, pub wb_b: f32, pub tone: TonePost, pub sat: f32, pub vib: f32, pub vib_zero: bool, pub perceptual_constancy: bool,
     /// When the default path applies (`vib_zero && !perceptual_constancy`), the colour matrix
     /// and around-luma saturation are pre-fused into ONE 3×3 (`S·M`) so per-pixel tone is a
-    /// single matvec — no luma, no blend. `None` ⇒ vibrance active or perceptual constancy on.
+    /// single matvec — no luma, no blend.
+    /// Invariant: `matrix_fused == Some(_) ⟺ vib_zero && !perceptual_constancy`.
+    /// `None` ⇒ vibrance active OR perceptual constancy enabled (both require runtime luma).
     pub matrix_fused: Option<[[f32; 3]; 3]> }
 
 fn derive_tone_inputs(params: &PipelineParams) -> ToneInputs {
@@ -1306,20 +1393,27 @@ fn ensure_lut(cache: &mut Option<LutCache>, params: &PipelineParams, ti: &ToneIn
     }
 }
 
+/// PIPE-009: allocates a fresh Vec<u8> (~72 MB at 24 MP) + zero-initializes on every call.
+/// For interactive or repeated renders (slider ticks, LookRenderer) always prefer
+/// [`process_into`] or [`process_into_auto`] with a retained buffer to amortise the
+/// allocation.  This function exists for one-shot callers and tests where the allocation
+/// cost is acceptable.
+// doc(alias) tags are not needed here; callers that need the fast path already use process_into.
 pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
-    debug_assert_eq!(rgb16.len() % 3, 0);
+    assert_eq!(rgb16.len() % 3, 0, "process: rgb16.len() must be divisible by 3");
     let n = rgb16.len() / 3;
     let mut out = vec![0u8; n * 3];
     process_into(rgb16, params, &mut out);
     out
 }
 
-/// T2: like `process` but writes into a caller-owned buffer (must be exactly rgb16.len() bytes).
+/// T2: like `process` but writes into a caller-owned buffer.
+/// `out` must have exactly `rgb16.len()` elements (one u8 per u16 input; i.e. `width * height * 3` bytes).
 /// Lets the interactive LookRenderer reuse one output buffer across re-renders instead of
 /// allocating + zeroing a fresh Vec each slider tick. Output is byte-identical to `process`.
 pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
-    debug_assert_eq!(rgb16.len() % 3, 0);
-    assert_eq!(out.len(), rgb16.len(), "process_into: out must be rgb16.len() bytes");
+    assert_eq!(rgb16.len() % 3, 0, "process_into: rgb16.len() must be divisible by 3");
+    assert_eq!(out.len(), rgb16.len(), "process_into: out must have rgb16.len() elements");
     let ti = derive_tone_inputs(params);
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
@@ -1329,7 +1423,7 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
         LUT_CACHE.with(|cache_cell| {
             ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
             let cache = cache_cell.borrow();
-            let c = cache.as_ref().unwrap();
+            let c = cache.as_ref().expect("ensure_lut must populate the cache");
             let pre_lut_mask = c.pre_lut_len - 1;
             let pre_lut_shift = c.pre_lut_shift;
 
@@ -1435,6 +1529,68 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
     }
 }
 
+/// PIPE-001 / PIPE-005: shared kernel for `process_into_simd` (u8 out) and
+/// `process_16bit_simd` (u16 out).  Both functions were structurally identical —
+/// BLK-pixel block loop, deinterleave pre-LUT → apply_tone_bulk → scatter through
+/// post-LUT — differing only in the output element type and scatter expression.
+///
+/// Callers pass `r/g/b` scratch slices of length BLK pre-allocated once outside
+/// the block loop (PIPE-005: eliminates per-block stack zeroing, ~279 MB memset
+/// traffic at 24 MP for the serial/WASM path). The `post_fn` closure maps a clamped
+/// f32 to the output element type: `|v| post[(v as u16) as usize]` for u8, or
+/// `|v| post16[(v as u16) as usize]` for u16.
+///
+/// NOTE on the parallel path: Rayon's `par_chunks_mut` dispatches to thread-pool
+/// workers; each worker's closure still zeroes its own BLK-sized stack frame once
+/// per block (the scratch arrays live inside the closure, not here).  The scratch-
+/// hoist benefit applies to the serial/WASM path only, where this kernel is called
+/// in a regular `for` loop with scratch re-used across iterations.
+#[inline(always)]
+fn simd_block_kernel<T: Copy>(
+    ob: &mut [T],
+    ib: &[u16],
+    r: &mut [f32],
+    g: &mut [f32],
+    b: &mut [f32],
+    pre_r: &[u16],
+    pre_g: &[u16],
+    pre_b: &[u16],
+    pre_lut_shift: u32,
+    pre_lut_mask: usize,
+    m: &[[f32; 3]; 3],
+    sat: f32,
+    vib: f32,
+    vib_zero: bool,
+    post_fn: impl Fn(f32) -> T,
+) {
+    let np = ib.len() / 3;
+    for i in 0..np {
+        r[i] = pre_r[(ib[i * 3]     as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+        g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+        b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
+    }
+    crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, sat, vib, vib_zero);
+    // MEASURED FLOOR (2026-06-19, item-0 `examples/tonemap_subspans.rs`): this post stage
+    // (clamp + f32→u16 cast + LUT gather) is ~45% of the 24 MP tone frame and is the bottleneck
+    // — NOT build (2%), copy (14%), or math (4%). The gather itself is already cheap (~0.5 ns,
+    // `postlut_cache_flip.rs`); the cost is the scalar f32↔int conversion fused with it. Four
+    // ways to cut it were measured and REJECTED (see `docs/rejected optimizations.md`):
+    //   • split quantize into a vectorizable pass + bare gather → −21% (u16 round-trip traffic)
+    //   • L1 compact/strided post-LUT → 0.77× (gather not L2-bound; extra shift loses)
+    //   • 3D RAW→OUT LUT + trilinear → ~3× slower + shadow banding
+    //   • powf→poly in the build → negligible (build is 2%; sRGB EOTF already a cached lerp)
+    // PIPE-002 opportunity (not yet implemented): interleave pre_r/g/b into a single
+    //   pre_rgb[code*3..code*3+3] table so each pixel does one 384 KB gather instead of three.
+    //   Gate behind flipflop measurement: benefit depends on L2 hit rate vs the merge overhead.
+    // The inline clamp+cast+gather below IS the floor. The remaining lever is the SEAM:
+    // parallelise this (native rayon = ~5× over serial), not the kernel.
+    for i in 0..np {
+        ob[i * 3]     = post_fn(r[i].clamp(0.0, 65535.0));
+        ob[i * 3 + 1] = post_fn(g[i].clamp(0.0, 65535.0));
+        ob[i * 3 + 2] = post_fn(b[i].clamp(0.0, 65535.0));
+    }
+}
+
 /// SIMD variant of `process_into`: block-deinterleaves the pre-LUT output into
 /// SoA, runs the vectorized tone math (`tone_simd::apply_tone_bulk`), then
 /// reinterleaves through the post-LUT. New fn — leaves `process_into` untouched
@@ -1442,9 +1598,10 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
 /// (perceptual_constancy must be false).
 pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
     debug_assert_eq!(rgb16.len() % 3, 0);
-    assert_eq!(out.len(), rgb16.len(), "process_into_simd: out must be rgb16.len() bytes");
+    assert_eq!(out.len(), rgb16.len(), "process_into_simd: out must be rgb16.len() elements");
+    // Guard before derive_tone_inputs so the assertion fires before any work is done.
+    assert!(!params.perceptual_constancy, "process_into_simd is the plain ingest path only; use process_into for perceptual_constancy");
     let ti = derive_tone_inputs(params);
-    debug_assert!(!ti.perceptual_constancy, "process_into_simd is the plain ingest path only");
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
     let (pre_r, pre_g, pre_b, post, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
@@ -1455,35 +1612,36 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
     });
 
     const BLK: usize = 2048;
-    let process_block = |ob: &mut [u8], ib: &[u16]| {
-        let np = ib.len() / 3;
-        let mut r = [0f32; BLK];
-        let mut g = [0f32; BLK];
-        let mut b = [0f32; BLK];
-        for i in 0..np {
-            r[i] = pre_r[(ib[i * 3]     as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-        }
-        crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, ti.sat, ti.vib, ti.vib_zero);
-        for i in 0..np {
-            ob[i * 3] = post[(r[i].clamp(0.0, 65535.0) as u16) as usize];
-            ob[i * 3 + 1] = post[(g[i].clamp(0.0, 65535.0) as u16) as usize];
-            ob[i * 3 + 2] = post[(b[i].clamp(0.0, 65535.0) as u16) as usize];
-        }
-    };
 
+    // Parallel path: Rayon dispatches blocks to worker threads; each closure allocates
+    // its own r/g/b scratch on that thread's stack (unavoidable without thread_local overhead).
     #[cfg(feature = "parallel")]
     {
         out.par_chunks_mut(3 * BLK)
             .zip(rgb16.par_chunks(3 * BLK))
-            .for_each(|(ob, ib)| process_block(ob, ib));
+            .for_each(|(ob, ib)| {
+                let mut r = [0f32; BLK];
+                let mut g = [0f32; BLK];
+                let mut b = [0f32; BLK];
+                simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
+                    &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
+                    m, ti.sat, ti.vib, ti.vib_zero,
+                    |v| post[(v as u16) as usize]);
+            });
     }
+    // Serial/WASM path: hoist r/g/b scratch once (PIPE-005: eliminates per-block
+    // zeroing — ~279 MB memset at 24 MP — by reusing the same stack frame across blocks).
     #[cfg(not(feature = "parallel"))]
     {
-        out.chunks_mut(3 * BLK)
-            .zip(rgb16.chunks(3 * BLK))
-            .for_each(|(ob, ib)| process_block(ob, ib));
+        let mut r = [0f32; BLK];
+        let mut g = [0f32; BLK];
+        let mut b = [0f32; BLK];
+        for (ob, ib) in out.chunks_mut(3 * BLK).zip(rgb16.chunks(3 * BLK)) {
+            simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
+                &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
+                m, ti.sat, ti.vib, ti.vib_zero,
+                |v| post[(v as u16) as usize]);
+        }
     }
 }
 
@@ -1500,6 +1658,12 @@ pub fn process_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
 /// reassociation tolerance, so `process_into` stays byte-exact for callers that
 /// require it (LookRenderer, exact-equality tests). Heavy full-res RAW decode
 /// opts in via this wrapper.
+///
+/// PIPE-007 (verified 2026-06-19): LookRenderer.process() in src/lib.rs calls
+/// `pipeline::process_auto` (→ `process_into_auto` → `process_into_simd`), so the
+/// WASM SIMD128 kernel IS reached from the interactive render path.  The !parallel
+/// `process_into` 4-wide scalar path (PIPE-007 concern) is only the byte-exact
+/// reference; callers that need SIMD already route through `process_into_auto`.
 pub fn process_into_auto(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
     if params.perceptual_constancy {
         process_into(rgb16, params, out);
@@ -1526,6 +1690,8 @@ pub fn bench_tone_stage_3way(rgb16: &[u16], params: &PipelineParams) -> (f64, f6
     let lut_len = (params.white as usize + 1).next_power_of_two().min(65536);
     let lut_mask = lut_len - 1;
     let pre_r = build_pre_lut_compact(params.black, params.white, ti.wb_r, ti.exp_gain, lut_len);
+    let pre_g = build_pre_lut_compact(params.black, params.white, ti.wb_g, ti.exp_gain, lut_len);
+    let pre_b = build_pre_lut_compact(params.black, params.white, ti.wb_b, ti.exp_gain, lut_len);
     let post = build_post_lut(&ti.tone);
 
     let np = rgb16.len() / 3;
@@ -1542,8 +1708,8 @@ pub fn bench_tone_stage_3way(rgb16: &[u16], params: &PipelineParams) -> (f64, f6
         let cnt = (np - p).min(BLK);
         for i in 0..cnt {
             r[i] = pre_r[rgb16[(p + i) * 3]     as usize & lut_mask] as f32;
-            g[i] = pre_r[rgb16[(p + i) * 3 + 1] as usize & lut_mask] as f32;
-            b[i] = pre_r[rgb16[(p + i) * 3 + 2] as usize & lut_mask] as f32;
+            g[i] = pre_g[rgb16[(p + i) * 3 + 1] as usize & lut_mask] as f32;
+            b[i] = pre_b[rgb16[(p + i) * 3 + 2] as usize & lut_mask] as f32;
         }
         p += cnt;
     }
@@ -1757,7 +1923,7 @@ pub fn apply_luminance_nr(rgb16: &mut [u16], width: usize, height: usize, streng
     let s = strength.clamp(0.0, 1.0);
     let kernel = gaussian_kernel_5();
     BLUR_SCRATCH.with(|scratch| {
-        let (ref mut temp, ref mut blurred) = *scratch.borrow_mut();
+        let (ref mut temp, ref mut blurred, _) = *scratch.borrow_mut();
         separable_blur_with_bufs(rgb16, width, height, &kernel, temp, blurred);
         // Flipflop bench (2026-06-18): serial 130ms, parallel 20ms → 6.6× speedup on 12MP.
         #[cfg(feature = "parallel")]
@@ -1861,12 +2027,13 @@ pub fn process_16bit_scalar(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> 
 
 /// SIMD 16-bit path: block-deinterleave the pre-LUT output into SoA, run the vectorized tone
 /// math (`tone_simd::apply_tone_bulk`, fused matrix when vib_zero), then reinterleave through the
-/// 16-bit post-LUT. Mirrors [`process_into_simd`] with u16 output. Plain ingest only
+/// 16-bit post-LUT. Delegates to [`simd_block_kernel`] (shared with [`process_into_simd`],
+/// PIPE-001) with a `|v| post16[(v as u16) as usize]` scatter.  Plain ingest only
 /// (perceptual_constancy must be false — the dispatcher routes constancy to the scalar path).
 pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     debug_assert_eq!(rgb16.len() % 3, 0);
     let ti = derive_tone_inputs(params);
-    debug_assert!(!ti.perceptual_constancy, "process_16bit_simd is the plain ingest path only");
+    assert!(!ti.perceptual_constancy, "process_16bit_simd is the plain ingest path only; use process_16bit_scalar for perceptual_constancy");
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
     let n = rgb16.len() / 3;
@@ -1879,35 +2046,33 @@ pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     });
 
     const BLK: usize = 2048;
-    let process_block = |ob: &mut [u16], ib: &[u16]| {
-        let np = ib.len() / 3;
-        let mut r = [0f32; BLK];
-        let mut g = [0f32; BLK];
-        let mut b = [0f32; BLK];
-        for i in 0..np {
-            r[i] = pre_r[(ib[i * 3]     as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-            b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
-        }
-        crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, ti.sat, ti.vib, ti.vib_zero);
-        for i in 0..np {
-            ob[i * 3]     = post16[(r[i].clamp(0.0, 65535.0) as u16) as usize];
-            ob[i * 3 + 1] = post16[(g[i].clamp(0.0, 65535.0) as u16) as usize];
-            ob[i * 3 + 2] = post16[(b[i].clamp(0.0, 65535.0) as u16) as usize];
-        }
-    };
 
     #[cfg(feature = "parallel")]
     {
         out.par_chunks_mut(3 * BLK)
             .zip(rgb16.par_chunks(3 * BLK))
-            .for_each(|(ob, ib)| process_block(ob, ib));
+            .for_each(|(ob, ib)| {
+                let mut r = [0f32; BLK];
+                let mut g = [0f32; BLK];
+                let mut b = [0f32; BLK];
+                simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
+                    &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
+                    m, ti.sat, ti.vib, ti.vib_zero,
+                    |v| post16[(v as u16) as usize]);
+            });
     }
+    // Serial/WASM: hoist scratch once (PIPE-005).
     #[cfg(not(feature = "parallel"))]
     {
-        out.chunks_mut(3 * BLK)
-            .zip(rgb16.chunks(3 * BLK))
-            .for_each(|(ob, ib)| process_block(ob, ib));
+        let mut r = [0f32; BLK];
+        let mut g = [0f32; BLK];
+        let mut b = [0f32; BLK];
+        for (ob, ib) in out.chunks_mut(3 * BLK).zip(rgb16.chunks(3 * BLK)) {
+            simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
+                &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
+                m, ti.sat, ti.vib, ti.vib_zero,
+                |v| post16[(v as u16) as usize]);
+        }
     }
     out
 }
@@ -1938,22 +2103,27 @@ pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: us
     if (sw % dw == 0) && (sh % dh == 0) {
         let xstep = sw / dw;
         let ystep = sh / dh;
-        let n_px = (xstep * ystep) as u32;
+        let n_px = (xstep * ystep) as u64;
         #[cfg(feature = "parallel")]
         let iter = out.par_chunks_mut(dw * 3);
         #[cfg(not(feature = "parallel"))]
         let iter = out.chunks_mut(dw * 3);
         iter.enumerate().for_each(|(dy, row)| {
             for dx in 0..dw {
-                let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
+                let (mut rr, mut gg, mut bb) = (0u64, 0u64, 0u64);
                 for yy in 0..ystep {
                     let y = dy * ystep + yy;
                     let base = (y * sw + dx * xstep) * 3;
+                    // PIPE-012: stride-3 AoS read with u64 accumulators; LLVM cannot vectorise
+                    // because u64 SIMD is not uniform across targets.  Known opportunity: split
+                    // into planar accumulation via `let px = &src[base + xx*3..];` to let LLVM
+                    // see regular access.  Profile first — downscale is not a current bottleneck.
+                    #[allow(clippy::needless_range_loop)]
                     for xx in 0..xstep {
                         let i = base + xx * 3;
-                        rr += src[i] as u32;
-                        gg += src[i + 1] as u32;
-                        bb += src[i + 2] as u32;
+                        rr += src[i] as u64;
+                        gg += src[i + 1] as u64;
+                        bb += src[i + 2] as u64;
                     }
                 }
                 let o = dx * 3;
@@ -1979,11 +2149,12 @@ pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: us
             let x0 = (dx as f32 * xr) as usize;
             let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
             let x1 = x1.max(x0 + 1);
-            let (mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
+            // u64 avoids overflow for large box areas (u32 overflows at ~65535 pixels × 65535 value).
+            let (mut rr, mut gg, mut bb, mut n) = (0u64, 0u64, 0u64, 0u64);
             for y in y0..y1 {
                 for x in x0..x1 {
                     let i = (y * sw + x) * 3;
-                    rr += src[i] as u32; gg += src[i+1] as u32; bb += src[i+2] as u32; n += 1;
+                    rr += src[i] as u64; gg += src[i+1] as u64; bb += src[i+2] as u64; n += 1;
                 }
             }
             let n = n.max(1);
@@ -2015,24 +2186,24 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
     if (sw % dw == 0) && (sh % dh == 0) {
         let xstep = sw / dw;
         let ystep = sh / dh;
-        let n = (xstep * ystep) as u32;
+        let n = (xstep * ystep) as u64;
         #[cfg(feature = "parallel")]
         let iter = out.par_chunks_mut(dw * 3);
         #[cfg(not(feature = "parallel"))]
         let iter = out.chunks_mut(dw * 3);
         iter.enumerate().for_each(|(dy, row)| {
             for dx in 0..dw {
-                let mut rr = 0u32;
-                let mut gg = 0u32;
-                let mut bb = 0u32;
+                let mut rr = 0u64;
+                let mut gg = 0u64;
+                let mut bb = 0u64;
                 for yy in 0..ystep {
                     let y = dy * ystep + yy;
                     let base = (y * sw + dx * xstep) * 3;
                     for xx in 0..xstep {
                         let i = base + xx * 3;
-                        rr += src[i] as u32;
-                        gg += src[i + 1] as u32;
-                        bb += src[i + 2] as u32;
+                        rr += src[i] as u64;
+                        gg += src[i + 1] as u64;
+                        bb += src[i + 2] as u64;
                     }
                 }
                 let o = dx * 3;
@@ -2074,6 +2245,9 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
 
 /// Target dims for long-edge resize (preserves aspect, min 1).
 pub fn target_dims(w: usize, h: usize, long_edge: usize) -> (usize, usize) {
+    if w == 0 || h == 0 {
+        return (long_edge.max(1), long_edge.max(1));
+    }
     if w >= h {
         let lw = w.min(long_edge);
         (lw, ((h * lw) / w).max(1))
@@ -2291,30 +2465,53 @@ pub fn flip_vertical(src: &[u8], w: usize, h: usize) -> Vec<u8> {
 }
 
 /// Transpose along the main diagonal: dst[c, r] = src[r, c]. Output dims: (h, w). (EXIF 5)
+///
+/// Tile-blocked (TILE × TILE) to stay L1-resident, matching the approach used by
+/// rotate_90_cw / rotate_90_ccw.
 pub fn transpose(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut dst = vec![0u8; src.len()];
-    for r in 0..h {
-        for c in 0..w {
-            let si = (r * w + c) * 3;
-            let di = (c * h + r) * 3;
-            dst[di]     = src[si];
-            dst[di + 1] = src[si + 1];
-            dst[di + 2] = src[si + 2];
+    // dst dims: w_dst = h, h_dst = w.  dst[c, r] with dst-row-stride = h*3.
+    let dst_row_stride = h * 3;
+    for r0 in (0..h).step_by(TILE) {
+        let r_end = (r0 + TILE).min(h);
+        for c0 in (0..w).step_by(TILE) {
+            let c_end = (c0 + TILE).min(w);
+            for r in r0..r_end {
+                let src_row_off = r * w * 3;
+                for c in c0..c_end {
+                    let si = src_row_off + c * 3;
+                    let di = c * dst_row_stride + r * 3;
+                    dst[di]     = src[si];
+                    dst[di + 1] = src[si + 1];
+                    dst[di + 2] = src[si + 2];
+                }
+            }
         }
     }
     dst
 }
 
 /// Transpose along the anti-diagonal: dst[w-1-c, h-1-r] = src[r, c]. Output dims: (h, w). (EXIF 7)
+///
+/// Tile-blocked (TILE × TILE) to stay L1-resident.
 pub fn anti_transpose(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut dst = vec![0u8; src.len()];
-    for r in 0..h {
-        for c in 0..w {
-            let si = (r * w + c) * 3;
-            let di = ((w - 1 - c) * h + (h - 1 - r)) * 3;
-            dst[di]     = src[si];
-            dst[di + 1] = src[si + 1];
-            dst[di + 2] = src[si + 2];
+    // dst dims: w_dst = h, h_dst = w.  dst[w-1-c, h-1-r] with dst-row-stride = h*3.
+    let dst_row_stride = h * 3;
+    for r0 in (0..h).step_by(TILE) {
+        let r_end = (r0 + TILE).min(h);
+        for c0 in (0..w).step_by(TILE) {
+            let c_end = (c0 + TILE).min(w);
+            for r in r0..r_end {
+                let src_row_off = r * w * 3;
+                for c in c0..c_end {
+                    let si = src_row_off + c * 3;
+                    let di = (w - 1 - c) * dst_row_stride + (h - 1 - r) * 3;
+                    dst[di]     = src[si];
+                    dst[di + 1] = src[si + 1];
+                    dst[di + 2] = src[si + 2];
+                }
+            }
         }
     }
     dst
@@ -2443,6 +2640,127 @@ mod rotate_tests {
             }
         }
         assert_eq!(fast, naive);
+    }
+
+    #[test]
+    fn flip_horizontal_is_involution() {
+        for (w, h) in [(7usize, 5usize), (32, 32), (33, 31)] {
+            let src = synth(w, h);
+            let twice = flip_horizontal(&flip_horizontal(&src, w, h), w, h);
+            assert_eq!(twice, src, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn flip_horizontal_corner_pixel() {
+        let (w, h) = (4usize, 3usize);
+        let mut src = vec![0u8; w * h * 3];
+        // pixel (row=0, col=0) = (10, 20, 30)
+        src[0] = 10; src[1] = 20; src[2] = 30;
+        let dst = flip_horizontal(&src, w, h);
+        // After H-flip, (0,0) → (0, w-1) = (0, 3)
+        let i = (0 * w + (w - 1)) * 3;
+        assert_eq!(&dst[i..i + 3], &[10, 20, 30]);
+    }
+
+    #[test]
+    fn flip_vertical_is_involution() {
+        for (w, h) in [(7usize, 5usize), (32, 32), (33, 31)] {
+            let src = synth(w, h);
+            let twice = flip_vertical(&flip_vertical(&src, w, h), w, h);
+            assert_eq!(twice, src, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn transpose_is_involutionlike() {
+        // transpose(transpose(img, w, h), h, w) should be identity.
+        for (w, h) in [(7usize, 5usize), (32, 32), (33, 31)] {
+            let src = synth(w, h);
+            let t1 = transpose(&src, w, h);      // dims become (h, w)
+            let t2 = transpose(&t1, h, w);       // dims back to (w, h)
+            assert_eq!(t2, src, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn transpose_matches_naive() {
+        let (w, h) = (37usize, 19usize);
+        let src = synth(w, h);
+        let fast = transpose(&src, w, h);
+        // Naive: dst[c, r] = src[r, c], dst dims (h=w_out, w=h_out) → dst row stride = h
+        let mut naive = vec![0u8; src.len()];
+        for r in 0..h {
+            for c in 0..w {
+                let si = (r * w + c) * 3;
+                let di = (c * h + r) * 3;
+                naive[di] = src[si]; naive[di+1] = src[si+1]; naive[di+2] = src[si+2];
+            }
+        }
+        assert_eq!(fast, naive);
+    }
+
+    #[test]
+    fn anti_transpose_matches_naive() {
+        let (w, h) = (37usize, 19usize);
+        let src = synth(w, h);
+        let fast = anti_transpose(&src, w, h);
+        let mut naive = vec![0u8; src.len()];
+        for r in 0..h {
+            for c in 0..w {
+                let si = (r * w + c) * 3;
+                let di = ((w - 1 - c) * h + (h - 1 - r)) * 3;
+                naive[di] = src[si]; naive[di+1] = src[si+1]; naive[di+2] = src[si+2];
+            }
+        }
+        assert_eq!(fast, naive);
+    }
+
+    #[test]
+    fn apply_orientation_identity_orientations() {
+        let (w, h) = (5usize, 3usize);
+        let src = synth(w, h);
+        // orientation 1 and unknown → identity
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 1);
+        assert_eq!(out, src); assert_eq!((ow, oh), (w, h));
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 99);
+        assert_eq!(out, src); assert_eq!((ow, oh), (w, h));
+    }
+
+    #[test]
+    fn apply_orientation_2_flip_h() {
+        let (w, h) = (4usize, 3usize);
+        let src = synth(w, h);
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 2);
+        assert_eq!((ow, oh), (w, h));
+        assert_eq!(out, flip_horizontal(&src, w, h));
+    }
+
+    #[test]
+    fn apply_orientation_4_flip_v() {
+        let (w, h) = (4usize, 3usize);
+        let src = synth(w, h);
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 4);
+        assert_eq!((ow, oh), (w, h));
+        assert_eq!(out, flip_vertical(&src, w, h));
+    }
+
+    #[test]
+    fn apply_orientation_5_transpose() {
+        let (w, h) = (4usize, 3usize);
+        let src = synth(w, h);
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 5);
+        assert_eq!((ow, oh), (h, w));
+        assert_eq!(out, transpose(&src, w, h));
+    }
+
+    #[test]
+    fn apply_orientation_7_anti_transpose() {
+        let (w, h) = (4usize, 3usize);
+        let src = synth(w, h);
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 7);
+        assert_eq!((ow, oh), (h, w));
+        assert_eq!(out, anti_transpose(&src, w, h));
     }
 }
 
@@ -2841,6 +3159,74 @@ mod tonemap_flip_flops {
             }
             let (f, wm) = (median(full), median(warm));
             eprintln!("B4-rgb16cache\t{}\t{:.4}\t{:.4}\t{:.2}x", label, f, wm, f / wm);
+        }
+    }
+}
+
+#[cfg(test)]
+mod lut_property_tests {
+    use super::*;
+
+    /// pre-LUT must be monotonically non-decreasing (higher raw values ≥ same or higher output).
+    #[test]
+    fn pre_lut_monotone_strided() {
+        let lut = build_pre_lut_strided(64, 4095, 1.78, 1.0);
+        for i in 1..lut.len() {
+            assert!(lut[i] >= lut[i - 1], "strided LUT not monotone at index {i}: {} < {}", lut[i], lut[i - 1]);
+        }
+    }
+
+    #[test]
+    fn pre_lut_monotone_compact() {
+        let lut = build_pre_lut_compact(64, 4095, 1.78, 1.0, 65536);
+        for i in 1..lut.len() {
+            assert!(lut[i] >= lut[i - 1], "compact LUT not monotone at index {i}: {} < {}", lut[i], lut[i - 1]);
+        }
+    }
+
+    /// Raw values above white must not wrap to a lower output than the white-point entry.
+    /// With lut_len=65536 and mask=0xFFFF all u16 values index within [0, 65535] safely.
+    #[test]
+    fn pre_lut_above_white_does_not_wrap() {
+        let white = 4095u16;
+        let lut = build_pre_lut_compact(64, white, 1.0, 1.0, 65536);
+        let at_white = lut[white as usize];
+        // Values above white should saturate to the same top value (highlight shoulder clamps to 1.0).
+        for raw in (white as usize + 1)..=65535 {
+            let v = lut[raw];
+            assert!(v >= at_white, "raw {raw} mapped below white-point value ({v} < {at_white})");
+        }
+    }
+
+    /// channels=0 must be rejected by validate_pixel_dims.
+    #[test]
+    fn validate_pixel_dims_rejects_zero_channels() {
+        let err = validate_pixel_dims(10, 10, 0).unwrap_err();
+        assert!(err.contains("positive"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod tone_simd_near_zero_tests {
+    use crate::tone_simd::apply_tone_bulk_ref;
+
+    /// Near-zero raw_mx guard in vibrance path: very dark pixels must not produce NaN or Inf.
+    #[test]
+    fn vibrance_near_zero_raw_mx() {
+        const M: [[f32; 3]; 3] = [
+            [1.526, -0.450, -0.077],
+            [-0.245,  1.336, -0.091],
+            [ 0.018, -0.298,  1.281],
+        ];
+        let mut r = vec![0.0f32, 1e-7, 0.0];
+        let mut g = vec![0.0f32, 0.0, 1e-7];
+        let mut b = vec![0.0f32, 0.0, 0.0];
+        // vib_zero=false forces the vibrance path which has the raw_mx > 0 guard.
+        apply_tone_bulk_ref(&mut r, &mut g, &mut b, &M, 1.3, 0.5, false);
+        for i in 0..r.len() {
+            assert!(r[i].is_finite(), "r[{i}] = {} is not finite", r[i]);
+            assert!(g[i].is_finite(), "g[{i}] = {} is not finite", g[i]);
+            assert!(b[i].is_finite(), "b[{i}] = {} is not finite", b[i]);
         }
     }
 }

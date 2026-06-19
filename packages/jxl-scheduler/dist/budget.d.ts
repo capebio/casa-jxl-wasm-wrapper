@@ -2,14 +2,25 @@ export declare class CoreBudget {
     readonly capacity: number;
     private tokens;
     private readonly waiters;
+    private _waitersHead;
+    private readonly _devMode;
     constructor(capacity: number);
     get available(): number;
     get pendingCount(): number;
     /** FIFO acquire. Blocks until cost tokens free. */
     acquire(cost?: number): Promise<void>;
     release(cost?: number): void;
+    /**
+     * Returns true when running in production mode. Checks both Node.js and
+     * browser/bundler conventions so DEV-mode warnings fire in all environments.
+     */
+    private static _isProduction;
     private drainWaiters;
-    /** Non-blocking: deduct cost if available, else false. Never queues. */
+    /**
+     * Non-blocking: deduct cost if available, else return false. Never queues.
+     * Unlike acquire(), cost > capacity returns false rather than throwing —
+     * callers using this path should check capacity themselves if needed.
+     */
     tryAcquire(cost?: number): boolean;
     /**
      * Acquire preferring MT cost (N). If tokens < N right now, fall back to cost=1

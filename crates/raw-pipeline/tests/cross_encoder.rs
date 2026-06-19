@@ -3,6 +3,8 @@
 //! crate — so a successful decode here means the Tauri uploader's bytes
 //! will round-trip through the gallery's web decoder.
 
+#![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
+
 use jxl_oxide::JxlImage;
 use raw_pipeline::casabio_encode::{encode_variants, encode_variants_with_progressive, SourceType};
 
@@ -31,10 +33,10 @@ fn libjxl_encoded_variants_decode_with_oxide() {
     let aspect_orig = 1024.0 / 768.0;
     
     let aspect_thumb = img_thumb.width() as f32 / img_thumb.height() as f32;
-    assert!((aspect_orig - aspect_thumb).abs() < 0.1, "aspect ratio mismatch");
-    
+    assert!((aspect_orig - aspect_thumb).abs() < 0.02, "aspect ratio mismatch: thumb {aspect_thumb} vs orig {aspect_orig}");
+
     let aspect_preview = img_preview.width() as f32 / img_preview.height() as f32;
-    assert!((aspect_orig - aspect_preview).abs() < 0.1, "aspect ratio mismatch");
+    assert!((aspect_orig - aspect_preview).abs() < 0.02, "aspect ratio mismatch: preview {aspect_preview} vs orig {aspect_orig}");
 }
 
 #[test]
@@ -55,22 +57,21 @@ fn full_variant_roundtrips_pixels_through_oxide() {
     let render = img.render_frame(0).unwrap();
     let fb = render.image_all_channels();
     let (buf, ch) = (fb.buf(), fb.channels());
+    // jxl-oxide returns sRGB values for a sRGB-tagged JXL; compare only in sRGB.
+    // Pre-compute sRGB→linear LUT to avoid per-pixel powf; not needed here but
+    // kept for future reference. We compare only against the sRGB domain.
     let mut max_err = 0f32;
     for p in 0..(w * h) as usize {
         for c in 0..3 {
             let want_srgb = rgba[p * 4 + c] as f32 / 255.0;
-            let want_linear = if want_srgb <= 0.04045 {
-                want_srgb / 12.92
-            } else {
-                ((want_srgb + 0.055) / 1.055).powf(2.4)
-            };
             let got = buf[p * ch + c];
-            let err_srgb = (got - want_srgb).abs();
-            let err_linear = (got - want_linear).abs();
-            max_err = max_err.max(err_srgb.min(err_linear));
+            let err = (got - want_srgb).abs();
+            max_err = max_err.max(err);
         }
     }
-    assert!(max_err < 0.35, "max channel error {max_err} — channel-count mismatch at jpegxl-rs boundary if ≫ tolerance");
+    // Q85 JXL lossy: expect ≤3% channel error. A failure here usually indicates
+    // a channel-count mismatch (wrong stride) or colorspace confusion at the FFI boundary.
+    assert!(max_err < 0.03, "max sRGB channel error {max_err:.4} — channel-count or colorspace mismatch at libjxl boundary");
 }
 
 #[test]
@@ -107,10 +108,18 @@ fn ct5_encode_variants_from_rgb16_smoke() {
 }
 
 #[test]
+#[ignore = "jxl-oxide partial-input API not yet exercised; truncated-stream safety surface unverified"]
 fn ct6_progressive_dc2_truncated_stream() {
-    // Skipping full implementation of truncated-stream DC render of the first ~25%
-    // as jxl-oxide's partial-input API requires setting up a reader and handling NeedMoreData
-    // which makes the test brittle without knowing the exact boundaries of the DC frame in the bitstream.
-    // The oxide API fights back on truncated buffer slices without explicit chunk readers.
-    assert!(true);
+    // TODO: feed a truncated JXL bitstream to jxl-oxide's chunked reader and assert it does
+    // not panic. The oxide partial-input API requires explicit NeedMoreData handling and
+    // knowledge of DC frame byte boundaries — implement once those are stable.
+    let rgba = gradient(64, 64);
+    let v = encode_variants_with_progressive(&rgba, 64, 64, SourceType::Jpeg, false, 2, 1)
+        .expect("encode progressive");
+    // Truncate to ~25% of the bitstream — must not panic (may return an error).
+    let truncated = &v.full[..v.full.len() / 4];
+    let result = std::panic::catch_unwind(|| {
+        let _ = JxlImage::builder().read(truncated);
+    });
+    assert!(result.is_ok(), "jxl-oxide panicked on truncated input");
 }

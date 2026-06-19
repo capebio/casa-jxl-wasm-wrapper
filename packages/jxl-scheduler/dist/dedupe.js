@@ -58,7 +58,21 @@ export class DedupeRegistry {
         }
         if (isPrimary) {
             // Fan-out subscribers still alive. Promote the subscriber chosen by the callback, or the first remaining.
+            // Guard: if no real candidate is available (pickPromoted returned undefined and the iterator
+            // also produced undefined — possible per TypeScript's IteratorResult typing), treat it as
+            // all-cancelled and clean up rather than registering undefined as a primary.
             const newPrimaryId = pickPromoted?.(subs) ?? subs.values().next().value;
+            if (newPrimaryId === undefined) {
+                // No promotable subscriber; clear the entry entirely.
+                this.sessionToSubscribers.delete(primaryId);
+                const key = this.sessionToKey.get(primaryId);
+                if (key !== undefined)
+                    this.keyToSession.delete(key);
+                this.sessionToKey.delete(primaryId);
+                for (const sub of subs)
+                    this.subscriberToPrimary.delete(sub);
+                return { cancelWorker: true };
+            }
             const key = this.sessionToKey.get(primaryId);
             if (key !== undefined) {
                 this.keyToSession.set(key, newPrimaryId);
@@ -101,19 +115,25 @@ export class DedupeRegistry {
             this.sessionToSubscribers.delete(sessionId);
         }
     }
-    /** @internal — prefer forEachSubscriber for zero-allocation iteration */
+    /** @internal — prefer forEachSubscriber for bounded-allocation iteration */
     // Returns all subscriber IDs for a primary (including itself).
     // Note: The primary session registers itself as a subscriber, so the primary's ID is included in this list.
     subscribers(primaryId) {
         return [...(this.sessionToSubscribers.get(primaryId) ?? [])];
     }
-    // Iterates subscriber IDs without allocating an intermediate array.
+    // Iterates subscriber IDs, snapshotting the Set before iteration.
+    // Snapshot cost is one array of N subscriber IDs (typically 0–3 entries).
+    // Required for correctness: fn may call cancelSubscriber, which deletes from the
+    // live Set mid-iteration — without a snapshot, JS Set's forward-iterator spec
+    // causes unvisited-but-deleted entries to be silently skipped (a message-loss bug
+    // when a subscriber's handler synchronously cancels another subscriber).
     // Note: The primary session registers itself as a subscriber, so the callback is invoked for the primary's ID as well.
     forEachSubscriber(primaryId, fn) {
         const subs = this.sessionToSubscribers.get(primaryId);
         if (subs === undefined)
             return;
-        for (const sub of subs)
+        // Spread into a local array so mutations to the Set during fn() don't skip entries.
+        for (const sub of [...subs])
             fn(sub);
     }
 }

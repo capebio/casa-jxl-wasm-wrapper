@@ -15,7 +15,7 @@ export declare class DedupeRegistry {
         promotedTo?: string;
     };
     complete(sessionId: string): void;
-    /** @internal — prefer forEachSubscriber for zero-allocation iteration */
+    /** @internal — prefer forEachSubscriber for bounded-allocation iteration */
     subscribers(primaryId: string): string[];
     forEachSubscriber(primaryId: string, fn: (subId: string) => void): void;
 }

@@ -19,7 +19,7 @@ const maybeFixtureTest = existsSync(ORF_FOLDER) ? test : test.skip;
 const OUT_FULL_RGB8 = 1;
 const OUT_LIGHTBOX  = 2;
 const OUT_THUMB     = 4;
-const OUT_NO_ORIENT = 8;
+const OUT_NO_ORIENT = 16;
 
 function listOrfs(limit) {
     return readdirSync(ORF_FOLDER)

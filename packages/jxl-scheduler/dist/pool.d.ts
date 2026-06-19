@@ -29,6 +29,7 @@ export declare class WorkerPool {
     private generation;
     private nextWorkerId;
     private shutdownPromise;
+    private staggerTimer;
     private lastSpawnFailureMs;
     private consecutiveSpawnFailures;
     private readonly coreBudget;
