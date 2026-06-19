@@ -221,7 +221,13 @@ impl Comparer {
                 w = dw; h = dh;
             }
         }
-        total / 7.0
+        // Divide by the actual sum of weights rather than the hardcoded 7.0 (the sum
+        // of the default [4, 2, 1]). Any caller supplying custom Opts.weights would
+        // otherwise receive a result scaled by 7.0/sum(custom_weights) — silently wrong.
+        let weight_sum: f32 = self.opts.weights.iter().sum();
+        debug_assert!(weight_sum.is_finite() && weight_sum > 0.0,
+            "butteraugli: opts.weights sum must be finite and > 0");
+        total / weight_sum
     }
 
     pub fn ssim(&self, test: &[u8]) -> f32 {
@@ -230,6 +236,8 @@ impl Comparer {
         }
         match self.backend {
             #[cfg(target_arch = "x86_64")]
+            // AVX-512 arms intentionally call the avx2 ssim kernel: no AVX-512 SSIM
+            // implementation exists yet, and all shipping AVX-512 CPUs have avx2+fma.
             Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512Strict | Backend::Avx512Rsqrt => {
                 let (sa, saa, sab) = unsafe { simd::avx2::ssim_moments_avx2(test, &self.ref_rgba, self.n) };
                 ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
@@ -244,6 +252,8 @@ impl Comparer {
         }
         match self.backend {
             #[cfg(target_arch = "x86_64")]
+            // AVX-512 arms intentionally call the avx2 psnr (ssd) kernel: no AVX-512
+            // PSNR implementation exists yet; avx2+fma is implied by AVX-512 hardware.
             Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512Strict | Backend::Avx512Rsqrt => {
                 let sum_sq = unsafe { simd::avx2::ssd_avx2(test, &self.ref_rgba) };
                 if sum_sq == 0 {
@@ -328,6 +338,10 @@ fn resolve_forced_backend(id: u8) -> Backend {
             // Forced AVX-512 on a CPU without it: fall back to AVX2 if available.
             3 if has_avx2 => Backend::Avx2Strict,
             5 if has_avx2 => Backend::Avx2Rsqrt,
+            // id=4 is Backend::WasmSimd (discriminant 4). WasmSimd is not a valid x86_64
+            // backend — map explicitly to Scalar rather than falling through silently,
+            // so a bench user passing Force(4) on x86_64 gets a clear fallback.
+            4 => Backend::Scalar,
             _ => Backend::Scalar,
         };
     }
@@ -377,6 +391,25 @@ mod tests {
         assert!(cmp.butteraugli(&img).abs() < 1e-4);
         assert!((cmp.ssim(&img) - 1.0).abs() < 1e-4);
         assert_eq!(cmp.psnr(&img), f32::INFINITY);
+    }
+
+    #[test]
+    fn all_is_idempotent() {
+        // Calling all() twice on the same Comparer must produce identical Metrics.
+        // This verifies that tx/ty/tb mutation from the butteraugli pass is reset
+        // correctly and does not corrupt subsequent calls.
+        let (w, h) = (16, 16);
+        let img = checker(w, h);
+        let mut noisy = img.clone();
+        for (i, p) in noisy.iter_mut().enumerate() {
+            if i % 4 != 3 { *p = p.saturating_add(((i * 7) % 11) as u8); }
+        }
+        let mut cmp = Comparer::new(&img, w, h, Opts::default());
+        let m1 = cmp.all(&noisy);
+        let m2 = cmp.all(&noisy);
+        assert!((m1.butteraugli - m2.butteraugli).abs() < 1e-6, "butteraugli not idempotent");
+        assert!((m1.ssim - m2.ssim).abs() < 1e-6, "ssim not idempotent");
+        assert!((m1.psnr - m2.psnr).abs() < 1e-3, "psnr not idempotent");
     }
 
     #[test]

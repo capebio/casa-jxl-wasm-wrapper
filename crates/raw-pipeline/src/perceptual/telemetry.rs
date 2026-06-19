@@ -109,6 +109,9 @@ pub fn analyze_fused_scalar(d: &[u8], px: usize) -> TelemetryMetrics {
 }
 
 #[cfg(target_arch = "x86_64")]
+// Note: `#[target_feature(enable = "avx2")]` only — FMA is intentionally absent.
+// This kernel uses no FMA intrinsics (_mm256_madd_epi16 is integer, not FP-FMA),
+// so the fma feature gate used in simd/avx2.rs::scale_err_avx2 is not needed here.
 #[target_feature(enable = "avx2")]
 unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
     use core::arch::x86_64::*;
@@ -237,15 +240,24 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
 
 /// Runtime-dispatched fused kernel. Uses AVX2 when present, else scalar.
 pub fn analyze_fused(pixels: &[u8], width: usize, height: usize) -> TelemetryMetrics {
-    let px = width.saturating_mul(height);
+    // Use checked_mul for both the pixel count and the byte length so that an
+    // overflowing dimension on wasm32 (usize=32-bit) panics with a clear message
+    // rather than silently bypassing the AVX2 guard via a wrapped comparison.
+    let px = width
+        .checked_mul(height)
+        .expect("analyze_fused: width*height overflows usize");
+    let byte_len = px
+        .checked_mul(4)
+        .expect("analyze_fused: pixel_count*4 overflows usize");
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
-            if pixels.len() >= px * 4 {
+            if pixels.len() >= byte_len {
                 return unsafe { analyze_fused_avx2(pixels, px) };
             }
         }
     }
+    let _ = byte_len; // suppress unused-variable on non-x86
     analyze_fused_scalar(pixels, px)
 }
 

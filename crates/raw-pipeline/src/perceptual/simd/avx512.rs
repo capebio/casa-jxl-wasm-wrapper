@@ -22,9 +22,13 @@ pub unsafe fn scale_err_avx512(
     rsqrt_path: bool,
 ) -> f32 {
     // All seven slices are read via _mm512_loadu_ps up to index `lanes < n` and
-    // indexed up to `n-1` in the scalar tail. Encode the caller's >= n length
-    // invariant so a desynced level size traps in debug instead of OOB-reading.
-    debug_assert!(
+    // indexed up to `n-1` in the scalar tail. Use assert! (not debug_assert!) to
+    // match avx2.rs:36-40 — release builds on AVX-512 hardware must also be guarded
+    // so an OOB read in an unsafe function is a defined panic, not silent UB.
+    if n == 0 {
+        return 0.0;
+    }
+    assert!(
         mask.len() >= n && rx.len() >= n && ry.len() >= n && rb.len() >= n
             && tx.len() >= n && ty.len() >= n && tb.len() >= n,
         "scale_err_avx512: a slice is shorter than n"
@@ -82,17 +86,19 @@ pub unsafe fn scale_err_avx512(
     }
     sum += _mm512_reduce_add_ps(acc) as f64;
     sum = scale_err_tail(mask, rx, ry, rb, tx, ty, tb, n, kx, ky, kb, i, sum);
-    ((sum / n as f64).powf(1.0 / 3.0)) as f32
+    // cbrt() is a dedicated cube-root: faster and more accurate than powf(1.0/3.0)
+    // which internally uses exp(log(x)*exponent) — two transcendentals.
+    ((sum / n as f64).cbrt()) as f32
 }
 
 /// AVX-512 RGBA(u8) → planar X/Y/B via 16-wide `vgatherdps` over the sqrt-linear
 /// LUT. This is the fast-gather path that motivates AVX-512 here.
 #[target_feature(enable = "avx512f")]
-pub unsafe fn pixels_to_xyb_avx512(px: &[u8], n: usize, lut: *const f32, x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
+pub unsafe fn pixels_to_xyb_avx512(px: &[u8], n: usize, lut: &'static [f32; 256], x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
     // px is read at indices up to (n-1)*4 + 2 (RGBA stride); x/y/b are written up
-    // to n-1. Encode the caller's length invariant so a wrapped/desynced geometry
-    // traps in debug instead of OOB-reading px or OOB-writing the X/Y/B planes.
-    debug_assert!(
+    // to n-1. Use assert! (not debug_assert!) to match avx2.rs:210-213 — release
+    // builds must be guarded so OOB via get_unchecked is a defined panic, not UB.
+    assert!(
         px.len() >= n * 4 && x.len() >= n && y.len() >= n && b.len() >= n,
         "pixels_to_xyb_avx512: px or an output plane is shorter than required for n"
     );
@@ -109,22 +115,29 @@ pub unsafe fn pixels_to_xyb_avx512(px: &[u8], n: usize, lut: *const f32, x: &mut
             gi[l] = *px.get_unchecked(base + 1) as i32;
             bi[l] = *px.get_unchecked(base + 2) as i32;
         }
-        let r = _mm512_i32gather_ps::<4>(_mm512_loadu_si512(ri.as_ptr() as *const __m512i), lut);
-        let g = _mm512_i32gather_ps::<4>(_mm512_loadu_si512(gi.as_ptr() as *const __m512i), lut);
-        let bb = _mm512_i32gather_ps::<4>(_mm512_loadu_si512(bi.as_ptr() as *const __m512i), lut);
+        let lp = lut.as_ptr();
+        let r = _mm512_i32gather_ps::<4>(_mm512_loadu_si512(ri.as_ptr() as *const __m512i), lp);
+        let g = _mm512_i32gather_ps::<4>(_mm512_loadu_si512(gi.as_ptr() as *const __m512i), lp);
+        let bb = _mm512_i32gather_ps::<4>(_mm512_loadu_si512(bi.as_ptr() as *const __m512i), lp);
         _mm512_storeu_ps(x.as_mut_ptr().add(i), _mm512_mul_ps(_mm512_sub_ps(r, bb), half));
         _mm512_storeu_ps(y.as_mut_ptr().add(i), _mm512_fmadd_ps(_mm512_add_ps(r, bb), half, g));
         _mm512_storeu_ps(b.as_mut_ptr().add(i), bb);
         i += 16;
     }
-    let lut_s: &[f32; 256] = &*(lut as *const [f32; 256]);
-    xyb_tail(px, lut_s, n, i, x, y, b);
+    // lut is already &'static [f32; 256] — no unsafe cast needed.
+    xyb_tail(px, lut, n, i, x, y, b);
 }
 
 /// AVX-512 2× box downsample (16 output px/iter interior, scalar edge). Uses
 /// `permutex2var_ps` to split 32 contiguous src floats into even (sx0) / odd (sx1).
 #[target_feature(enable = "avx512f")]
 pub unsafe fn downsample_avx512(src: &[f32], dst: &mut [f32], w: usize, h: usize, dw: usize, dh: usize) {
+    // Mirror avx2.rs:261-264: both source and destination dimensions must be in-bounds
+    // before any _mm512_loadu_ps/_mm512_storeu_ps call, or reads/writes are silent UB.
+    assert!(
+        src.len() >= w * h && dst.len() >= dw * dh,
+        "downsample_avx512: src.len() must be >= w*h and dst.len() >= dw*dh"
+    );
     let quarter = _mm512_set1_ps(0.25);
     // even = src indices 0,2,...,30 ; odd = 1,3,...,31 across the concatenated a||b.
     let even_idx = _mm512_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);

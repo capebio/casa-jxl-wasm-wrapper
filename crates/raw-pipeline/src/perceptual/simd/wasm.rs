@@ -22,9 +22,10 @@ pub fn scale_err_wasm(
     kx: f32, ky: f32, kb: f32,
 ) -> f32 {
     // All seven slices are read via v128_load up to index `lanes < n` and indexed
-    // up to `n-1` in the scalar tail. Encode the caller's >= n length invariant so
-    // a desynced level size traps in debug instead of OOB-reading wasm memory.
-    debug_assert!(
+    // up to `n-1` in the scalar tail. Use assert! (not debug_assert!) to match
+    // avx2.rs:36-40 — WASM release builds ship as the primary production target and
+    // must also be guarded so OOB reads are a defined panic, not silent UB.
+    assert!(
         mask.len() >= n && rx.len() >= n && ry.len() >= n && rb.len() >= n
             && tx.len() >= n && ty.len() >= n && tb.len() >= n,
         "scale_err_wasm: a slice is shorter than n"
@@ -68,15 +69,17 @@ pub fn scale_err_wasm(
     }
     sum += hsum(acc) as f64;
     sum = scale_err_tail(mask, rx, ry, rb, tx, ty, tb, n, kx, ky, kb, i, sum);
-    ((sum / n as f64).powf(1.0 / 3.0)) as f32
+    // cbrt() is faster and more accurate than powf(1.0/3.0) (two transcendentals).
+    ((sum / n as f64).cbrt()) as f32
 }
 
 /// wasm v128 RGBA→planar XYB. Scalar LUT loads (no wasm gather) + vector arithmetic.
 pub fn pixels_to_xyb_wasm(px: &[u8], n: usize, lut: &[f32; 256], x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
     // Reads px via get_unchecked up to (n-1)*4+2 and v128_store/index x/y/b up to
-    // n-1. Encode the caller's length invariant so a wrapped/mismatched n (wasm32
-    // usize is 32-bit) traps in debug instead of OOB-reading/writing wasm memory.
-    debug_assert!(
+    // n-1. Use assert! (not debug_assert!) to match avx2.rs:210-213 — WASM release
+    // builds are the primary production target and must be guarded so OOB reads via
+    // get_unchecked are a defined panic, not silent UB in WASM linear memory.
+    assert!(
         px.len() >= n * 4 && x.len() >= n && y.len() >= n && b.len() >= n,
         "pixels_to_xyb_wasm: px shorter than n*4 or an output plane shorter than n"
     );
@@ -121,10 +124,12 @@ pub fn pixels_to_xyb_wasm(px: &[u8], n: usize, lut: &[f32; 256], x: &mut [f32], 
 pub fn downsample_wasm(src: &[f32], dst: &mut [f32], w: usize, h: usize, dw: usize, dh: usize) {
     for y in 0..dh {
         let sy0 = y << 1;
-        let sy1 = (sy0 + 1).min(h - 1);
+        // Use if-form instead of `.min(h - 1)` to avoid usize underflow when h==0.
+        let sy1 = if sy0 + 1 < h { sy0 + 1 } else { sy0 };
         for x in 0..dw {
             let sx0 = x << 1;
-            let sx1 = (sx0 + 1).min(w - 1);
+            // Same: avoid w - 1 underflow when w==0.
+            let sx1 = if sx0 + 1 < w { sx0 + 1 } else { sx0 };
             dst[y * dw + x] = (src[sy0 * w + sx0] + src[sy0 * w + sx1] + src[sy1 * w + sx0] + src[sy1 * w + sx1]) * 0.25;
         }
     }

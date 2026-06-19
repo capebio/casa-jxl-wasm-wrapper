@@ -39,7 +39,8 @@ pub(crate) fn scale_err(
         let e2 = k.kx * ex * ex + k.ky * ey * ey + k.kb * eb * eb;
         sum += (e2 * (e2 + 1e-12).sqrt()) as f64; // e2^(3/2)
     }
-    ((sum / n as f64).powf(1.0 / 3.0)) as f32
+    // cbrt() is faster and more accurate than powf(1.0/3.0) (two transcendentals).
+    ((sum / n as f64).cbrt()) as f32
 }
 
 /// 2× area downsample (box) of one plane → (dst, dw, dh). Port of `dn2`.

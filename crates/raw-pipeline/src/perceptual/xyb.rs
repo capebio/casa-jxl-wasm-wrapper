@@ -21,10 +21,11 @@ pub(crate) fn sqrt_lin_lut() -> &'static [f32; 256] {
     })
 }
 
-/// Raw base pointer to the sqrt-linear LUT, for the x86 SIMD gather paths.
+/// Reference to the sqrt-linear LUT for the x86 SIMD gather paths.
+/// Returns a &'static reference so callers can avoid raw pointer lifetime ambiguity.
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn sqrt_lin_lut_ptr() -> *const f32 {
-    sqrt_lin_lut().as_ptr()
+pub(crate) fn sqrt_lin_lut_ptr() -> &'static [f32; 256] {
+    sqrt_lin_lut()
 }
 
 /// RGBA (stride 4, alpha ignored) → planar X/Y/B. `x`,`y`,`b_out` len == n.

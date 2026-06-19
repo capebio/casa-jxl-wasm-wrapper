@@ -83,6 +83,11 @@ pub(crate) fn finalize_ssim(
     if wch == 0 {
         return 0.0;
     }
+    // Guard np==0: dividing by n below would produce NaN that propagates silently
+    // through consumer arithmetic. Return 0.0 for degenerate empty buffers.
+    if np == 0 {
+        return 0.0;
+    }
     let n = np as f64;
     let mut s = 0.0f64;
     for c in 0..wch {
