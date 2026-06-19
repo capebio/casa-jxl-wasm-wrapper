@@ -2,6 +2,7 @@
 //! when `detect_native` confirmed avx2+fma. 8-wide f32 lanes.
 
 #![cfg(target_arch = "x86_64")]
+// SpeedCodeReview ✓ 2026-06-19 · opus-4.8[1m] · sweeps=2 · Arch 2/0/1 Alg 2/0/0 Code 6/5/1 (x/y/z=found/green/red, +3 deferred)
 
 use core::arch::x86_64::*;
 use super::scalar::{scale_err_tail, xyb_tail, downsample_row_tail};
@@ -68,7 +69,7 @@ pub unsafe fn scale_err_avx2(
         let inv = if rsqrt_path {
             // rcp(mm) refined one Newton step: r1 = r0 * (2 - mm*r0)
             let r0 = _mm256_rcp_ps(mm);
-            _mm256_mul_ps(r0, _mm256_fnmadd_ps(mm, r0, _mm256_set1_ps(2.0)))
+            _mm256_mul_ps(r0, _mm256_fnmadd_ps(mm, r0, v2))
         } else {
             _mm256_div_ps(_mm256_set1_ps(1.0), mm)
         };
@@ -216,7 +217,7 @@ pub unsafe fn ssim_moments_avx2(
 pub unsafe fn pixels_to_xyb_avx2(
     px: &[u8],
     n: usize,
-    lut: &'static [f32; 256],
+    lut: &[f32; 256],
     x: &mut [f32],
     y: &mut [f32],
     b: &mut [f32],
@@ -232,9 +233,9 @@ pub unsafe fn pixels_to_xyb_avx2(
     let half = _mm256_set1_ps(0.5);
     // Byte-lane masks for extracting R/G/B from packed RGBA i32 lanes.
     // Each pixel occupies one i32 lane as [R, G, B, A] in little-endian order.
-    // After loading 8 RGBA pixels into one __m256i via cvtepu8→widen+deinterleave,
-    // we use AND masks to isolate each channel byte in the i32 lane, then shift
-    // to build the gather index (0..255).
+    // A single 256-bit loadu of 32 bytes places 8 RGBA pixels one-per-i32-lane;
+    // we then AND-mask each channel byte in the lane and shift it down to bits
+    // [7:0] to build the gather index (0..255). No widen/deinterleave step.
     let mask_r = _mm256_set1_epi32(0x0000_00FF); // byte 0 of each i32 lane
     let mask_g = _mm256_set1_epi32(0x0000_FF00); // byte 1 of each i32 lane
     let mask_b = _mm256_set1_epi32(0x00FF_0000); // byte 2 of each i32 lane
@@ -263,7 +264,7 @@ pub unsafe fn pixels_to_xyb_avx2(
         _mm256_storeu_ps(b.as_mut_ptr().add(i), bb);
         i += 8;
     }
-    // lut is already &'static [f32; 256] — no unsafe cast needed.
+    // lut is a plain &[f32; 256] — shared with the scalar tail directly, no cast.
     xyb_tail(px, lut, n, i, x, y, b);
 }
 

@@ -6,6 +6,7 @@
 //! and must only be called after `detect_native` confirmed AVX-512.
 
 #![cfg(target_arch = "x86_64")]
+// SpeedCodeReview ✓ 2026-06-19 · opus-4.8[1m] · sweeps=2 · Arch 2/0/1 Alg 2/0/0 Code 6/5/1 (x/y/z=found/green/red, +3 deferred)
 
 use core::arch::x86_64::*;
 use super::scalar::{scale_err_tail, xyb_tail, downsample_row_tail};
@@ -94,7 +95,7 @@ pub unsafe fn scale_err_avx512(
 /// AVX-512 RGBA(u8) → planar X/Y/B via 16-wide `vgatherdps` over the sqrt-linear
 /// LUT. This is the fast-gather path that motivates AVX-512 here.
 #[target_feature(enable = "avx512f")]
-pub unsafe fn pixels_to_xyb_avx512(px: &[u8], n: usize, lut: &'static [f32; 256], x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
+pub unsafe fn pixels_to_xyb_avx512(px: &[u8], n: usize, lut: &[f32; 256], x: &mut [f32], y: &mut [f32], b: &mut [f32]) {
     // px is read at indices up to (n-1)*4 + 2 (RGBA stride); x/y/b are written up
     // to n-1. Use assert! (not debug_assert!) to match avx2.rs:210-213 — release
     // builds must be guarded so OOB via get_unchecked is a defined panic, not UB.
@@ -124,7 +125,7 @@ pub unsafe fn pixels_to_xyb_avx512(px: &[u8], n: usize, lut: &'static [f32; 256]
         _mm512_storeu_ps(b.as_mut_ptr().add(i), bb);
         i += 16;
     }
-    // lut is already &'static [f32; 256] — no unsafe cast needed.
+    // lut is a plain &[f32; 256] — shared with the scalar tail directly, no cast.
     xyb_tail(px, lut, n, i, x, y, b);
 }
 

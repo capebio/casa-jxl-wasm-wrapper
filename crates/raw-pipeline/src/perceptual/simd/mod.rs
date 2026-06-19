@@ -1,4 +1,6 @@
-//! Backend identification + runtime dispatch. AVX2 impls land in `avx2`.
+//! Backend identification + runtime dispatch. Per-arch kernels live in `avx2`,
+//! `avx512`, and `wasm`; shared scalar tails in `scalar`.
+// SpeedCodeReview ✓ 2026-06-19 · opus-4.8[1m] · sweeps=2 · Arch 2/0/1 Alg 2/0/0 Code 6/5/1 (x/y/z=found/green/red, +3 deferred)
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Backend {

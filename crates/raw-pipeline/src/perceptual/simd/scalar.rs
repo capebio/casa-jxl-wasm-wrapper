@@ -1,6 +1,7 @@
 //! Shared scalar tails for SIMD kernels. Called from avx2, avx512, and wasm
 //! modules after their vectorised bulk passes exhaust aligned lanes.
 //! No architecture gate — compiles on all targets.
+// SpeedCodeReview ✓ 2026-06-19 · opus-4.8[1m] · sweeps=2 · Arch 2/0/1 Alg 2/0/0 Code 6/5/1 (x/y/z=found/green/red, +3 deferred)
 
 /// scale_err scalar tail: accumulates `e2*sqrt(e2+eps)` from `i_start` to `n`
 /// into `sum_in` (f64) and returns the updated sum. Callers pass the residual

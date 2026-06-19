@@ -2,6 +2,7 @@
 //! against the JS reference in Node (wasm intrinsics can't run under `cargo test`).
 //! The whole module requires the build to enable `+simd128`.
 #![cfg(target_arch = "wasm32")]
+// SpeedCodeReview ✓ 2026-06-19 · opus-4.8[1m] · sweeps=2 · Arch 2/0/1 Alg 2/0/0 Code 6/5/1 (x/y/z=found/green/red, +3 deferred)
 
 use core::arch::wasm32::*;
 use super::scalar::{scale_err_tail, xyb_tail};
@@ -21,6 +22,12 @@ pub fn scale_err_wasm(
     tx: &[f32], ty: &[f32], tb: &[f32], n: usize,
     kx: f32, ky: f32, kb: f32,
 ) -> f32 {
+    // Guard n==0 before the `sum / n` divide below: 0.0/0.0 is NaN, whereas the
+    // scalar oracle (butteraugli.rs) and the avx2/avx512 kernels all early-return
+    // 0.0 for degenerate empty levels. Keep this path bit-consistent with them.
+    if n == 0 {
+        return 0.0;
+    }
     // All seven slices are read via v128_load up to index `lanes < n` and indexed
     // up to `n-1` in the scalar tail. Use assert! (not debug_assert!) to match
     // avx2.rs:36-40 — WASM release builds ship as the primary production target and
