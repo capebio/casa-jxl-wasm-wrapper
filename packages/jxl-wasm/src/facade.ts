@@ -627,6 +627,7 @@ let _cachedDetectedTier: Tier | undefined;
 export function setJxlModuleFactoryForTesting(factory: JxlModuleFactory | null): void {
   testModuleFactory = factory;
   modulePromise = undefined;
+  _a6Checked = false;
 }
 
 /**
@@ -636,7 +637,9 @@ export function setJxlModuleFactoryForTesting(factory: JxlModuleFactory | null):
  */
 export function setForcedTier(tier: Tier | null): void {
   _forcedTier = tier;
+  _cachedDetectedTier = undefined;
   modulePromise = undefined;
+  _a6Checked = false;
 }
 
 export function getForcedTier(): Tier | null {
@@ -1017,12 +1020,6 @@ export async function decodeTiledRegionRgba8(
     const estTilesY = Math.ceil((y + h) / tileSize) - Math.floor(y / tileSize);
     const estTilesNeeded = estTilesX * estTilesY;
 
-    console.log(
-      `[decodeTiledRegionRgba8] region=${x},${y} size=${w}×${h} estTiles=${estTilesNeeded} (${estTilesX}×${estTilesY}) | ` +
-      `prep=${(t1-tStart).toFixed(1)}ms malloc=${tMalloc.toFixed(1)}ms heapSet=${tHeapSet.toFixed(1)}ms ` +
-      `wasmDecode=${tWasmDecode.toFixed(1)}ms bufferRead=${tBufferRead.toFixed(1)}ms total=${tTotal.toFixed(1)}ms | ` +
-      `output=${buf.width}×${buf.height} (${(buf.data.byteLength / 1024).toFixed(1)}KB)`
-    );
     onMetric?.("tiled_region_total", tTotal);
 
     return { pixels: buf.data, width: buf.width, height: buf.height };
@@ -1239,13 +1236,6 @@ async function decodeTileContainerRegion(
     onMetric?.("jxtc_buffer_read", tBufferRead);
 
     const tTotal = performance.now() - tStart;
-    const label = format === "rgba16" ? "decodeTileContainerRegionRgba16" : "decodeTileContainerRegionRgba8";
-    console.log(
-      `[${label}] region=${x},${y} size=${w}×${h} | ` +
-      `prep=${(t1-tStart).toFixed(1)}ms malloc=${tMalloc.toFixed(1)}ms heapSet=${tHeapSet.toFixed(1)}ms ` +
-      `wasmDecode=${tWasmDecode.toFixed(1)}ms bufferRead=${tBufferRead.toFixed(1)}ms total=${tTotal.toFixed(1)}ms | ` +
-      `output=${buf.width}×${buf.height} (${(buf.data.byteLength / 1024).toFixed(1)}KB)`
-    );
     onMetric?.("jxtc_total", tTotal);
 
     return { pixels: buf.data, width: buf.width, height: buf.height };
@@ -1474,18 +1464,9 @@ class LibjxlDecoder implements JxlDecoder {
     // Rank #2: Deferred-release buffer reuse (zero-copy pixel emission).
     let reusablePixelBuf: ArrayBuffer | null = null;
     let reusablePixelCap = 0; // capacity in bytes
-    // Rank #2: Pre-allocate reusable pixel buffer if deferredRelease enabled.
-    // Start with typical HD size (1920×1080×4 ≈ 8 MB).
-    if (this.options.deferredRelease) {
-      const estimatedPixelBytes = 1920 * 1080 * 4; // ~8 MB, typical HD size
-      try {
-        reusablePixelBuf = new ArrayBuffer(estimatedPixelBytes);
-        reusablePixelCap = estimatedPixelBytes;
-        this.options.onMetric?.("deferred_release_prealloc_bytes", estimatedPixelBytes);
-      } catch (e) {
-        throw new Error("Failed to pre-allocate reusable pixel buffer for deferredRelease mode: " + (e instanceof Error ? e.message : String(e)));
-      }
-    }
+    // Rank #2: Defer pixel buffer allocation until actual image dimensions are known.
+    // A fixed 1920×1080×4 pre-allocation would throw for images larger than HD (e.g. 4K = 33 MB).
+    // Instead, allocate (or grow) lazily on first use inside preparePixelsForEmit.
     try {
       let headerEmitted = false;
       let info: ImageInfo | undefined;
@@ -1513,14 +1494,15 @@ class LibjxlDecoder implements JxlDecoder {
       // Modifies pixData in-place: when deferredRelease=true, copies into reusablePixelBuf.
       // Returns the pixels to emit (shared ref if deferredRelease, otherwise original array).
       const preparePixelsForEmit = (pixData: Uint8Array): ArrayBuffer | Uint8Array => {
-        if (this.options.deferredRelease && reusablePixelBuf !== null) {
+        if (this.options.deferredRelease) {
+          // Grow the reusable buffer if needed (first use or image larger than previous frame).
+          if (reusablePixelBuf === null || pixData.byteLength > reusablePixelCap) {
+            reusablePixelBuf = new ArrayBuffer(pixData.byteLength);
+            reusablePixelCap = pixData.byteLength;
+            this.options.onMetric?.("deferred_release_alloc_bytes", pixData.byteLength);
+          }
           // Copy from source array into reusable buffer.
           // Caller will copy again if needed; transparent to session layer.
-          if (pixData.byteLength > reusablePixelCap) {
-            throw new Error(
-              `Pixel data (${pixData.byteLength} bytes) exceeds reusable buffer capacity (${reusablePixelCap} bytes)`
-            );
-          }
           const dstView = new Uint8Array(reusablePixelBuf, 0, pixData.byteLength);
           dstView.set(pixData);
           return reusablePixelBuf; // shared reference, not transferred
@@ -1802,28 +1784,21 @@ class LibjxlDecoder implements JxlDecoder {
     const fmt = this.options.format;
     const bpc = fmt === "rgbaf32" ? 4 : fmt === "rgba16" ? 2 : 1;
     const pixelStride = 4 * bpc;
-    // Rank #2: Pre-allocate reusable pixel buffer if deferredRelease enabled (symmetric with eventsProgressive).
+    // Rank #2: Reusable pixel buffer for deferredRelease mode (symmetric with eventsProgressive).
+    // Allocated lazily on first use so the exact image size drives the allocation; a fixed
+    // 1920×1080×4 pre-allocation would throw for any image larger than HD (e.g. 4K = 33 MB).
     let reusablePixelBuf: ArrayBuffer | null = null;
     let reusablePixelCap = 0; // capacity in bytes
-    if (this.options.deferredRelease) {
-      const estimatedPixelBytes = 1920 * 1080 * 4; // ~8 MB, typical HD size
-      try {
-        reusablePixelBuf = new ArrayBuffer(estimatedPixelBytes);
-        reusablePixelCap = estimatedPixelBytes;
-        this.options.onMetric?.("deferred_release_prealloc_bytes_oneshot", estimatedPixelBytes);
-      } catch (e) {
-        throw new Error("Failed to pre-allocate reusable pixel buffer in one-shot mode: " + (e instanceof Error ? e.message : String(e)));
-      }
-    }
     // Helper: emit with deferred-release or normal transfer
     const preparePixelsForEmit = (pixData: Uint8Array): ArrayBuffer | Uint8Array => {
-      if (this.options.deferredRelease && reusablePixelBuf !== null) {
-        // Copy from source array into reusable buffer.
-        if (pixData.byteLength > reusablePixelCap) {
-          throw new Error(
-            `Pixel data (${pixData.byteLength} bytes) exceeds reusable buffer capacity (${reusablePixelCap} bytes)`
-          );
+      if (this.options.deferredRelease) {
+        // Grow the reusable buffer if needed (first use or image larger than previous frame).
+        if (reusablePixelBuf === null || pixData.byteLength > reusablePixelCap) {
+          reusablePixelBuf = new ArrayBuffer(pixData.byteLength);
+          reusablePixelCap = pixData.byteLength;
+          this.options.onMetric?.("deferred_release_alloc_bytes_oneshot", pixData.byteLength);
         }
+        // Copy from source array into reusable buffer.
         const dstView = new Uint8Array(reusablePixelBuf, 0, pixData.byteLength);
         dstView.set(pixData);
         return reusablePixelBuf; // shared reference, not transferred
@@ -2051,7 +2026,6 @@ class LibjxlEncoder implements JxlEncoder {
     this.wasmModule = module;
     if (this.cancelled) return module;
     this.tCreateStart = performance.now() - t0; // includes first load if cold
-    console.log(`[jxl-wasm-enc] module+create_image setup: ${this.tCreateStart.toFixed(1)}ms`);
 
     const caps = getCapabilities(module);
     // Use streaming input only when sidecars are not requested — sidecar path takes
@@ -2325,13 +2299,7 @@ class LibjxlEncoder implements JxlEncoder {
               if (iccPtr !== 0) module._free(iccPtr);
               if (exifPtr !== 0) module._free(exifPtr);
               if (xmpPtr !== 0) module._free(xmpPtr);
-              console.warn("[jxl-wasm] OOM while allocating metadata boxes. Proceeding without metadata.");
-              iccPtr = 0;
-              exifPtr = 0;
-              xmpPtr = 0;
-              iccSize = 0;
-              exifSize = 0;
-              xmpSize = 0;
+              throw new Error("WASM OOM: failed to allocate metadata buffers; encode aborted");
             }
 
             const adv = this.prepareAdvancedSettings(module);
@@ -2392,9 +2360,6 @@ class LibjxlEncoder implements JxlEncoder {
 
     this.encodeStats = { originalBytes: this.pixelByteTotal, compressedBytes, ratio: this.pixelByteTotal > 0 ? compressedBytes / this.pixelByteTotal : 0 };
 
-    // Profile summary (visible even without external onMetric harness)
-    const totalFacade = (this.tCreateStart || 0) + this.tPushTotal + (this.tFinishStart || 0) + this.tTakeTotal + this.tMallocCopy;
-    console.log(`[jxl-wasm-enc] facade profile: create=${(this.tCreateStart||0).toFixed(1)} push=${this.tPushTotal.toFixed(1)} finish=${(this.tFinishStart||0).toFixed(1)} take=${this.tTakeTotal.toFixed(1)} mallocCopy=${this.tMallocCopy.toFixed(1)} totalFacade≈${totalFacade.toFixed(1)}ms | compressed=${compressedBytes}B`);
   }
 
   getStats(): EncodeStats | null { return this.encodeStats; }
@@ -2404,6 +2369,7 @@ class LibjxlEncoder implements JxlEncoder {
     this.freeWasmState();
     this.finishResolve?.();
     this.finishResolve = null;
+    if (this.pendingPushError !== null) throw this.pendingPushError;
   }
 
   dispose(): void {
@@ -2449,8 +2415,7 @@ class LibjxlEncoder implements JxlEncoder {
     if (idsPtr === 0 || valuesPtr === 0) {
       if (idsPtr !== 0) module._free(idsPtr);
       if (valuesPtr !== 0) module._free(valuesPtr);
-      console.warn("[jxl-wasm] OOM while allocating advanced settings. Bypassing advanced options.");
-      return { idsPtr: 0, valuesPtr: 0, count: 0, free: () => {} };
+      throw new Error("WASM OOM: failed to allocate advancedFrameSettings buffers");
     }
 
     module.HEAP32.set(ids, idsPtr >> 2);
@@ -2520,7 +2485,7 @@ async function loadGeneratedLibjxlModule(): Promise<LibjxlWasmModule> {
   return await (factory as (options: Record<string, unknown>) => Promise<LibjxlWasmModule>)(options);
 }
 
-interface JxlCapabilities {
+export interface JxlCapabilities {
   progressiveDecode: boolean;
   streamingEncode: boolean;
   streamingInput: boolean;
@@ -2533,7 +2498,7 @@ interface JxlCapabilities {
 
 const capabilityCache = new WeakMap<LibjxlWasmModule, JxlCapabilities>();
 
-function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
+export function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
   let caps = capabilityCache.get(module);
   if (caps !== undefined) return caps;
   caps = {
@@ -3277,24 +3242,17 @@ export async function perceptualConstancyApplyBulk(
 
   const fn = m._perceptual_apply_full_avx2;
   if (typeof fn === "function") {
-    // SoA bulk path (preferred, the intrinsics win)
-    const t0 = performance.now();
     fn(r, g, b, targetR, targetG, targetB, n, sat, vib, vibZero ? 1 : 0);
-    const t1 = performance.now();
-    // Hook for benchmarking the JS-called bulk (C++ or scalar).
-    console.log(`perceptual_bulk_ms (JS): ${(t1 - t0).toFixed(3)}`);
     return;
   }
   const fns = m._perceptual_apply_full;
   if (typeof fns === "function") {
-    // Fallback scalar per-pixel (still faster boundary than full Rust roundtrip for some cases)
-    for (let i = 0; i < n; i++) {
-      const rr = r[i] ?? 0, gg = g[i] ?? 0, bb = b[i] ?? 0;
-      // scalar signature is scalar out by ptr; emulate via small stack? In practice the bulk is what ships.
-      // For demo we call a JS poly if needed; real scalar is in WASM for direct call from C++ side.
-      // Here we just no-op warn; users should rebuild to get the bulk.
-      targetR[i] = rr; targetG[i] = gg; targetB[i] = bb;
-    }
+    // _perceptual_apply_full_avx2 is absent — scalar JS path not implemented.
+    // The transform is skipped (identity copy). Rebuild with AVX2 for real output.
+    console.warn("[jxl-wasm] perceptualConstancyApplyBulk: AVX2 bulk fn absent; perceptual transform not applied (identity). Rebuild WASM with AVX2 support.");
+    if (targetR !== r) targetR.set(r);
+    if (targetG !== g) targetG.set(g);
+    if (targetB !== b) targetB.set(b);
     return;
   }
   // No support compiled in: identity

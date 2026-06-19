@@ -232,7 +232,10 @@ pub struct ProcessResult {
     pub has_gps: bool,
     #[wasm_bindgen(readonly)]
     pub quality: u16,
-    // 0xFFFF = absent/unknown (mirrors has_gps pattern using explicit bool for GPS)
+    /// Olympus WhiteBalance2 mode tag (MakerNote 0x0500).
+    /// `0xFFFF` = absent / unknown — JS callers must check for this sentinel before
+    /// interpreting the value (e.g. to decide whether to show a WB-mode label).
+    /// For DNG and CR2 files this field is always `0xFFFF` (no per-shot WB mode tag).
     #[wasm_bindgen(readonly)]
     pub wb_mode: u16,
     #[wasm_bindgen(readonly)]
@@ -993,9 +996,16 @@ pub fn process_orf(
 /// Variant of `process_orf` with explicit output flags to skip unused pipeline stages.
 ///
 /// `output_flags` is a bitmask of:
-/// - `1`: full-resolution RGB8 (needed for JXL encoding)
-/// - `2`: 1800 px lightbox RGB16 cache (needed to construct a `LookRenderer`)
-/// - `4`: 360 px thumbnail RGB16 cache (needed to construct a thumb `LookRenderer`)
+/// - `1` (`OUT_FULL_RGB8`): full-resolution RGB8 (needed for JXL encoding)
+/// - `2` (`OUT_LIGHTBOX`): 1800 px lightbox RGB16 cache (needed to construct a `LookRenderer`)
+/// - `4` (`OUT_THUMB`): 360 px thumbnail RGB16 cache (needed to construct a thumb `LookRenderer`)
+/// - `8` (`OUT_FULL_16`): full-resolution packed u16 LE (6 bytes/pixel) for pyramid big levels
+///   and the 16-bit lightbox/ROI/export path. Grid levels and JPG stay 8-bit.
+/// - `16` (`OUT_NO_ORIENT`): skip `apply_orientation` on the RGB8 output. Pixels stay in sensor
+///   orientation; the consumer reads `orientation` to display or encode with JXL basic-info.
+///   Saves the 60–200 MB intermediate rotate when feeding a JXL encoder.
+///   (Note: bit 8 was previously used for `OUT_NO_ORIENT` before `OUT_FULL_16=8` was added;
+///   `OUT_NO_ORIENT` was moved to bit 16 to avoid the collision — commit b2cb8dc9 / 1674aa11.)
 ///
 /// Absent outputs have empty buffers and zero dims in `ProcessResult`.
 /// Pass `7` for classic (no full16). For M3 16-bit big levels pass e.g. 15 (7|8).
@@ -2135,13 +2145,14 @@ fn process_dng_impl(
         color_matrix_flat,
         lens: String::new(),
         datetime: String::new(),
+        // den=0 is the absent-sentinel (same as ORF); JS checks den==0 before dividing.
         exposure_num: 0,
-        exposure_den: 1,
+        exposure_den: 0,
         fnumber_num: 0,
-        fnumber_den: 1,
+        fnumber_den: 0,
         iso,
         focal_length_num: 0,
-        focal_length_den: 1,
+        focal_length_den: 0,
         focal_length_35: 0,
         gps_lat: 0.0,
         gps_lon: 0.0,
@@ -2342,7 +2353,7 @@ fn decode_cr2_raw(data: &[u8]) -> Result<Cr2Decoded, JsError> {
             if max_rb > 0 && mean_g < max_rb / 8 {
                 // Try the other three phases; accept the first that brings G into
                 // the range [max_rb/4 .. 4*max_rb].
-                const ALT_PHASES: [(u8, u8); 3] = [(0, 1), (1, 0), (1, 1)];
+                const ALT_PHASES: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
                 for &phase in &ALT_PHASES {
                     if phase == cr2.cfa_phase { continue; }
                     if let Ok(candidate) = demosaic::demosaic_bayer_mhc(&cr2.raw, w, h, phase) {
@@ -2406,28 +2417,30 @@ fn decode_cr2_raw(data: &[u8]) -> Result<Cr2Decoded, JsError> {
     })
 }
 
+impl From<Cr2Decoded> for DngDecoded {
+    fn from(c: Cr2Decoded) -> Self {
+        DngDecoded {
+            rgb16:              c.rgb16,
+            aw:                 c.aw,
+            ah:                 c.ah,
+            params:             c.params,
+            color_matrix_flat:  c.color_matrix_flat,
+            decode_ms:          c.decode_ms,
+            demosaic_ms:        c.demosaic_ms,
+            orientation:        c.orientation,
+            make:               c.make,
+            model:              c.model,
+            iso:                c.iso,
+        }
+    }
+}
+
 fn process_cr2_impl(
     decoded: Cr2Decoded,
     output_flags: u32,
     look: &LookOverrides,
 ) -> Result<ProcessResult, JsError> {
-    process_dng_impl(
-        DngDecoded {
-            rgb16: decoded.rgb16,
-            aw: decoded.aw,
-            ah: decoded.ah,
-            params: decoded.params,
-            color_matrix_flat: decoded.color_matrix_flat,
-            decode_ms: decoded.decode_ms,
-            demosaic_ms: decoded.demosaic_ms,
-            orientation: decoded.orientation,
-            make: decoded.make,
-            model: decoded.model,
-            iso: decoded.iso,
-        },
-        output_flags,
-        look,
-    )
+    process_dng_impl(decoded.into(), output_flags, look)
 }
 
 /// Parse + decode a Canon CR2 file blob.
@@ -2535,6 +2548,12 @@ pub struct PerceptualComparer {
 impl PerceptualComparer {
     #[wasm_bindgen(constructor)]
     pub fn new(ref_rgba: &[u8], width: usize, height: usize) -> PerceptualComparer {
+        let expected = width.saturating_mul(height).saturating_mul(4);
+        assert!(
+            ref_rgba.len() == expected,
+            "PerceptualComparer: ref_rgba.len() ({}) != width*height*4 ({}×{}×4={})",
+            ref_rgba.len(), width, height, expected,
+        );
         let n = width.saturating_mul(height);
         let inner = PerceptualCore::new(ref_rgba, width, height, Opts::default());
         PerceptualComparer { inner, scratch: vec![0u8; n.saturating_mul(4)] }
@@ -2636,7 +2655,9 @@ fn fs_to_js(r: &FsRaw, px: usize) -> JsValue {
     let a_min = if px == 0 { 0 } else { r.a_min };
     let mean = if px > 0 { r.l_sum / px as f64 } else { 0.0 };
     let var = if px > 0 {
-        ((r.l_sq / px as f64) - mean * mean).max(0.0) / 65536.0
+        // Normalize by 65025.0 (max luma = 54×255 + 183×255 + 18×255 = 255×255).
+        // Matches the native FrameStats::luma_variance() in frame_stats.rs.
+        ((r.l_sq / px as f64) - mean * mean).max(0.0) / 65025.0
     } else {
         0.0
     };
