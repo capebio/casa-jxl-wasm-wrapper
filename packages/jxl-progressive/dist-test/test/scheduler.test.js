@@ -102,6 +102,7 @@ function makeJob(overrides = {}) {
         prefixAccum: null,
         prefixBytes: 0,
         manifestDispatched: false,
+        saliencyBoosted: false,
         ...overrides,
     };
 }

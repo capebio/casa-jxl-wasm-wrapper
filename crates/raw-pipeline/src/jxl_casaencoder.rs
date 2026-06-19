@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn u8_rgb_lossless_roundtrip_exact() {
         let src = ramp_u8(3);
-        let jxl = encode_rgb8(&src, W, H, &EncodeOptions::lossless()).unwrap();
+        let jxl = encode_rgb8(&src, W, H, EncodeOptions::lossless()).unwrap();
         assert!(has_jxl_magic(&jxl));
         let (px, w, h) = decode_interleaved::<u8>(&jxl, 3).unwrap();
         assert_eq!((w, h), (W, H));
@@ -779,7 +779,7 @@ mod tests {
             px[2] = 40;
             px[3] = if i % 3 == 0 { 100 } else { 255 };
         }
-        let jxl = encode_rgba8(&src, W, H, &EncodeOptions::lossless()).unwrap();
+        let jxl = encode_rgba8(&src, W, H, EncodeOptions::lossless()).unwrap();
         let (px, _, _) = decode_interleaved::<u8>(&jxl, 4).unwrap();
         assert_eq!(px, src, "u8 RGBA lossless not bit-exact (alpha?)");
     }
@@ -891,7 +891,7 @@ mod tests {
             EncodeOptions::distance(1.0),
             EncodeOptions::lossless(),
         ] {
-            let jxl = encode_rgb8(&src, W, H, &opts).unwrap();
+            let jxl = encode_rgb8(&src, W, H, opts).unwrap();
             assert!(has_jxl_magic(&jxl));
             assert!(decode_interleaved::<u8>(&jxl, 3).is_some());
         }

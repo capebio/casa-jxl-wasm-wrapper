@@ -34,6 +34,8 @@ export interface ProgressiveImageJob {
     errorCount: number;
     nextRetryAt: number;
     manifestChecked: boolean;
+    /** True once saliency priority boost has been applied; prevents cumulative drift across tiers. */
+    saliencyBoosted: boolean;
 }
 export interface GalleryOptions {
     maxActiveDecoders?: number;
@@ -104,7 +106,7 @@ export declare class ProgressiveGallery {
     private readonly testFetchTier;
     private readonly testFetchFull;
     private readonly testStreamTierFrames;
-    private readonly testFetchTierWithPrefix?;
+    private readonly testFetchTierWithPrefix;
     constructor(cache: ProgressiveCache, sessionFactory: SessionFactory, opts?: GalleryOptions);
     /** Register an image. `jxlUrl` is the .jxl resource URL. */
     observe(element: Element, id: string, jxlUrl: string): void;

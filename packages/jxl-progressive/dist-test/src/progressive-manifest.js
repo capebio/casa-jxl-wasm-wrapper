@@ -26,7 +26,9 @@ export function validateManifest(json) {
     assertField(typeof obj["source"] === "object" && obj["source"] !== null, "source", "source must be an object");
     const src = obj["source"];
     assertField(typeof src["width"] === "number", "source.width", "source.width must be a number");
+    assertField(src["width"] > 0, "source.width", "source.width must be > 0");
     assertField(typeof src["height"] === "number", "source.height", "source.height must be a number");
+    assertField(src["height"] > 0, "source.height", "source.height must be > 0");
     assertField(typeof src["hasAlpha"] === "boolean", "source.hasAlpha", "source.hasAlpha must be a boolean");
     assertField(typeof src["orientation"] === "number", "source.orientation", "source.orientation must be a number");
     // jxl
@@ -44,6 +46,9 @@ export function validateManifest(json) {
     assertField(enc["libjxlVersion"].length <= 64, "encoder.libjxlVersion", "encoder.libjxlVersion must be <= 64 chars");
     assertField(Array.isArray(enc["flags"]), "encoder.flags", "encoder.flags must be an array");
     assertField(enc["flags"].length <= 64, "encoder.flags", "encoder.flags must have <= 64 entries");
+    for (let fi = 0; fi < enc["flags"].length; fi++) {
+        assertField(typeof enc["flags"][fi] === "string", `encoder.flags[${fi}]`, `encoder.flags[${fi}] must be a string`);
+    }
     // saliency (optional; tighten ranges when present so scheduler boosts are safe)
     if (obj["saliency"] !== undefined) {
         assertField(typeof obj["saliency"] === "object" && obj["saliency"] !== null, "saliency", "saliency must be an object if present");
@@ -73,6 +78,7 @@ export function validateManifest(json) {
         assertField(typeof t["byteEnd"] === "number", `${f}.byteEnd`, `${f}.byteEnd must be a number`);
         assertField(Number.isFinite(t["byteEnd"]) && t["byteEnd"] > 0, `${f}.byteEnd`, `${f}.byteEnd must be a finite positive number`);
         assertField(t["byteEnd"] > t["byteStart"], `${f}.byteEnd`, `${f}.byteEnd must be greater than ${f}.byteStart`);
+        assertField(t["byteEnd"] <= jxl["bytes"], `${f}.byteEnd`, `${f}.byteEnd (${t["byteEnd"]}) exceeds jxl.bytes (${jxl["bytes"]})`);
         assertField(typeof t["progressionIndex"] === "number" || t["progressionIndex"] === "final", `${f}.progressionIndex`, `${f}.progressionIndex must be number or "final"`);
         assertField(typeof t["intendedUse"] === "string", `${f}.intendedUse`, `${f}.intendedUse must be a string`);
     }

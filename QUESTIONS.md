@@ -1116,3 +1116,87 @@ Target: the 7-file progressive-JXL encode bunch (casaencoder, casabio_encode, jx
 - Suggested direction: `maxActiveFetches` could default to `maxActiveDecoders * 2` so slow fetches never starve fast WASM decoders
 
 ---
+
+## QUESTION from task 000-hacker-f6a7b8c9
+- Section: (selected files)
+- File: packages/jxl-wasm/src/facade.ts
+- Finding: eventsProgressive pixel copy optimization (preparePixelsForEmit)
+- Line range: ~1505-1519
+- What we tried: perf-unverified — no specific flipflop test covers this path
+- What we need: Run flipflopdom A/B for transfer vs copy cost in a real browser worker before committing; measure with 4K frame at ≥10 reps
+- Suggested direction: If copy into reusable buffer is slower than transfer+realloc for >4K images, disable deferredRelease for large frames
+
+## QUESTION from task 000-structure-i9j0k1
+- Section: (selected files)
+- File: packages/jxl-wasm/src/facade.ts
+- Finding: readBufferView vs retainBufferView inconsistency (perf claim)
+- Line range: various (all retainBufferView call sites in facade.ts)
+- What we tried: perf-unverified — no flipflop test covers this substitution
+- What we need: flipflopdom A/B comparing readBufferView vs retainBufferView for a mid-size JXL decode; confirm which releases memory sooner and whether it matters for throughput
+
+## QUESTION from task 000-hacker-e5f6a7b8
+- Section: (selected files)
+- File: packages/jxl-wasm/src/facade.ts
+- Finding: bilinearResize rgba16 x-axis weight hoisting (inner loop)
+- Line range: bilinearResize function (~line 800-900 area)
+- What we tried: perf-unverified — no specific flipflop test covers this path
+- What we need: flipflopdom A/B at 4K→2K resize; JIT may already hoist — measure before coding
+- Suggested direction: Hoist `srcXf`, `x0`, `x1`, `wx` arrays outside the y loop if they don't depend on y
+
+## QUESTION from task 000-structure-x4y5z6
+- Section: (selected files)
+- File: packages/jxl-wasm/src/facade.ts
+- Finding: eventsOneShot accumulates all chunks before decode (perf claim)
+- Line range: eventsOneShot body (~line 1800-1850)
+- What we tried: perf-unverified — one-shot batch is intentional (IMPROVEMENT-7)
+- What we need: Measure WASM FFI call overhead vs chunk-by-chunk streaming in eventsOneShot; if streaming saves >5% on 4K images consider changing the contract, but check that consumers tolerate partial first-chunk delivery
+
+## QUESTION from task 000-hacker-c3d4e5f6
+- Section: (selected files)
+- File: crates/raw-pipeline/src (ORF demosaic path, decode_orf_raw or equivalent)
+- Finding: decode_orf_raw double demosaic gate
+- Line range: ORF demosaic entry point
+- What we tried: perf-unverified — needs WASM rebuild + bench
+- What we need: cargo bench on ORF demosaic kernel, before/after removing the double gate; confirm no regression on pathological input (all-zero Bayer, odd-width, etc.)
+
+## QUESTION from task 000-hacker-a1b2c3d4
+- Section: (selected files)
+- File: src/lib.rs or crates/raw-pipeline (WASM SIMD frame_stats, fs_core_simd)
+- Finding: fs_core_simd v128 re-read
+- Line range: fs_core_simd kernel
+- What we tried: perf-unverified — needs WASM rebuild to measure
+- What we need: Rebuild with wasm-opt -O3 and inspect output; if the load is not eliminated, hoist the v128 into a register manually and benchmark with flipflopdom
+
+## QUESTION from task 000-hacker-a7b8c9d0
+- Section: (selected files)
+- File: crates/raw-pipeline/src (downscale path)
+- Finding: downscale division precompute reciprocal
+- Line range: downscale_rgba / downscale_rgb16 inner loops
+- What we tried: perf-unverified — reciprocal may not be faster on all arch
+- What we need: cargo bench `downscale_rgba` before/after on x86-64; also test on WASM (flipflopdom) — integer div and float recip behave differently under each engine
+
+## QUESTION from task 000-structure-d4e5f6
+- Section: (selected files)
+- File: src/lib.rs
+- Finding: DNG lightbox/thumb downscale path (complex restructure)
+- Line range: process_dng_impl output branches (~line 2023-2263)
+- What we tried: deferred — complex + needs WASM rebuild
+- What we need: Add integration tests covering all eight output_flags combinations (M3, lightbox, thumb, full RGB8, combinations) before restructuring the downscale branches; then measure if the refactor reduces binary size or improves decode latency
+
+## QUESTION from task 000-hacker-b2c3d4e5
+- Section: (selected files)
+- File: crates/raw-pipeline/src/frame_stats.rs
+- Finding: fs_core_simd_exact FNV loop
+- Line range: fs_core_simd_exact function
+- What we tried: perf-unverified — needs WASM rebuild to measure
+- What we need: Rebuild WASM with the FNV loop change and run `scalar_avx2_parity` test for bit-exact parity; then flipflopdom A/B at ≥1 MP to confirm speedup; the existing parity test in frame_stats::tests covers the scalar path only
+
+## QUESTION from task 000-structure-h8i9j0
+- Section: (selected files)
+- File: src/lib.rs
+- Finding: LookOverrides 14-arg API (public wasm_bindgen API)
+- Line range: LookOverrides struct + all process_* wasm_bindgen exports (~line 1923+)
+- What we tried: deferred — public API change requires ADR
+- What we need: ADR decision on the preferred JS-side API shape (flat args vs options object via JsValue/serde) before any implementation; the change breaks all existing JS callers and requires a migration path
+
+---
