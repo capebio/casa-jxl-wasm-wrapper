@@ -11,6 +11,20 @@
 use core::arch::x86_64::*;
 use super::scalar::{scale_err_tail, xyb_tail, downsample_row_tail};
 
+/// Drain a 16-lane i32 partial ([R,G,B,A]×4 pixels) into a per-channel u64[3]:
+/// lanes {0,4,8,12}→R, {1,5,9,13}→G, {2,6,10,14}→B (lane%4==3 = alpha, dropped).
+/// Unsigned `as u32 as u64` widen, same guard rationale as `hsum256i_u64`.
+#[inline]
+unsafe fn drain16_rgb(v: __m512i, acc: &mut [u64; 3]) {
+    let mut t = [0i32; 16];
+    _mm512_storeu_si512(t.as_mut_ptr() as *mut __m512i, v);
+    for k in 0..4 {
+        acc[0] += t[k * 4] as u32 as u64;
+        acc[1] += t[k * 4 + 1] as u32 as u64;
+        acc[2] += t[k * 4 + 2] as u32 as u64;
+    }
+}
+
 /// AVX-512 strict scale error (p=3). `rsqrt_path` swaps `1/m` and `sqrt(e2)` for
 /// refined rcp14/rsqrt14 approximations. Mirrors `avx2::scale_err_avx2`.
 #[target_feature(enable = "avx512f")]
@@ -167,6 +181,75 @@ pub unsafe fn downsample_avx512(src: &[f32], dst: &mut [f32], w: usize, h: usize
     }
 }
 
+/// AVX-512 SSIM moment accumulation (channel-as-lane, 4 px/iter). Server-only
+/// optimization: returns per-channel (sa, saa, sab) for c in 0..3, same contract as
+/// `avx2::ssim_moments_avx2` — but unlike that *deliberately scalar* kernel (the AVX2
+/// deinterleave attempt was a measured wash), this packs 4 RGBA pixels into the 16
+/// i32 lanes and fuses the three products. The wasm v128 form of the SAME layout is
+/// runtime-measured at 3.73× over scalar; this is its AVX-512 width. Parity == scalar
+/// by construction; perf is to be measured on real AVX-512 fleet hardware (the dev
+/// machine has none), not the dev machine.
+#[target_feature(enable = "avx512f")]
+pub unsafe fn ssim_moments_avx512(a: &[u8], b: &[u8], np: usize) -> ([u64; 3], [u64; 3], [u64; 3]) {
+    // assert! (not debug_assert!) to match ssim_moments_avx2 — a short buffer would
+    // OOB the 128-bit load below in a release build (silent UB).
+    assert!(
+        a.len() >= np * 4 && b.len() >= np * 4,
+        "ssim_moments_avx512: a.len() and b.len() must be >= np*4"
+    );
+    let mut sa = [0u64; 3];
+    let mut saa = [0u64; 3];
+    let mut sab = [0u64; 3];
+    let mut va = _mm512_setzero_si512();
+    let mut vaa = _mm512_setzero_si512();
+    let mut vab = _mm512_setzero_si512();
+    // Each i32 lane holds one channel of one pixel-slot and gains ≤255² = 65025 per
+    // iter; i32 overflows after ⌊(2³¹−1)/65025⌋ ≈ 33025 iters. Drain at 32000.
+    const FLUSH: usize = 32000;
+    let mut fc = 0usize;
+    let groups = np / 4;
+    let mut p = 0usize;
+    let mut g = 0usize;
+    while g < groups {
+        let off = p * 4;
+        // Load 16 bytes (4 RGBA px) and widen u8→i32: lanes = [R0,G0,B0,A0, R1,…, R3,…].
+        let av = _mm512_cvtepu8_epi32(_mm_loadu_si128(a.as_ptr().add(off) as *const __m128i));
+        let bv = _mm512_cvtepu8_epi32(_mm_loadu_si128(b.as_ptr().add(off) as *const __m128i));
+        va = _mm512_add_epi32(va, av);
+        vaa = _mm512_add_epi32(vaa, _mm512_mullo_epi32(av, av));
+        vab = _mm512_add_epi32(vab, _mm512_mullo_epi32(av, bv));
+        p += 4;
+        g += 1;
+        fc += 1;
+        if fc == FLUSH {
+            drain16_rgb(va, &mut sa);
+            drain16_rgb(vaa, &mut saa);
+            drain16_rgb(vab, &mut sab);
+            va = _mm512_setzero_si512();
+            vaa = _mm512_setzero_si512();
+            vab = _mm512_setzero_si512();
+            fc = 0;
+        }
+    }
+    drain16_rgb(va, &mut sa);
+    drain16_rgb(vaa, &mut saa);
+    drain16_rgb(vab, &mut sab);
+    // Scalar tail for the remaining np % 4 pixels.
+    let mut j = p * 4;
+    while p < np {
+        for c in 0..3 {
+            let x = a[j + c] as u64;
+            let y = b[j + c] as u64;
+            sa[c] += x;
+            saa[c] += x * x;
+            sab[c] += x * y;
+        }
+        j += 4;
+        p += 1;
+    }
+    (sa, saa, sab)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +297,27 @@ mod tests {
             assert!((sy[i] - ay[i]).abs() < 1e-6);
             assert!((sb[i] - ab[i]).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn ssim_moments_avx512_matches_scalar() {
+        if !avx512() { return; }
+        let np = 1000usize; // non-multiple of 4 to exercise the scalar tail (1000%4==0 → bump)
+        let np = np + 3;
+        let a: Vec<u8> = (0..np * 4).map(|i| (i * 13 % 255) as u8).collect();
+        let b: Vec<u8> = (0..np * 4).map(|i| (i * 29 % 255) as u8).collect();
+        // scalar oracle (mirrors ssim_moments_avx2's scalar body)
+        let (mut sa, mut saa, mut sab) = ([0u64; 3], [0u64; 3], [0u64; 3]);
+        let mut j = 0;
+        for _ in 0..np {
+            for c in 0..3 {
+                let (x, y) = (a[j + c] as u64, b[j + c] as u64);
+                sa[c] += x; saa[c] += x * x; sab[c] += x * y;
+            }
+            j += 4;
+        }
+        let (gsa, gsaa, gsab) = unsafe { ssim_moments_avx512(&a, &b, np) };
+        assert_eq!((sa, saa, sab), (gsa, gsaa, gsab));
     }
 
     #[test]

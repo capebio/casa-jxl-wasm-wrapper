@@ -268,10 +268,25 @@ impl Comparer {
         }
         match self.backend {
             #[cfg(target_arch = "x86_64")]
-            // AVX-512 arms intentionally call the avx2 ssim kernel: no AVX-512 SSIM
-            // implementation exists yet, and all shipping AVX-512 CPUs have avx2+fma.
-            Backend::Avx2Strict | Backend::Avx2Rsqrt | Backend::Avx512Strict | Backend::Avx512Rsqrt => {
+            // AVX2 keeps the deliberately-scalar moments: the AVX2 deinterleave SIMD
+            // attempt was a measured wash (see avx2::ssim_moments_avx2).
+            Backend::Avx2Strict | Backend::Avx2Rsqrt => {
                 let (sa, saa, sab) = unsafe { simd::avx2::ssim_moments_avx2(test, &self.ref_rgba, self.n) };
+                ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
+            }
+            #[cfg(target_arch = "x86_64")]
+            // Server option: channel-as-lane SIMD moments (16-wide, 4 px/iter). The
+            // wasm v128 form of this layout is runtime-measured at 3.73× over scalar,
+            // overturning the AVX2 deinterleave "no win"; this is its AVX-512 width,
+            // active whenever an AVX-512 backend is selected (auto on server hardware).
+            Backend::Avx512Strict | Backend::Avx512Rsqrt => {
+                let (sa, saa, sab) = unsafe { simd::avx512::ssim_moments_avx512(test, &self.ref_rgba, self.n) };
+                ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
+            }
+            #[cfg(target_arch = "wasm32")]
+            // wasm v128 channel-as-lane moments — bench-measured 3.73× over scalar.
+            Backend::WasmSimd => {
+                let (sa, saa, sab) = simd::wasm::ssim_moments_wasm(test, &self.ref_rgba, self.n);
                 ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
             }
             _ => ssim::ssim_with_ref(test, &self.ref_rgba, self.n, 4, &self.ssim_sb, &self.ssim_sbb),
