@@ -869,22 +869,38 @@ pub fn demosaic_bayer_mhc(
         let r_s = clamp(r + 1, 0, h_max);
         let r_n2 = clamp(r - 2, 0, h_max);
         let r_s2 = clamp(r + 2, 0, h_max);
-        for col in 0..width {
+        // Interior columns [2, width-2) have c±1 and c±2 in-bounds, so clamp() is the
+        // identity there — use raw indices and skip the four per-pixel clamps. Borders
+        // keep clamping. Byte-identical to the all-clamped form. width<4 has no interior.
+        let (int_start, int_end) = if width >= 4 { (2usize, width - 2) } else { (width, width) };
+        for col in 0..int_start {
             let c = col as isize;
             let (rr, gg, bb) = mhc_pixel_phased(
-                raw,
-                width,
-                row,
-                r_n,
-                r_s,
-                r_n2,
-                r_s2,
-                col,
-                clamp(c - 1, 0, w_max),
-                clamp(c + 1, 0, w_max),
-                clamp(c - 2, 0, w_max),
-                clamp(c + 2, 0, w_max),
-                phase,
+                raw, width, row, r_n, r_s, r_n2, r_s2, col,
+                clamp(c - 1, 0, w_max), clamp(c + 1, 0, w_max),
+                clamp(c - 2, 0, w_max), clamp(c + 2, 0, w_max), phase,
+            );
+            let o = col * 3;
+            out_row[o] = rr as u16;
+            out_row[o + 1] = gg as u16;
+            out_row[o + 2] = bb as u16;
+        }
+        for col in int_start..int_end {
+            let (rr, gg, bb) = mhc_pixel_phased(
+                raw, width, row, r_n, r_s, r_n2, r_s2, col,
+                col - 1, col + 1, col - 2, col + 2, phase,
+            );
+            let o = col * 3;
+            out_row[o] = rr as u16;
+            out_row[o + 1] = gg as u16;
+            out_row[o + 2] = bb as u16;
+        }
+        for col in int_end..width {
+            let c = col as isize;
+            let (rr, gg, bb) = mhc_pixel_phased(
+                raw, width, row, r_n, r_s, r_n2, r_s2, col,
+                clamp(c - 1, 0, w_max), clamp(c + 1, 0, w_max),
+                clamp(c - 2, 0, w_max), clamp(c + 2, 0, w_max), phase,
             );
             let o = col * 3;
             out_row[o] = rr as u16;
@@ -898,6 +914,44 @@ pub fn demosaic_bayer_mhc(
     #[cfg(not(feature = "parallel"))]
     rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| do_row(row, out_row));
 
+    Ok(rgb)
+}
+
+/// Pre-optimization all-clamped reference (clamps every pixel's c±1/c±2). Retained for
+/// the parity test and the interior-split flip bench; `demosaic_bayer_mhc` must stay
+/// byte-identical to this. Not used by the shipped path.
+#[doc(hidden)]
+pub fn demosaic_bayer_mhc_clamped_ref(
+    raw: &[u16],
+    width: usize,
+    height: usize,
+    phase: (u8, u8),
+) -> Result<Vec<u16>, String> {
+    validate(raw, width, height)?;
+    let n3 = width * height * 3;
+    let mut rgb = vec![0u16; n3];
+    let w_max = (width - 1) as isize;
+    let h_max = (height - 1) as isize;
+    let phase = (phase.0 as usize, phase.1 as usize);
+    rgb.chunks_mut(width * 3).enumerate().for_each(|(row, out_row)| {
+        let r = row as isize;
+        let r_n = clamp(r - 1, 0, h_max);
+        let r_s = clamp(r + 1, 0, h_max);
+        let r_n2 = clamp(r - 2, 0, h_max);
+        let r_s2 = clamp(r + 2, 0, h_max);
+        for col in 0..width {
+            let c = col as isize;
+            let (rr, gg, bb) = mhc_pixel_phased(
+                raw, width, row, r_n, r_s, r_n2, r_s2, col,
+                clamp(c - 1, 0, w_max), clamp(c + 1, 0, w_max),
+                clamp(c - 2, 0, w_max), clamp(c + 2, 0, w_max), phase,
+            );
+            let o = col * 3;
+            out_row[o] = rr as u16;
+            out_row[o + 1] = gg as u16;
+            out_row[o + 2] = bb as u16;
+        }
+    });
     Ok(rgb)
 }
 
@@ -1553,6 +1607,25 @@ pub fn demosaic_rggb_mhc_matrix(raw: &[u16], width: usize, height: usize, m: &[i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bayer_mhc_interior_split_matches_clamped_reference() {
+        // Interior clamp-elision must be byte-identical to the all-clamped reference
+        // for every CFA phase, across widths/heights spanning the border/interior split
+        // (width<4 = no interior; ==4/5 = minimal interior; larger = full).
+        for &(w, h) in &[(3usize, 3usize), (4, 4), (5, 5), (6, 4), (8, 6), (17, 11)] {
+            let mut s: u32 = 0xBEEF ^ (w * 131 + h) as u32;
+            let raw: Vec<u16> = (0..w * h).map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((s >> 12) & 0x3fff) as u16
+            }).collect();
+            for &phase in &[(0u8, 0u8), (0, 1), (1, 0), (1, 1)] {
+                let fast = demosaic_bayer_mhc(&raw, w, h, phase).unwrap();
+                let refr = demosaic_bayer_mhc_clamped_ref(&raw, w, h, phase).unwrap();
+                assert_eq!(fast, refr, "mismatch w={w} h={h} phase={phase:?}");
+            }
+        }
+    }
 
     #[test]
     fn m10a_4x4_synthetic_pin_before_refactor() {
