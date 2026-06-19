@@ -902,6 +902,14 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
 pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                             params: &PipelineParams) {
     if params.texture == 0.0 && params.clarity == 0.0 { return; }
+    // When both texture and clarity are active, each must operate on the original
+    // (pre-unsharp) image.  Snapshot before the texture pass so the clarity blur is not
+    // computed from the already-sharpened texture output.
+    let pre_snap: Option<Vec<u16>> = if params.texture != 0.0 && params.clarity != 0.0 {
+        Some(rgb16.to_vec())
+    } else {
+        None
+    };
     BLUR_SCRATCH.with(|scratch| {
         let (ref mut temp, ref mut blurred) = *scratch.borrow_mut();
         if params.texture != 0.0 {
@@ -927,30 +935,66 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
             }
         }
         if params.clarity != 0.0 {
-            separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_13(), temp, blurred);
-            #[cfg(feature = "parallel")]
-            rgb16.par_chunks_mut(width * 3).zip(blurred.par_chunks(width * 3)).for_each(|(r_row, b_row)| {
-                for i in 0..r_row.len() {
-                    let orig = r_row[i] as i32;
-                    let blur = b_row[i] as i32;
-                    let v = orig as f32 / 65535.0;
-                    let w = 4.0 * v * (1.0 - v);
-                    r_row[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
-                        .clamp(0, 65535) as u16;
+            // Clarity blurs the original image (not the texture-sharpened output).
+            // When pre_snap is Some (both passes active), blur the snapshot; else blur rgb16 as usual.
+            if let Some(ref snap) = pre_snap {
+                separable_blur_with_bufs(snap, width, height, &gaussian_kernel_13(), temp, blurred);
+                // Apply clarity: orig from snap, delta from snap blur, added to texture-sharpened rgb16.
+                #[cfg(feature = "parallel")]
+                rgb16.par_chunks_mut(width * 3)
+                    .zip(snap.par_chunks(width * 3))
+                    .zip(blurred.par_chunks(width * 3))
+                    .for_each(|((r_row, o_row), b_row)| {
+                    for i in 0..r_row.len() {
+                        let orig = o_row[i] as i32;
+                        let blur = b_row[i] as i32;
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
+                        r_row[i] = (r_row[i] as i32 + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                            .clamp(0, 65535) as u16;
+                    }
+                });
+                #[cfg(not(feature = "parallel"))]
+                {
+                    let n = rgb16.len();
+                    let mut i = 0;
+                    while i < n {
+                        let orig = snap[i] as i32;
+                        let blur = blurred[i] as i32;
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
+                        rgb16[i] = (rgb16[i] as i32 + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                            .clamp(0, 65535) as u16;
+                        i += 1;
+                    }
                 }
-            });
-            #[cfg(not(feature = "parallel"))]
-            {
-                let n = rgb16.len();
-                let mut i = 0;
-                while i < n {
-                    let orig = rgb16[i] as i32;
-                    let blur = blurred[i] as i32;
-                    let v = orig as f32 / 65535.0;
-                    let w = 4.0 * v * (1.0 - v);
-                    rgb16[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
-                        .clamp(0, 65535) as u16;
-                    i += 1;
+            } else {
+                // Only clarity is active (no texture pass ran): blur rgb16 directly as before.
+                separable_blur_with_bufs(rgb16, width, height, &gaussian_kernel_13(), temp, blurred);
+                #[cfg(feature = "parallel")]
+                rgb16.par_chunks_mut(width * 3).zip(blurred.par_chunks(width * 3)).for_each(|(r_row, b_row)| {
+                    for i in 0..r_row.len() {
+                        let orig = r_row[i] as i32;
+                        let blur = b_row[i] as i32;
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
+                        r_row[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                            .clamp(0, 65535) as u16;
+                    }
+                });
+                #[cfg(not(feature = "parallel"))]
+                {
+                    let n = rgb16.len();
+                    let mut i = 0;
+                    while i < n {
+                        let orig = rgb16[i] as i32;
+                        let blur = blurred[i] as i32;
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
+                        rgb16[i] = (orig + (params.clarity * w * (orig - blur) as f32).round() as i32)
+                            .clamp(0, 65535) as u16;
+                        i += 1;
+                    }
                 }
             }
         }
@@ -1084,7 +1128,8 @@ pub fn apply_tone_math(
             // Rust reference now accelerated by PerceptualGrid (coarse 17^3 + trilinear) for the Lens17 advanced.
             // Grid built for fixed scale~1 / vibz in normalized [0, 1.5] space.
             // Inputs (r2/g2/b2) are post-matrix values in [0, 65535]; normalize to [0, 1.5] before sampling.
-            let norm = 1.0 / 65535.0;
+            // norm = 1.5/65535 maps [0, 65535] → [0, 1.5] to match the grid's build domain.
+            let norm = 1.5 / 65535.0;
             // Ensure the grid is initialised (borrow_mut only on first call per thread).
             PERCEPTUAL_GRID.with(|g| {
                 if g.borrow().is_none() {
@@ -1142,10 +1187,13 @@ pub fn apply_perceptual_constancy(r: f32, g: f32, b: f32, sat: f32, vib: f32, vi
     };
     let (lr2, lg2, lb2, _mod) = molchanov_residuals_and_atensor(luma_l, lr, lg, lb, base_scale);
     let (lr3, lg3, lb3) = hybrid_spring_and_dimishing_fc(lr2, lg2, lb2, luma_l);
-    // milk more: layer aware (early low layer less aggressive for progressive)
+    let (rr, gg, bb) = from_log_euclidean(lr3, lg3, lb3);
+    // Layer-aware blend: attenuate toward the linear input in linear space, not log space.
+    // Scaling log components before exp() would change the exponent (non-linear), not the
+    // perceptual "strength" of the adjustment.  Lerp in linear output instead.
     let layer_scale = 1.0 - (layer as f32 * 0.1).min(0.5);
-    let (rr, gg, bb) = from_log_euclidean(lr3 * layer_scale, lg3 * layer_scale, lb3 * layer_scale);
-    (rr.clamp(0.0, 1.5), gg.clamp(0.0, 1.5), bb.clamp(0.0, 1.5))
+    let blend = |out: f32, inp: f32| inp + (out - inp) * layer_scale;
+    (blend(rr, r).clamp(0.0, 1.5), blend(gg, g).clamp(0.0, 1.5), blend(bb, b).clamp(0.0, 1.5))
 }
 
 /// Fused-matrix fast path: `m` is already `S·M` (around-luma saturation pre-multiplied into the
@@ -1329,7 +1377,7 @@ fn ensure_lut(cache: &mut Option<LutCache>, params: &PipelineParams, ti: &ToneIn
 }
 
 pub fn process(rgb16: &[u16], params: &PipelineParams) -> Vec<u8> {
-    debug_assert_eq!(rgb16.len() % 3, 0);
+    assert_eq!(rgb16.len() % 3, 0, "process: rgb16.len() must be divisible by 3");
     let n = rgb16.len() / 3;
     let mut out = vec![0u8; n * 3];
     process_into(rgb16, params, &mut out);
@@ -1466,8 +1514,9 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
 pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
     debug_assert_eq!(rgb16.len() % 3, 0);
     assert_eq!(out.len(), rgb16.len(), "process_into_simd: out must be rgb16.len() elements");
+    // Guard before derive_tone_inputs so the assertion fires before any work is done.
+    assert!(!params.perceptual_constancy, "process_into_simd is the plain ingest path only; use process_into for perceptual_constancy");
     let ti = derive_tone_inputs(params);
-    assert!(!ti.perceptual_constancy, "process_into_simd is the plain ingest path only; use process_into for perceptual_constancy");
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
     let (pre_r, pre_g, pre_b, post, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
@@ -2015,11 +2064,12 @@ pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: us
             let x0 = (dx as f32 * xr) as usize;
             let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
             let x1 = x1.max(x0 + 1);
-            let (mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32);
+            // u64 avoids overflow for large box areas (u32 overflows at ~65535 pixels × 65535 value).
+            let (mut rr, mut gg, mut bb, mut n) = (0u64, 0u64, 0u64, 0u64);
             for y in y0..y1 {
                 for x in x0..x1 {
                     let i = (y * sw + x) * 3;
-                    rr += src[i] as u32; gg += src[i+1] as u32; bb += src[i+2] as u32; n += 1;
+                    rr += src[i] as u64; gg += src[i+1] as u64; bb += src[i+2] as u64; n += 1;
                 }
             }
             let n = n.max(1);
@@ -2330,30 +2380,53 @@ pub fn flip_vertical(src: &[u8], w: usize, h: usize) -> Vec<u8> {
 }
 
 /// Transpose along the main diagonal: dst[c, r] = src[r, c]. Output dims: (h, w). (EXIF 5)
+///
+/// Tile-blocked (TILE × TILE) to stay L1-resident, matching the approach used by
+/// rotate_90_cw / rotate_90_ccw.
 pub fn transpose(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut dst = vec![0u8; src.len()];
-    for r in 0..h {
-        for c in 0..w {
-            let si = (r * w + c) * 3;
-            let di = (c * h + r) * 3;
-            dst[di]     = src[si];
-            dst[di + 1] = src[si + 1];
-            dst[di + 2] = src[si + 2];
+    // dst dims: w_dst = h, h_dst = w.  dst[c, r] with dst-row-stride = h*3.
+    let dst_row_stride = h * 3;
+    for r0 in (0..h).step_by(TILE) {
+        let r_end = (r0 + TILE).min(h);
+        for c0 in (0..w).step_by(TILE) {
+            let c_end = (c0 + TILE).min(w);
+            for r in r0..r_end {
+                let src_row_off = r * w * 3;
+                for c in c0..c_end {
+                    let si = src_row_off + c * 3;
+                    let di = c * dst_row_stride + r * 3;
+                    dst[di]     = src[si];
+                    dst[di + 1] = src[si + 1];
+                    dst[di + 2] = src[si + 2];
+                }
+            }
         }
     }
     dst
 }
 
 /// Transpose along the anti-diagonal: dst[w-1-c, h-1-r] = src[r, c]. Output dims: (h, w). (EXIF 7)
+///
+/// Tile-blocked (TILE × TILE) to stay L1-resident.
 pub fn anti_transpose(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut dst = vec![0u8; src.len()];
-    for r in 0..h {
-        for c in 0..w {
-            let si = (r * w + c) * 3;
-            let di = ((w - 1 - c) * h + (h - 1 - r)) * 3;
-            dst[di]     = src[si];
-            dst[di + 1] = src[si + 1];
-            dst[di + 2] = src[si + 2];
+    // dst dims: w_dst = h, h_dst = w.  dst[w-1-c, h-1-r] with dst-row-stride = h*3.
+    let dst_row_stride = h * 3;
+    for r0 in (0..h).step_by(TILE) {
+        let r_end = (r0 + TILE).min(h);
+        for c0 in (0..w).step_by(TILE) {
+            let c_end = (c0 + TILE).min(w);
+            for r in r0..r_end {
+                let src_row_off = r * w * 3;
+                for c in c0..c_end {
+                    let si = src_row_off + c * 3;
+                    let di = (w - 1 - c) * dst_row_stride + (h - 1 - r) * 3;
+                    dst[di]     = src[si];
+                    dst[di + 1] = src[si + 1];
+                    dst[di + 2] = src[si + 2];
+                }
+            }
         }
     }
     dst
@@ -2482,6 +2555,127 @@ mod rotate_tests {
             }
         }
         assert_eq!(fast, naive);
+    }
+
+    #[test]
+    fn flip_horizontal_is_involution() {
+        for (w, h) in [(7usize, 5usize), (32, 32), (33, 31)] {
+            let src = synth(w, h);
+            let twice = flip_horizontal(&flip_horizontal(&src, w, h), w, h);
+            assert_eq!(twice, src, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn flip_horizontal_corner_pixel() {
+        let (w, h) = (4usize, 3usize);
+        let mut src = vec![0u8; w * h * 3];
+        // pixel (row=0, col=0) = (10, 20, 30)
+        src[0] = 10; src[1] = 20; src[2] = 30;
+        let dst = flip_horizontal(&src, w, h);
+        // After H-flip, (0,0) → (0, w-1) = (0, 3)
+        let i = (0 * w + (w - 1)) * 3;
+        assert_eq!(&dst[i..i + 3], &[10, 20, 30]);
+    }
+
+    #[test]
+    fn flip_vertical_is_involution() {
+        for (w, h) in [(7usize, 5usize), (32, 32), (33, 31)] {
+            let src = synth(w, h);
+            let twice = flip_vertical(&flip_vertical(&src, w, h), w, h);
+            assert_eq!(twice, src, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn transpose_is_involutionlike() {
+        // transpose(transpose(img, w, h), h, w) should be identity.
+        for (w, h) in [(7usize, 5usize), (32, 32), (33, 31)] {
+            let src = synth(w, h);
+            let t1 = transpose(&src, w, h);      // dims become (h, w)
+            let t2 = transpose(&t1, h, w);       // dims back to (w, h)
+            assert_eq!(t2, src, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn transpose_matches_naive() {
+        let (w, h) = (37usize, 19usize);
+        let src = synth(w, h);
+        let fast = transpose(&src, w, h);
+        // Naive: dst[c, r] = src[r, c], dst dims (h=w_out, w=h_out) → dst row stride = h
+        let mut naive = vec![0u8; src.len()];
+        for r in 0..h {
+            for c in 0..w {
+                let si = (r * w + c) * 3;
+                let di = (c * h + r) * 3;
+                naive[di] = src[si]; naive[di+1] = src[si+1]; naive[di+2] = src[si+2];
+            }
+        }
+        assert_eq!(fast, naive);
+    }
+
+    #[test]
+    fn anti_transpose_matches_naive() {
+        let (w, h) = (37usize, 19usize);
+        let src = synth(w, h);
+        let fast = anti_transpose(&src, w, h);
+        let mut naive = vec![0u8; src.len()];
+        for r in 0..h {
+            for c in 0..w {
+                let si = (r * w + c) * 3;
+                let di = ((w - 1 - c) * h + (h - 1 - r)) * 3;
+                naive[di] = src[si]; naive[di+1] = src[si+1]; naive[di+2] = src[si+2];
+            }
+        }
+        assert_eq!(fast, naive);
+    }
+
+    #[test]
+    fn apply_orientation_identity_orientations() {
+        let (w, h) = (5usize, 3usize);
+        let src = synth(w, h);
+        // orientation 1 and unknown → identity
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 1);
+        assert_eq!(out, src); assert_eq!((ow, oh), (w, h));
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 99);
+        assert_eq!(out, src); assert_eq!((ow, oh), (w, h));
+    }
+
+    #[test]
+    fn apply_orientation_2_flip_h() {
+        let (w, h) = (4usize, 3usize);
+        let src = synth(w, h);
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 2);
+        assert_eq!((ow, oh), (w, h));
+        assert_eq!(out, flip_horizontal(&src, w, h));
+    }
+
+    #[test]
+    fn apply_orientation_4_flip_v() {
+        let (w, h) = (4usize, 3usize);
+        let src = synth(w, h);
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 4);
+        assert_eq!((ow, oh), (w, h));
+        assert_eq!(out, flip_vertical(&src, w, h));
+    }
+
+    #[test]
+    fn apply_orientation_5_transpose() {
+        let (w, h) = (4usize, 3usize);
+        let src = synth(w, h);
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 5);
+        assert_eq!((ow, oh), (h, w));
+        assert_eq!(out, transpose(&src, w, h));
+    }
+
+    #[test]
+    fn apply_orientation_7_anti_transpose() {
+        let (w, h) = (4usize, 3usize);
+        let src = synth(w, h);
+        let (out, ow, oh) = apply_orientation(src.clone(), w, h, 7);
+        assert_eq!((ow, oh), (h, w));
+        assert_eq!(out, anti_transpose(&src, w, h));
     }
 }
 
