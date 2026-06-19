@@ -209,6 +209,56 @@ export interface EncoderOptions {
 
   /** Optional structured telemetry sink; mirrors DecoderOptions.onMetric. Read by LibjxlEncoder. */
   onMetric?: (name: string, value: number) => void;
+
+  /**
+   * EXIF orientation tag (1..8). 1 = identity (default), 3 = 180°, 6 = 90° CW, 8 = 90° CCW.
+   * Stored in JXL basic info — pixels stay sensor-native, no CPU rotation on encode.
+   * Requires the _z WASM variant (streamingInputZ capability).
+   */
+  orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+  /**
+   * CasaSneyers_Parity (Ch3): display width in pixels when it differs from encoded pixel width
+   * (e.g. Retina @2×). Stored as JxlBasicInfo.intrinsic_xsize. 0 / omit = same as encoded width.
+   * Must be paired with intrinsicHeight. Requires streamingInputZ capability.
+   */
+  intrinsicWidth?: number;
+
+  /**
+   * CasaSneyers_Parity (Ch3): display height in pixels when it differs from encoded pixel height.
+   * Stored as JxlBasicInfo.intrinsic_ysize. 0 / omit = same as encoded height.
+   * Must be paired with intrinsicWidth. Requires streamingInputZ capability.
+   */
+  intrinsicHeight?: number;
+
+  /**
+   * CasaSneyers_Parity: disable psychovisual (butteraugli/XYB) heuristics for fair codec
+   * benchmarking. -1 = encoder default (heuristics enabled), 1 = disable.
+   * Maps to JXL_ENC_FRAME_SETTING_DISABLE_PERCEPTUAL_HEURISTICS (ID 39).
+   * Requires streamingInputZ capability.
+   */
+  disablePerceptualHeuristics?: -1 | 1;
+
+  /**
+   * Force a specific JXL codestream level. -1 = libjxl automatic (default), 5 = level 5,
+   * 10 = level 10. Values other than 5 and 10 are ignored (libjxl rejects them).
+   * Requires streamingInputZ capability.
+   */
+  codestreamLevel?: -1 | 5 | 10;
+
+  /**
+   * Horizontal center offset (pixels, signed) for center-out group ordering.
+   * Only meaningful when groupOrder === 1. 0 = image center (default).
+   * Currently a bridge passthrough; libjxl does not yet expose a public API for this.
+   */
+  centerX?: number;
+
+  /**
+   * Vertical center offset (pixels, signed) for center-out group ordering.
+   * Only meaningful when groupOrder === 1. 0 = image center (default).
+   * Currently a bridge passthrough; libjxl does not yet expose a public API for this.
+   */
+  centerY?: number;
 }
 
 /**
@@ -382,6 +432,12 @@ interface LibjxlWasmModule {
   _jxl_wasm_enc_create_image_x?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, jpegKeepExif: number, jpegKeepXmp: number, jpegKeepJumbf: number, alreadyDownsampled: number, upsamplingMode: number, ecResampling: number): number;
   // _y: adds epf, gaborish, dots, colorTransform
   _jxl_wasm_enc_create_image_y?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, patches: number, colorTransform: number, centerX: number, centerY: number, jpegKeepExif: number, jpegKeepXmp: number, jpegKeepJumbf: number, alreadyDownsampled: number, upsamplingMode: number, ecResampling: number): number;
+  // _z: adds orientation (EXIF 1..8); also threads centerX/centerY through to _y
+  _jxl_wasm_enc_create_image_z?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, groupOrder: number, modular: number, brotliEffort: number, decodingSpeed: number, photonNoiseIso: number, resampling: number, epf: number, gaborish: number, dots: number, patches: number, colorTransform: number, orientation: number, centerX: number, centerY: number, jpegKeepExif: number, jpegKeepXmp: number, jpegKeepJumbf: number, alreadyDownsampled: number, upsamplingMode: number, ecResampling: number): number;
+  // Post-creation state setters (call before enc_finish; require streamingInputZ path to have run)
+  _jxl_wasm_enc_set_intrinsic_size?(state: number, w: number, h: number): void;
+  _jxl_wasm_enc_set_frame_flags?(state: number, disablePerceptual: number): void;
+  _jxl_wasm_enc_set_codestream_level?(state: number, level: number): void;
   // Advanced escape hatch variants
   _jxl_wasm_enc_create_image_adv?(width: number, height: number, distance: number, effort: number, fmt: number, hasAlpha: number, progressiveDc: number, progressiveAc: number, qProgressiveAc: number, buffering: number, idsPtr: number, valuesPtr: number, count: number): number;
   _jxl_wasm_enc_pixels_ptr?(state: number, size: number): number;
@@ -2021,11 +2077,34 @@ class LibjxlEncoder implements JxlEncoder {
       // JXL_ENC_FRAME_SETTING_PHOTON_NOISE is actually honored (Modular ignores it).
       const photonActive = (o.photonNoiseIso ?? 0) > 0;
       const modularDefault = photonActive ? 0 : -1;
-      const needsY = caps.streamingInputY && (o.epf != null || o.gaborish != null || o.dots != null || o.colorTransform != null);
-      const needsX = !needsY && caps.streamingInputX && (o.modular != null || o.brotliEffort != null || o.decodingSpeed != null || o.photonNoiseIso != null);
-      const needsAdv = !needsY && !needsX && !!module._jxl_wasm_enc_create_image_adv && !!o.advancedFrameSettings?.length;
+      const needsZ = caps.streamingInputZ && (o.orientation != null || o.intrinsicWidth != null || o.intrinsicHeight != null || o.disablePerceptualHeuristics != null || o.codestreamLevel != null || o.centerX != null || o.centerY != null);
+      const needsY = !needsZ && caps.streamingInputY && (o.epf != null || o.gaborish != null || o.dots != null || o.colorTransform != null);
+      const needsX = !needsZ && !needsY && caps.streamingInputX && (o.modular != null || o.brotliEffort != null || o.decodingSpeed != null || o.photonNoiseIso != null);
+      const needsAdv = !needsZ && !needsY && !needsX && !!module._jxl_wasm_enc_create_image_adv && !!o.advancedFrameSettings?.length;
 
-      if (needsY) {
+      if (needsZ) {
+        this.wasmEncState = module._jxl_wasm_enc_create_image_z!(
+          o.width, o.height, distance, o.effort,
+          fmtIndex, o.hasAlpha ? 1 : 0,
+          progressiveDc, progressiveAc, qProgressiveAc, buffering, groupOrder,
+          o.modular ?? modularDefault, o.brotliEffort ?? -1, o.decodingSpeed ?? -1, o.photonNoiseIso ?? 0, resampling,
+          o.epf ?? -1, o.gaborish ?? -1, o.dots ?? -1, 0, o.colorTransform ?? -1,
+          o.orientation ?? 1,
+          o.centerX ?? 0, o.centerY ?? 0,
+          0, 0, 0, 0, 0, -1
+        );
+        if (this.wasmEncState !== 0) {
+          if ((o.intrinsicWidth ?? 0) > 0 && (o.intrinsicHeight ?? 0) > 0) {
+            module._jxl_wasm_enc_set_intrinsic_size?.(this.wasmEncState, o.intrinsicWidth!, o.intrinsicHeight!);
+          }
+          if (o.disablePerceptualHeuristics != null) {
+            module._jxl_wasm_enc_set_frame_flags?.(this.wasmEncState, o.disablePerceptualHeuristics);
+          }
+          if (o.codestreamLevel != null && o.codestreamLevel !== -1) {
+            module._jxl_wasm_enc_set_codestream_level?.(this.wasmEncState, o.codestreamLevel);
+          }
+        }
+      } else if (needsY) {
         this.wasmEncState = module._jxl_wasm_enc_create_image_y!(
           o.width, o.height, distance, o.effort,
           fmtIndex, o.hasAlpha ? 1 : 0,
@@ -2447,6 +2526,7 @@ interface JxlCapabilities {
   streamingInput: boolean;
   streamingInputX: boolean;
   streamingInputY: boolean;
+  streamingInputZ: boolean;
   sidecars: boolean;
   jpegTranscode: boolean;
 }
@@ -2471,6 +2551,7 @@ function getCapabilities(module: LibjxlWasmModule): JxlCapabilities {
       typeof module._jxl_wasm_enc_free === "function",
     streamingInputX: typeof module._jxl_wasm_enc_create_image_x === "function",
     streamingInputY: typeof module._jxl_wasm_enc_create_image_y === "function",
+    streamingInputZ: typeof module._jxl_wasm_enc_create_image_z === "function",
     sidecars:
       typeof module._jxl_wasm_encode_rgba8_with_sidecars === "function" &&
       typeof module._jxl_wasm_buffer_next === "function",

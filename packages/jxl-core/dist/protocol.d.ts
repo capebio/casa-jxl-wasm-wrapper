@@ -1,4 +1,5 @@
-import type { PixelFormat, DecodeStage, ImageInfo, Region, CodecMetric } from "./types.js";
+import type { PixelFormat, DecodeStage, ImageInfo, Region, CodecMetric, BufferingControls, AdvancedEncoderControls, EncodeOptions } from "./types.js";
+import type { JxlErrorCode } from "./errors.js";
 export interface MsgDecodeStart {
     type: "decode_start";
     sessionId: string;
@@ -123,14 +124,13 @@ export interface MsgDecodePaused {
     type: "decode_paused";
     sessionId: string;
 }
-export interface MsgDecodeBudgetExceeded {
+export interface MsgDecodeBudgetExceeded extends DecodeFrameMeta {
     type: "decode_budget_exceeded";
     sessionId: string;
     stage: DecodeStage;
     pixels: ArrayBuffer;
     info: ImageInfo;
     format: PixelFormat;
-    region?: Region;
     pixelStride: number;
 }
 export interface MsgEncodeStart {
@@ -192,6 +192,52 @@ export interface MsgEncodeStart {
      * Requires enc_set_codestream_level bridge.
      */
     codestreamLevel?: -1 | 5 | 10;
+    /** -1 = auto, 0 = VarDCT, 1 = Modular. Maps to JXL_ENC_FRAME_SETTING_MODULAR. */
+    modular?: EncodeOptions["modular"];
+    /** -1 = libjxl default, 0-11 explicit brotli effort for Modular entropy coding. */
+    brotliEffort?: number;
+    /** 0-4 encode-time decode speed tier hint (lower = faster to decode, larger file). */
+    decodingSpeed?: number;
+    /** 0 = off, or target ISO for synthetic photon noise injection. */
+    photonNoiseIso?: number;
+    /**
+     * Buffering / streaming strategy. Maps to cjxl --buffering + --streaming_input /
+     * --streaming_output. strategy -1..3 per libjxl semantics.
+     */
+    buffering?: BufferingControls;
+    /** Advanced filter + group-order controls. Overlaps groupOrder/centerX/centerY fields
+     *  (those remain for back-compat); this object is the canonical surface for new callers. */
+    advancedControls?: AdvancedEncoderControls;
+    /**
+     * JPEG lossless reconstruction controls (cjxl row 12 audit).
+     * Present only when re-encoding from a JPEG source on the lossless transcode path.
+     */
+    jpegReconstruction?: EncodeOptions["jpegReconstruction"];
+    /**
+     * The input has already been downsampled; decoder will upsample.
+     * Maps to cjxl --already_downsampled.
+     */
+    alreadyDownsampled?: boolean;
+    /**
+     * Decoder upsampling mode (useful with alreadyDownsampled).
+     * -1 = default non-separable, 0 = nearest. Maps to JxlEncoderSetUpsamplingMode.
+     */
+    upsamplingMode?: EncodeOptions["upsamplingMode"];
+    /**
+     * Separate resampling factor for extra channels.
+     * -1 = match main, 1/2/4/8. Maps to cjxl --ec_resampling (ID 3).
+     */
+    ecResampling?: EncodeOptions["ecResampling"];
+    /**
+     * Frame indexing string for JXL_ENC_FRAME_INDEX_BOX (ID 31).
+     * String matching ^(0*|1[01]*)$ per cjxl validation.
+     */
+    frameIndexing?: string;
+    /**
+     * Gate for effort=11 (expert mode). Maps to cjxl --allow_expert_options.
+     * Required when effort > 9 is passed.
+     */
+    allowExpertOptions?: boolean;
 }
 export interface MsgEncodePixels {
     type: "encode_pixels";
@@ -250,8 +296,11 @@ export interface MsgWorkerShutdownAck {
 }
 export interface MsgWorkerError {
     type: "worker_error";
-    code: string;
+    /** Typed to JxlErrorCode; worker codes (DuplicateSession, UnhandledError, etc.) are included in the union. */
+    code: JxlErrorCode;
     message: string;
+    /** Session active at the time of the crash, if known. Allows the scheduler to route to session + mark terminal. */
+    sessionId?: string;
 }
 export interface MsgWorkerDrain {
     type: "worker_drain";
