@@ -743,7 +743,7 @@
       "tech": [
         "rust"
       ],
-      "gc": 15
+      "gc": 16
     },
     {
       "id": "enc_rs",
@@ -752,7 +752,7 @@
       "l": "jxl_casaencoder.rs ★",
       "path": "crates/raw-pipeline/src/jxl_casaencoder.rs",
       "desc": "jxl_casaencoder.rs is the BSD-clean JPEG XL *encoder* — the low-level layer that actually drives libjxl (the reference JXL codec library) to turn pixels into compressed JXL bytes. Its design shape, stated in the module header, is deliberately small: one owned Encoder holds the *JxlEncoder C handle (RAII — the handle is created on construction and destroyed on Drop), you feed it Frames, and you get a Vec<u8> of JXL bytes back. What flows in is a borrowed Frame (interleaved pixel slice plus dimensions and channel layout) and an EncodeOptions; what flows out is the compressed codestream. It is native-only (gated on feature jxl-codec and not(wasm32)); the browser uses a separate C++/wasm codec instead.\n\nIt exists to replace the GPL-3.0 jpegxl-rs crate with a license-clean, in-house binding, and to design-out a family of real bugs that the old code was prone to. The header enumerates the correctness guarantees baked in: the encoder Resets on *every* exit path (success and error alike) so a reused handle can never be poisoned by a prior failure; lossless is a distinct Rate::Lossless variant that never calls SetFrameDistance (so you cannot accidentally \"un-lossless\" a frame by also setting a distance — the classic upstream footgun); every planar extra channel is mandatorily declared with JxlEncoderSetExtraChannelInfo before the first frame; alpha is supplied exactly one way — interleaved or as a planar ExtraKind::Alpha, never both, validated to EncodeError::Channels; and the type is Send but not Sync.\n\nHow it works centres on a handful of named types. Sample is a clean-room trait implemented for u8/u16/half::f16/f32, mapping each to its ffi::JxlDataType and (bits, exponent_bits) pair (exponent > 0 ⇒ float). Frame<'a, S> is the borrowed zero-copy input — an interleaved color slice plus width/height, color_channels (1 or 3), an alpha bool, endianness, and a slice of planar ExtraChannels — with constructors rgb/rgba/rgba8/gray and an interleaved_channels() helper that adds 1 when interleaved alpha is present. EncodeOptions carries the rate (the Rate enum: Quality(0..100)|Distance(0..15)|Lossless), effort 1..=10, optional progressive_dc and group_order, color encoding choice, container/profile flags, and an extra escape-hatch list of (FrameSettingId, i64). FrameSettingId is a typed mirror of libjxl's frame-setting enum (Effort, Modular, Gaborish, Epf, ProgressiveDc, …) with a Raw(i32) escape hatch — this deletes the old transmute(14i32) hack. The actual codec call sequence lives in encode_inner.\n\nIt connects downward through jxl_ffi (imported as ffi) into the statically-linked libjxl C library — every Jxl* symbol it calls crosses that one boundary. Upward it is driven by casabio_encode.rs, which holds Encoders and feeds them Frames. Crucially, the Sample trait is defined *here* and re-exported by the decoder (jxl_casadecoder, aliased jxl_decode) via pub use — that is the single hard coupling between the encoder and decoder, so both agree on how u8/u16/f16/f32 map to libjxl data types.\n\nGotchas a maintainer must respect: the unsafe impl Send relies on libjxl looking up its color-management (LCMS) context per-use rather than storing it, mirroring upstream's own threading guarantee — so an Encoder may move across threads but must never be shared. The grow-loop in encode_inner starts with a 64 KiB output buffer and doubles on JXL_ENC_NEED_MORE_OUTPUT, so a large image is encoded without pre-sizing. Order is load-bearing: the parallel runner must be set before basic info and the first frame; basic info and color encoding and extra-channel declarations must all precede AddImageFrame; CloseInput must come before draining ProcessOutput. Quality is converted to distance via JxlEncoderDistanceFromQuality, but lossless never touches distance at all. Because all input slices are borrowed for the duration of encode_inner, the pixels must outlive the call — there is no internal copy.",
-      "lines": 839,
+      "lines": 900,
       "tech": [
         "rust"
       ],
@@ -822,7 +822,7 @@
       "tech": [
         "rust"
       ],
-      "line": 299
+      "line": 324
     },
     {
       "id": "e_frame",
@@ -879,7 +879,7 @@
       ],
       "special": "builderRail",
       "mutates": "*JxlEncoder",
-      "line": 359
+      "line": 391
     },
     {
       "id": "ec_ffi",
@@ -890,7 +890,7 @@
       "tech": [
         "rust"
       ],
-      "line": 299
+      "line": 324
     },
     {
       "id": "dec_rs",
@@ -899,7 +899,7 @@
       "l": "jxl_casadecoder.rs ★",
       "path": "crates/raw-pipeline/src/jxl_casadecoder.rs",
       "desc": "This file, jxl_casadecoder.rs, is the native JPEG XL decoder: the part of the system that takes a compressed JXL codestream (a small bundle of bytes) and reconstructs the actual picture — the grid of pixel values you can measure, save, or display. It sits at the very end of the round-trip. Upstream, the RAW camera file is decoded to pixels and the encoder squeezes those pixels into a JXL codestream; this file goes the other way, turning that codestream back into pixels. Its whole purpose in this codebase is not usually to show an image, but to *check one*: decode the JXL the encoder just produced and feed those pixels to the quality measurement (Butteraugli/SSIM/PSNR) so the pipeline can ask 'did we lose too much by compressing?'\n\nWhy it exists: it is a deliberate, BSD-licensed (permissively-licensed, commercially safe) replacement for an older file called jxl_lowlevel.rs that relied on a GPL-licensed third-party crate (jpegxl-sys). GPL licensing would have legally contaminated the product, so the team rewrote the decoder to call libjxl (the reference JPEG XL library) directly through their own thin binding layer, jxl-ffi. The header comment is explicit that DecodeOptions::default() reproduces the old file's behaviour 'exactly — the parity contract', meaning the rewrite was designed to be a drop-in: same pixels out, just clean licensing and a better-shaped API.\n\nHow it is organised: the centrepiece is the Decoder struct (the 'RAII' object — Resource Acquisition Is Initialization, a Rust idiom where an object owns a resource and automatically frees it when it goes out of scope). One Decoder owns one libjxl decoder handle and is reused across many decodes rather than created and destroyed each time. Around it sit typed option structs (DecodeOptions, DecodeLimits), result types (Image, ImageView, ExtraPlane, DecodedMeta), a typed error enum (DecodeError), and two families of free functions: legacy 'compat' wrappers (decode_jxl_rgba8, decode_interleaved, the timing functions) that keep old call sites working, and the JXTC tile-container functions (parse_jxtc_header, decode_jxtc_region) that decode just a viewport of a huge tiled image.\n\nIt connects downward to jxl-ffi (the dc_ffi component — every JxlDecoder* call crosses there into the C library) and upward to the perceptual quality kernels, which are meant to consume the borrowed ImageView the decoder lends out. The data that crosses in is a borrowed &[u8] JXL codestream (zero-copy in — the decoder never copies your input); the data that crosses out is a typed Vec of samples (u8, u16, f16, or f32) written straight into the buffer libjxl fills (zero-copy out — no reinterpret or second pass). The Sample trait that defines how those numeric types map to libjxl's pixel formats is shared with the encoder (pub use crate::jxl_casaencoder::Sample), the single intentional coupling between the two codecs.\n\nGotchas a maintainer must know, all spelled out in the source: (1) the decoder is reset on *every* exit path — success and error alike — via JxlDecoderReset, so a failed decode can never 'poison' the next one (the garbage_then_good_reuses_decoder test proves it). (2) The decompression-bomb guard runs at BASIC_INFO, *before* any large allocation, refusing a malicious header that claims billions of pixels rather than trying to allocate for it. (3) It is Send but not Sync (line 252) — you can move it between threads but not share one across threads — because libjxl's context is looked up per-use. (4) This whole file is gated to native builds only (#![cfg(all(feature = \"jxl-codec\", not(target_arch = \"wasm32\")))], line 33); the browser uses a completely separate WASM codec, so editing this file has zero effect on the web path.",
-      "lines": 1550,
+      "lines": 1576,
       "tech": [
         "rust"
       ],
@@ -1033,7 +1033,7 @@
       "tech": [
         "rust"
       ],
-      "line": 1132
+      "line": 1158
     },
     {
       "id": "ffi_lib",
@@ -1261,7 +1261,7 @@
       "l": "simd/mod.rs",
       "path": "crates/raw-pipeline/src/perceptual/simd/mod.rs",
       "desc": "This file (`simd/mod.rs`, 71 lines) is the traffic controller for the perceptual layer's SIMD backends. It does two jobs: it defines the `Backend` enum that names every available compute path, and it provides the runtime detection functions that pick the fastest path the current machine can actually run. It declares the sub-modules (`scalar`, and conditionally `avx2`, `avx512`, `wasm`) so the rest of the crate can reach the hand-vectorised kernels through one place.\n\nWhy it exists: the same perceptual maths needs to run on wildly different hardware — a server with AVX-512, a laptop with AVX2, an old machine with neither, and the browser with WebAssembly SIMD. Hard-coding one instruction set would either crash on machines that lack it or leave performance on the table on machines that have more. This file centralises the \"which engine?\" decision so the `Comparer` never has to know the gory CPU-feature details; it just asks for a `Backend` and dispatches on it.\n\nHow it works: the `Backend` enum (line 4) enumerates six variants with explicit discriminants — `Scalar = 0`, `Avx2Strict = 1`, `Avx2Rsqrt = 2`, `Avx512Strict = 3`, `WasmSimd = 4`, `Avx512Rsqrt = 5` — the explicit numbers matter because `BackendChoice::Force(id)` in `mod.rs` selects a backend by that integer id. `detect_native(prefer_rsqrt)` (line 36) is x86-only: it calls `std::is_x86_feature_detected!` and returns AVX-512 if `avx512f`+`avx512bw` are present (its fast gather is the stated reason it ranks first), else AVX2 if `avx2`+`fma` are present (choosing the strict or rsqrt variant per the flag), else `Scalar`. `detect_wasm()` (line 22) is different in kind: WASM SIMD isn't runtime-probed, it's a *compile-time* target feature, so this function is just a `#[cfg(target_feature = \"simd128\")]` switch returning `WasmSimd` or `Scalar`. The module also unconditionally declares `pub mod scalar` (no arch gate) because its tail helpers are needed on every target.\n\nConnections: `Comparer::new` calls `detect_native(false)` (x86) or `simd::detect_wasm()` (wasm) to set its `backend` field, unless `Opts` forces a specific one. The `Backend` value is then matched in every dispatch site — `fill_test_xyb`, `downsample_dispatch`, `scale_err_dispatch`, `ssim`, `psnr` — to call into `avx2.rs`/`avx512.rs`/`wasm.rs`. The forced-backend safety re-check (`resolve_forced_backend`) lives in `mod.rs` but relies on this file's enum and the same feature-detection primitives.\n\nGotchas: the `prefer_rsqrt` parameter is currently passed as `false` by `Auto` detection — the rsqrt (fast-approximation) variants stay opt-in via `Force` until the flip-flop benchmark promotes them, so `Auto` always picks the strict path for now. The `Avx512Rsqrt = 5` discriminant is intentionally out of numeric order (after `WasmSimd = 4`), appended later; reordering the enum would silently change what `Force(id)` selects. And `detect_native` deliberately requires `fma` alongside `avx2` because the kernels use fused multiply-add intrinsics — detecting AVX2 without FMA and dispatching would be undefined behaviour.",
-      "lines": 71,
+      "lines": 72,
       "tech": [
         "rust",
         "wasm"
@@ -1303,7 +1303,7 @@
       "l": "wasm.rs",
       "path": "crates/raw-pipeline/src/perceptual/simd/wasm.rs",
       "desc": "This file (`simd/wasm.rs`, 132 lines) is the browser-side vectorised path, using WebAssembly's `v128` SIMD type to process four 32-bit floats per instruction (4-wide — narrower than AVX2's 8 or AVX-512's 16, because that's the width WASM SIMD offers). The whole module is gated `#![cfg(target_arch = \"wasm32\")]` and only compiles when the build enables the `+simd128` target feature. It implements `scale_err_wasm` (Butteraugli error), `pixels_to_xyb_wasm` (RGBA→XYB), and `downsample_wasm` (2× downsample).\n\nWhy it exists: when the perceptual `Comparer` runs inside the browser (compiled to WASM via wasm-bindgen and called by the progressive-paint quality gate), there is no AVX2 to reach for — the only vector unit available is WASM SIMD. This module gives the browser a faster-than-scalar path so quality gating doesn't stall the paint loop. The realistic expectation, noted in the map, is roughly a 2× speedup over scalar (versus ~9× native), because this workload is memory-bandwidth-bound: at 4 lanes the arithmetic isn't the bottleneck, moving the pixels is.\n\nHow it works: `scale_err_wasm` (line 19) is the scalar Butteraugli algorithm rewritten with `f32x4_*` intrinsics — `f32x4_max`, `f32x4_div`, `f32x4_mul`, and `f32x4_sqrt` — accumulating `e2·sqrt(e2+eps)` across 4 lanes and draining to an `f64` `sum` every `FLUSH = 4096` iterations, exactly like the x86 backends. Two deliberate divergences from AVX: (1) it uses **strict sqrt only** (`f32x4_sqrt`) — there is no rsqrt-approximation variant, because WASM's reciprocal-square-root approximations aren't reliably available/fast, so the precision-vs-speed gamble the x86 paths offer isn't taken here. (2) `pixels_to_xyb_wasm` (line 75) does **not** use a hardware gather (WASM has none); it loads the four LUT entries scalar-by-scalar into a small array, then loads that array as a `v128` and does the X/Y/B arithmetic vectorised — so only the math is vectorised, not the table fetch. (3) `downsample_wasm` (line 121) is left **entirely scalar** on purpose; the comment explains the 4-wide even/odd deinterleave overhead rarely beats a plain scalar loop at this width, and a future Node flip-flop benchmark (Task D2) can revisit it.\n\nConnections: these functions are dispatched from `Comparer` when `backend == Backend::WasmSimd`, which `detect_wasm()` returns at WASM build time. `scale_err_wasm` and `pixels_to_xyb_wasm` finish their odd-size remainders using the shared scalar tail (`scale_err_tail` from `scalar.rs`) and an inline scalar loop respectively. The kernels take the same `xyb::sqrt_lin_lut()` (the slice form, not the raw pointer — WASM doesn't need the pointer the gather paths use).\n\nGotchas: the module can't be exercised by `cargo test` (WASM intrinsics don't run under the native test harness), so its correctness is verified by running against the JS reference in Node, as the header notes. The length preconditions are `debug_assert!` (lines 27, 79) — important because on wasm32 a `usize` is only 32 bits, so a wrapped or mismatched `n` could otherwise OOB-read/write WASM linear memory; the debug assert plus the caller's reference-geometry invariant are the guards. A maintainer must keep `scale_err_wasm`'s strict-sqrt result matching the scalar oracle — and must not casually \"upgrade\" it to an rsqrt approximation, since that was a conscious omission for parity and reliability on the WASM target.",
-      "lines": 161,
+      "lines": 167,
       "tech": [
         "rust",
         "wasm"
@@ -1463,7 +1463,8 @@
         "rust"
       ],
       "n": 1,
-      "gate": true
+      "gate": true,
+      "line": 296
     },
     {
       "id": "es_runner",
@@ -1772,6 +1773,182 @@
         "rust"
       ],
       "line": 863
+    },
+    {
+      "id": "tauri",
+      "k": "system",
+      "l": "Tauri Native App ★",
+      "col": "raw",
+      "desc": "Native desktop application built on Tauri (Rust backend + WebView frontend). Runs the same raw-pipeline crate as the WASM path but without any FFI boundary — Rust calls Rust directly. This eliminates the WASM heap-copy overhead and enables multi-threaded rayon parallelism and jpegxl-sys (C FFI) bindings that are blocked in WASM. The frontend communicates with the backend via Tauri IPC commands (tauri::command functions in pipeline.rs) using binary IPC responses to minimise serialisation cost. The entire JXL encode/decode stack — casabio_encode, jxl_casadecoder, jxl_casaencoder (via jxl-ffi), perceptual kernels — is the same Rust source as the WASM/WASM-worker path; there is no separate implementation. Key advantages vs WASM: native AVX2/AVX-512 without polyfill, ThreadsRunner for parallel JXL decode/encode, jxl-oxide region ROI without full-image allocation, DC-fast decode for live gallery paint. Key shared components: raw-pipeline workspace member (same Cargo.toml), jxl_casadecoder.rs (shared source, compiled native), casabio_encode.rs (shared), pipeline.rs (shared). src-tauri/src/ adds the Tauri command layer, caching (LRU AppState), priority scheduling, pyramid store, and Casabio upload integration.",
+      "tech": [
+        "rust",
+        "js"
+      ]
+    },
+    {
+      "id": "t_lib",
+      "k": "file",
+      "l": "src-tauri/src/lib.rs",
+      "p": "tauri",
+      "path": "src-tauri/src/lib.rs",
+      "lines": 200,
+      "desc": "AppState definition and Tauri builder entry point. AppState holds all shared LRU caches: jxl_cache (25-entry, keyed by u64 id, ~15 MB/entry), jxl_lb_cache (lightbox JXL), subject_jxl_cache (100-entry, subject crops), rgb16_cache (full-res RGB16 for re-encode after look change). Also owns the PrioritySem (file-level concurrency semaphore, FILE_CONCURRENCY=3) and the Casabio session token. Tauri builder in run() registers all tauri::command handlers and configures IPC binary response mode. The binary response mode (tauri::ipc::Response) avoids JSON serialisation for pixel data — raw bytes go direct over the IPC pipe.",
+      "tech": [
+        "rust"
+      ],
+      "gc": 0
+    },
+    {
+      "id": "t_pipeline",
+      "k": "file",
+      "l": "src-tauri/src/pipeline.rs",
+      "p": "tauri",
+      "path": "src-tauri/src/pipeline.rs",
+      "lines": 3589,
+      "desc": "Core Tauri command file. Contains all JXL encode/decode commands and the main process_file async entry. Key sections: (1) decode_jxl_* family — six commands dispatching to jxl_native or jxl-oxide by path (full / region / DC / cached-id); (2) encode_rgba16_jxl — jpegxl_rs encoder command; (3) process_file — async multi-stage pipeline: decode RAW → tone → LRU cache → pyramid; (4) apply_look / apply_look_stream — re-tone from cached RGB16 with cancellation; (5) promote_file / cancel_file — priority-queue management via PrioritySem. Also contains RgbFrame, Rgb16State, ProcessResult types and the encode_jxl_with_channels helper that wires jpegxl_rs ThreadsRunner.",
+      "tech": [
+        "rust"
+      ],
+      "gc": 0
+    },
+    {
+      "id": "t_jxl_native",
+      "k": "file",
+      "l": "src-tauri/src/jxl_native.rs",
+      "p": "tauri",
+      "path": "src-tauri/src/jxl_native.rs",
+      "lines": 190,
+      "desc": "High-level JXL FFI wrappers used by the Tauri decode commands. Three public functions: decode_jxl_rgb8 (jpegxl_sys → RGB8, single-threaded), decode_jxl_rgba16 (jpegxl_rs → packed native-endian u16 bytes, 8 bytes/pixel), transcode_jpeg_to_jxl (bitstream-level JPEG→JXL via JxlEncoderAddJPEGFrame + JxlEncoderStoreJPEGMetadata — lossless EXIF preservation). This file handles the jpegxl-sys C FFI binding directly; it is the native-side analogue of the WASM jxl_casadecoder.rs Decoder API but for the simpler one-shot decode use cases. The Decoder object API in jxl_casadecoder.rs is used for progressive and region paths.",
+      "tech": [
+        "rust"
+      ],
+      "gc": 0
+    },
+    {
+      "id": "t_bench",
+      "k": "file",
+      "l": "src-tauri/src/bench.rs",
+      "p": "tauri",
+      "path": "src-tauri/src/bench.rs",
+      "lines": 2222,
+      "desc": "Benchmarking and diagnostic utilities for JXL decode paths. Contains: decode_oxide_region (jxl-oxide Decoder::set_image_region → cropped RGB8, avoids full image; used for ROI decode commands), decode_libjxl_dc (jpegxl_sys DC-preview pass — fast low-res first paint for gallery lightbox), bench_jxl_decode / bench_jxl_sweep (sweep across efforts 1–9 and qualities, log throughput + file sizes). Also benchmarks progressive decode timing (decode_progressive_first_total from jxl_lowlevel). Not exposed as Tauri commands; used via a build feature or direct binary invocation. The jxl-oxide region path here is the production decode backend for decode_jxl_region commands.",
+      "tech": [
+        "rust"
+      ],
+      "gc": 0
+    },
+    {
+      "id": "t_casabio",
+      "k": "file",
+      "l": "src-tauri/src/casabio.rs",
+      "p": "tauri",
+      "path": "src-tauri/src/casabio.rs",
+      "lines": 413,
+      "desc": "Casabio cloud upload integration. Wraps raw_pipeline::casabio_encode::encode_variants to produce the (thumb_300, preview_1080, full) JXL triplet, then uploads via multipart HTTP to the Casabio API. Tauri commands: set_token / get_token (persist API key in AppState), list_expeditions, upload_file (classify_source → encode_variants → upload). classify_source distinguishes JPEG masters (use transcode_jpeg_to_jxl lossless path) from RAW (use encode_variants lossy pipeline). Shared dependency on casabio_encode.rs — same encoding logic as the WASM/web upload path but running natively with full CPU parallelism.",
+      "tech": [
+        "rust"
+      ],
+      "gc": 0
+    },
+    {
+      "id": "t_pyramid",
+      "k": "file",
+      "l": "src-tauri/src/pyramid_store.rs",
+      "p": "tauri",
+      "path": "src-tauri/src/pyramid_store.rs",
+      "lines": 579,
+      "desc": "Multi-level pyramid storage and manifest management. PyramidManifest: index of level contenthashes (SHA-256) + metadata per level (full / 1080 / 300 / 128 / 64 px long-edge). ingest_raw_pyramid: calls casabio_encode::encode_rgba8_pyramid to produce all pyramid tiers, stores each JXL in the local pyramid cache directory keyed by contenthash, writes manifest. decode_jxl_level_for_id and decode_pyramid_roi_for_id commands read from this store for fast gallery browsing — they decode only the requested level without touching the full-resolution JXL. Mirrors the WASM jxl-pyramid package's level abstraction but for local disk storage.",
+      "tech": [
+        "rust"
+      ],
+      "gc": 0
+    },
+    {
+      "id": "t_pool",
+      "k": "file",
+      "l": "src-tauri/src/pool.rs",
+      "p": "tauri",
+      "path": "src-tauri/src/pool.rs",
+      "lines": 111,
+      "desc": "Memory pool for RGB16 buffer reuse across apply_look re-tone calls. Holds a Vec<Vec<u8>> of recycled full-resolution RGB16 buffers. Callers acquire a buffer (or allocate fresh if pool empty), process into it, then release it back. Avoids repeated 50–100 MB allocations when the user adjusts sliders in the look panel. Pool is bounded to avoid unbounded memory growth. Operates under Mutex inside AppState.",
+      "tech": [
+        "rust"
+      ],
+      "gc": 0
+    },
+    {
+      "id": "t_priorsem",
+      "k": "file",
+      "l": "src-tauri/src/priority_sem.rs",
+      "p": "tauri",
+      "path": "src-tauri/src/priority_sem.rs",
+      "lines": 145,
+      "desc": "Priority-aware semaphore for file-level concurrency control. FILE_CONCURRENCY=3 — at most 3 files decode/encode simultaneously. promote_file command elevates a queued file to the front of the wait queue (user clicked on a specific image). cancel_file cancels a queued or in-flight file (user scrolls past). Internally uses tokio::sync::Semaphore with a priority wait queue. Prevents the encoder thread pool from being saturated by background batch work while a user-selected image is waiting.",
+      "tech": [
+        "rust"
+      ],
+      "gc": 0
+    },
+    {
+      "id": "t_process_file",
+      "k": "fn",
+      "p": "t_pipeline",
+      "l": "process_file",
+      "desc": "Main async Tauri command. Receives ProcessOptions (quality, effort, lossless, look, skip_jxl, use_tiled_jxl, tile_size). Stages: (1) acquire PrioritySem slot; (2) decode_source_file → Bayer → RGB16 via raw_pipeline tiff/dng/cr2 + demosaic; (3) apply look → RGBA8 via pipeline::process; (4) downscale to lightbox (1800 px) + thumb (360 px); (5) encode_jxl_with_channels → JXL bytes via jpegxl_rs ThreadsRunner; (6) optionally ingest_raw_pyramid; (7) store results in AppState caches; (8) return ProcessResult. Cancel signal checked at each stage boundary. Timings returned per-stage.",
+      "tech": [
+        "rust"
+      ]
+    },
+    {
+      "id": "t_decode_cmds",
+      "k": "component",
+      "p": "t_pipeline",
+      "l": "decode_jxl_* commands",
+      "desc": "Six Tauri decode commands dispatching to different native decode backends: decode_jxl_to_rgb (jpegxl_sys → RGB8, full image), decode_jxl_region (jxl-oxide set_image_region → RGB8 ROI crop), decode_jxl_dc (jpegxl_sys DC pass → low-res RGB8 preview), *_for_id variants use AppState::jxl_cache lookup to avoid re-transmitting JXL bytes over IPC. decode_jxl_level_for_id and decode_pyramid_roi_for_id route to pyramid_store. All respond with tauri::ipc::Response (binary: 4-byte width + 4-byte height LE header + raw pixel bytes) to skip JSON overhead.",
+      "tech": [
+        "rust"
+      ]
+    },
+    {
+      "id": "t_encode_jxl",
+      "k": "fn",
+      "p": "t_pipeline",
+      "l": "encode_jxl_with_channels",
+      "desc": "Internal JXL encode helper called by process_file and the encode_rgba16_jxl command. Uses jpegxl_rs::encoder_builder with ThreadsRunner (default 6 threads on 12-core). Configuration: quality (0–100, converted to butteraugli distance), effort (1–9), lossless flag, decoding_speed tier (0–4, embedded at encode time), progressive_dc (0/1/2, first-paint tier). Channels auto-detected (3=RGB, 4=RGBA). Returns Vec<u8> JXL codestream. For tiled_jxl mode routes to the TJLX/JXTC encoder for images >8000 px or >40 Mpx.",
+      "tech": [
+        "rust"
+      ]
+    },
+    {
+      "id": "t_apply_look",
+      "k": "fn",
+      "p": "t_pipeline",
+      "l": "apply_look / apply_look_stream",
+      "desc": "Re-tone Tauri commands for slider interaction. apply_look: synchronous, pulls Rgb16State from rgb16_cache, calls pipeline::process_into with new LookOptions, returns RGBA8 lightbox. apply_look_stream: async streaming variant that sends progressive quality levels (downscaled fast → full-res) over a Tauri event channel, with cancellation via AtomicBool. Enables live-preview slider feedback without re-decoding the RAW file. LookOptions mirrors WASM LookRenderer parameters.",
+      "tech": [
+        "rust"
+      ]
+    },
+    {
+      "id": "t_shared_rawpipe",
+      "k": "module",
+      "p": "tauri",
+      "l": "raw-pipeline (shared)",
+      "path": "crates/raw-pipeline/src",
+      "desc": "raw-pipeline Rust crate is a workspace member of both raw-converter-wasm and raw-converter-tauri. Compiled natively for Tauri (x86_64, full AVX2/AVX-512, rayon parallelism, jpegxl-sys C FFI enabled via jxl-lowlevel feature). Compiled to wasm32-unknown-unknown for the browser WASM path (jxl-encode/jxl-lowlevel features disabled). Source files are identical — no fork. Native build enables features=simd,jxl-lowlevel,jxl-encode; WASM build uses default-features=false. This is the key architectural invariant: one codebase, two compilation targets.",
+      "tech": [
+        "rust"
+      ]
+    },
+    {
+      "id": "t_jxloxide",
+      "k": "component",
+      "p": "tauri",
+      "l": "jxl-oxide (region ROI)",
+      "desc": "Pure-Rust JXL decoder (crate jxl-oxide v0.11) used exclusively for region/ROI decode in the native Tauri path. Exposes set_image_region before decoding — libjxl C binding does not yet have a stable crop API at the Rust wrapper level. Avoids allocating and decoding the full image when only a viewport is needed (e.g. a 512×512 crop of a 24 MP image). Not used in WASM (wasm32 build excludes it — WASM decode uses the libjxl bridge). Not used for full-image decode (jpegxl_sys is faster for that path). Dependency only in src-tauri/Cargo.toml.",
+      "tech": [
+        "rust"
+      ]
     }
   ],
   "edges": [
@@ -2375,6 +2552,120 @@
       "t": "es_basic",
       "l": "dims / bits / profile",
       "pay": "meta"
+    },
+    {
+      "f": "tauri",
+      "t": "rawdec",
+      "l": "shared src",
+      "pay": "bytes"
+    },
+    {
+      "f": "tauri",
+      "t": "enc",
+      "l": "shared src",
+      "pay": "rgba8"
+    },
+    {
+      "f": "tauri",
+      "t": "dec",
+      "l": "shared src",
+      "pay": "jxl"
+    },
+    {
+      "f": "tauri",
+      "t": "perc",
+      "l": "shared metrics",
+      "pay": "metric"
+    },
+    {
+      "f": "t_lib",
+      "t": "t_pipeline",
+      "l": "registers commands",
+      "pay": "bytes"
+    },
+    {
+      "f": "t_pipeline",
+      "t": "t_jxl_native",
+      "l": "full/DC decode",
+      "pay": "jxl"
+    },
+    {
+      "f": "t_pipeline",
+      "t": "t_bench",
+      "l": "region decode",
+      "pay": "jxl"
+    },
+    {
+      "f": "t_pipeline",
+      "t": "t_pyramid",
+      "l": "pyramid level",
+      "pay": "jxl"
+    },
+    {
+      "f": "t_pipeline",
+      "t": "t_casabio",
+      "l": "upload variants",
+      "pay": "jxl"
+    },
+    {
+      "f": "t_pipeline",
+      "t": "t_priorsem",
+      "l": "concurrency gate",
+      "pay": "bytes"
+    },
+    {
+      "f": "t_pipeline",
+      "t": "t_pool",
+      "l": "RGB16 reuse",
+      "pay": "rgb16"
+    },
+    {
+      "f": "t_pipeline",
+      "t": "pipeline",
+      "l": "process_into (tone)",
+      "pay": "rgb16"
+    },
+    {
+      "f": "t_pipeline",
+      "t": "casabio",
+      "l": "encode_variants",
+      "pay": "rgba8"
+    },
+    {
+      "f": "t_jxl_native",
+      "t": "dec_rs",
+      "l": "shared decoder src",
+      "pay": "jxl"
+    },
+    {
+      "f": "t_casabio",
+      "t": "casabio",
+      "l": "encode_variants",
+      "pay": "rgba8"
+    },
+    {
+      "f": "t_pyramid",
+      "t": "casabio",
+      "l": "encode_rgba8_pyramid",
+      "pay": "rgba8"
+    },
+    {
+      "f": "t_bench",
+      "t": "dec_rs",
+      "l": "Decoder API",
+      "pay": "jxl"
+    },
+    {
+      "f": "t_bench",
+      "t": "t_jxloxide",
+      "l": "region ROI",
+      "pay": "jxl"
+    },
+    {
+      "f": "t_jxloxide",
+      "t": "dec",
+      "l": "pure-Rust alt path",
+      "pay": "jxl"
     }
   ],
   "generated": "2026-06-19",
