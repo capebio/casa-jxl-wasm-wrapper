@@ -352,15 +352,25 @@ fn write_rgb16_le(out: &mut [u8], o: usize, r: u16, g: u16, b: u16) {
 }
 
 /// Pack full-res rgb16 (Vec<u16>, 3 per pixel) to the packed LE 6-byte form used by take_*16.
+/// The packed form is exactly the source u16 slice in little-endian byte order, so on a
+/// little-endian target (wasm32, x86_64) this is a single memcpy — no per-pixel index math
+/// or byte-splitting. Big-endian falls back to the explicit per-pixel LE writes.
 #[inline]
 fn pack_rgb16_full(src: &[u16], w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h * 6];
-    for i in 0..(w * h) {
-        let o = i * 6;
-        let r = src[i * 3];
-        let g = src[i * 3 + 1];
-        let b = src[i * 3 + 2];
-        write_rgb16_le(&mut out, o, r, g, b);
+    let n = w * h * 3; // u16 count
+    let mut out = vec![0u8; n * 2];
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: reinterpret the &[u16] as &[u8] (len*2 bytes). u8 has alignment 1, so any
+        // u16 slice is validly aligned for u8 reads; we copy exactly n*2 bytes into `out`.
+        let src_bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, n * 2) };
+        out.copy_from_slice(src_bytes);
+    }
+    #[cfg(target_endian = "big")]
+    {
+        for i in 0..(w * h) {
+            write_rgb16_le(&mut out, i * 6, src[i * 3], src[i * 3 + 1], src[i * 3 + 2]);
+        }
     }
     out
 }
@@ -526,14 +536,23 @@ fn downscale_packed_rgb16_le(src: &[u8], sw: usize, sh: usize, dw: usize, dh: us
 }
 
 fn unpack_rgb16_le(src: &[u8]) -> Vec<u16> {
-    // Manual loop for consistency with other hot conversion paths (rgb_to_rgba etc.).
-    // Slightly better codegen / less iterator overhead than chunks_exact+map+collect.
+    // Packed LE bytes are exactly the u16 slice's byte image on a little-endian target
+    // (wasm32, x86_64), so this is a single memcpy into the u16 buffer — no per-element
+    // from_le_bytes. Big-endian falls back to the explicit per-element decode.
     let n = src.len() / 2;
-    let mut out = Vec::with_capacity(n);
-    let mut i = 0;
-    while i < src.len() {
-        out.push(u16::from_le_bytes([src[i], src[i + 1]]));
-        i += 2;
+    let mut out = vec![0u16; n];
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: write n*2 bytes into `out` (n u16). out is u16-aligned (stricter than the
+        // u8 view), and we copy exactly the first n*2 source bytes.
+        let dst = unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 2) };
+        dst.copy_from_slice(&src[..n * 2]);
+    }
+    #[cfg(target_endian = "big")]
+    {
+        for (o, c) in out.iter_mut().zip(src.chunks_exact(2)) {
+            *o = u16::from_le_bytes([c[0], c[1]]);
+        }
     }
     out
 }
@@ -1426,6 +1445,36 @@ pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pack_unpack_rgb16_match_scalar_reference_and_roundtrip() {
+        // Scalar references = the pre-memcpy implementations.
+        fn pack_scalar(src: &[u16], w: usize, h: usize) -> Vec<u8> {
+            let mut out = vec![0u8; w * h * 6];
+            for i in 0..(w * h) {
+                let o = i * 6;
+                let (r, g, b) = (src[i * 3], src[i * 3 + 1], src[i * 3 + 2]);
+                out[o] = (r & 0xff) as u8; out[o + 1] = (r >> 8) as u8;
+                out[o + 2] = (g & 0xff) as u8; out[o + 3] = (g >> 8) as u8;
+                out[o + 4] = (b & 0xff) as u8; out[o + 5] = (b >> 8) as u8;
+            }
+            out
+        }
+        fn unpack_scalar(src: &[u8]) -> Vec<u16> {
+            src.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        }
+        let (w, h) = (37usize, 19usize); // odd dims, full RGB triples
+        let mut s: u32 = 0x1234_5678;
+        let src: Vec<u16> = (0..w * h * 3).map(|_| {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((s >> 8) & 0xffff) as u16
+        }).collect();
+        let packed = pack_rgb16_full(&src, w, h);
+        assert_eq!(packed, pack_scalar(&src, w, h), "pack != scalar reference");
+        let unpacked = unpack_rgb16_le(&packed);
+        assert_eq!(unpacked, unpack_scalar(&packed), "unpack != scalar reference");
+        assert_eq!(unpacked, src, "pack→unpack round-trip lost data");
+    }
 
     #[test]
     fn take_rgba_via_rgb_to_rgba_roundtrip() {
