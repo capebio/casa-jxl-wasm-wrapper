@@ -838,3 +838,25 @@ FIXED this run: EC descriptor stride drift (72B writer vs 20B C++ struct → mul
 
 ### FALSE POSITIVE worth recording
 "Perceptual-Constancy engine completely unexposed" — WRONG. `perceptualConstancyApplyBulk` + `getPerceptualConstancySupport` already exist (facade.ts:3120/3136, also in dist). Engine IS exposed; only the interleaved-RGBA convenience entry is missing (#12).
+
+---
+
+## EpicCodeReview 20260619T130214Z — raw-pipeline parsers/decoders
+
+Target: `tiff.rs cr2.rs dng.rs ljpeg.rs decompress.rs demosaic.rs`. 61 findings → 56 confirmed / 5 false-positive / 0 uncertain. 13 correctness issues fixed + committed (782a28b8). Remaining = opportunities deferred for ratification (no-go: public-signature/cross-file/platform). Full proposals: `.epiccodereview/20260619T130214Z/global/adr_draft/ADR-drafts.md`.
+
+**Deferred ADR drafts (need owner decision):**
+1. **ADR-1** Shared bounded TIFF/IFD value reader — consolidate the read_u16/u32/ascii/IFD-walk triplication across tiff/cr2/dng (root cause of the bounds-drift we hand-patched). Proceed?
+2. **ADR-2** Unified `RawError` enum replacing anyhow/String/bail mix at the decode seam.
+3. **ADR-3 (HIGH, platform)** Calibrated scene-referred `RawImageMeta` — currently drops black/white/iso/bits and collapses camera→XYZ to sRGB at decode (dng.rs:113-123); add a "linear, not-tone-mapped" mode + re-enable CR2 per-model colour matrix (cr2.rs:228-240). Public struct change → needs sign-off. See [[project-non-riemannian-colour-plan]], [[project-cr2-colordata-matrix-todo]].
+4. **ADR-4 (MEASURED +22%)** Demosaic phased-MHC split + MHC SIMD + Laplacian CSE. flipflop demosaic-mhc: RGGB-specialized is ~22% faster than the generic per-pixel CFA-dispatch path (16–28%/size, trust:high). Approve the refactor?
+5. **ADR-6** Fast embedded-preview/LOD tier for CR2+DNG (ORF-only today) + wire `demosaic_rggb_half` AR tier.
+6. **ADR-7** Collapse 3× SOF3 parsers + 2× BitReaders.
+7. **ADR-8** Wire "Perceptual Constancy Mode" (depends on ADR-3).
+
+**Measured & REJECTED (do not pursue without cleaner box):**
+- **ADR-5** DNG tile-decode endianness-branch hoist — flipflop dng-tile-decode: geomean **3.8% slower**, −25%…+19% swing, trust:low 11/12 rows. Below 5% gate; path is cold + bandwidth-bound. Branched code left as-is.
+
+**Trivial deferrals (need owner confirm):**
+- `align_to_rggb` (dng.rs) is dead in production — doc/naming fixed; full removal pending confirm it stays dead.
+- DNG `CFAPattern != 4-entry` → silent RGGB fallback (dng.rs:569-573): hard-error vs warn is a product call.
