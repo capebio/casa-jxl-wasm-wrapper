@@ -28,9 +28,14 @@ fn combine_lanes(lanes: &[u32; 8]) -> u32 {
 pub struct FrameStats {
     pub alpha_min: u32,
     pub alpha_max: u32,
+    /// Count of pixels with alpha == 0.
     pub alpha_zero: u32,
+    /// Count of non-zero *channel values* (not pixels): each pixel contributes 0–3.
+    /// Maximum value is `pixel_count * 3`. Named for historical compatibility.
     pub rgb_nonzero: u32,
+    /// Sum of per-pixel luma values: `l = 54*r + 183*g + 18*b` (u8 inputs → max 65025/px).
     pub luma_sum: f64,
+    /// Sum of squared per-pixel luma values (same units as luma_sum^2).
     pub luma_sq: f64,
     pub hash: u32,
     pub pixel_count: usize,
@@ -40,10 +45,13 @@ impl FrameStats {
     pub fn mean_luma(&self) -> f64 {
         if self.pixel_count == 0 { 0.0 } else { self.luma_sum / self.pixel_count as f64 }
     }
+    /// Returns luma variance normalized by 65025.0 (= 255×255, the max luma weight sum × max u8).
+    /// Result is in [0, 65025]: smaller means more uniform, larger means more contrast/detail.
+    /// Note: divides by 65025.0 (not 65536.0) so the normalization matches the actual luma range.
     pub fn luma_variance(&self) -> f64 {
         if self.pixel_count == 0 { return 0.0; }
         let m = self.mean_luma();
-        ((self.luma_sq / self.pixel_count as f64) - m * m).max(0.0) / 65536.0
+        ((self.luma_sq / self.pixel_count as f64) - m * m).max(0.0) / 65025.0
     }
 }
 
@@ -86,9 +94,15 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+/// Caller must ensure `d.len() >= px * 4` and that AVX2 is available.
+/// The function reads `(px / 8) * 32` bytes in the SIMD loop and then
+/// `(px % 8) * 4` bytes in the scalar tail — both within `d[..px*4]`.
 unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
     use core::arch::x86_64::*;
 
+    // Guard: clamp px so the SIMD loop never reads past d.
+    let px = px.min(d.len() / 4);
     let chunks = px / 8; // 8 px = 32 bytes per __m256i
     let (mut a_zero, mut rgb_nz) = (0u32, 0u32);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
@@ -183,10 +197,21 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
 
 /// Runtime-dispatched entry. Uses AVX2 when present, else the scalar kernel.
 pub fn analyze(pixels: &[u8], width: usize, height: usize) -> FrameStats {
-    let px = width.saturating_mul(height);
-    let limit = pixels.len().min(px * 4);
-    if limit < px * 4 {
-        return analyze_scalar(&zero_padded(pixels, px * 4), px);
+    // Use checked_mul so giant dimensions (e.g. from untrusted input) cannot silently saturate
+    // to a wrong pixel count and cause the kernel to read stale/zeroed padding as real pixels.
+    let px = match width.checked_mul(height) {
+        Some(n) => n,
+        None => return FrameStats {
+            alpha_min: 255, alpha_max: 0, alpha_zero: 0, rgb_nonzero: 0,
+            luma_sum: 0.0, luma_sq: 0.0, hash: combine_lanes(&[
+                lane_seed(0), lane_seed(1), lane_seed(2), lane_seed(3),
+                lane_seed(4), lane_seed(5), lane_seed(6), lane_seed(7),
+            ]), pixel_count: 0,
+        },
+    };
+    let limit = pixels.len().min(px.saturating_mul(4));
+    if limit < px.saturating_mul(4) {
+        return analyze_scalar(&zero_padded(pixels, px.saturating_mul(4)), px);
     }
     #[cfg(target_arch = "x86_64")]
     {

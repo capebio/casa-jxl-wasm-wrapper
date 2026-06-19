@@ -153,7 +153,10 @@ pub fn demosaic_rggb(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16
     {
         return demosaic_rggb_simd(raw, width, height);
     }
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
     demosaic_rggb_into(raw, width, height, &mut rgb)?;
     Ok(rgb)
 }
@@ -199,7 +202,10 @@ fn bilinear_interleaved_pair(
 /// Output is bit-identical to `demosaic_rggb`.
 pub fn demosaic_rggb_into(raw: &[u16], width: usize, height: usize, out: &mut [u16]) -> Result<(), String> {
     validate(raw, width, height)?;
-    if out.len() != width * height * 3 {
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    if out.len() != n3 {
         return Err(format!("demosaic: out len {} != {}*{}*3", out.len(), width, height));
     }
 
@@ -295,7 +301,10 @@ pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Ve
 pub fn demosaic_rggb_simd(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     use core::arch::wasm32::*;
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
     let h_max = height - 1;
     let w_max = width - 1;
     // lane parity mask: even lanes (cols) all-ones → bitselect picks the "even-column" candidate.
@@ -484,6 +493,7 @@ pub fn demosaic_rggb_planar_simd(raw: &[u16], width: usize, height: usize) -> Re
 pub fn demosaic_rggb_planar_simd(raw: &[u16], width: usize, height: usize) -> Result<(Vec<u16>, Vec<u16>, Vec<u16>), String> {
     use core::arch::wasm32::*;
     validate(raw, width, height)?;
+    // validate() already checked width*height doesn't overflow, so this cannot fail.
     let n = width * height;
     let mut r_plane = vec![0u16; n];
     let mut g_plane = vec![0u16; n];
@@ -629,7 +639,10 @@ pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> R
 pub fn demosaic_rggb_shuffle_simd(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     use core::arch::wasm32::*;
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
     let h_max = height - 1;
     let w_max = width - 1;
     static PARITY_EVEN: [u16; 8] = [0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0, 0xFFFF, 0];
@@ -754,7 +767,10 @@ pub fn demosaic_rggb_half(raw: &[u16], width: usize, height: usize) -> Result<Ve
     if hw == 0 || hh == 0 {
         return Err(format!("demosaic: {}×{} too small for half-res", width, height));
     }
-    let mut rgb = vec![0u16; hw * hh * 3];
+    let n3 = hw.checked_mul(hh)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: half {}×{}×3 overflows usize", hw, hh))?;
+    let mut rgb = vec![0u16; n3];
     let do_row = |qr: usize, out_row: &mut [u16]| {
         let top = &raw[(2 * qr) * width..(2 * qr) * width + width];
         let bot = &raw[(2 * qr + 1) * width..(2 * qr + 1) * width + width];
@@ -781,7 +797,10 @@ pub fn demosaic_bayer(raw: &[u16], width: usize, height: usize, phase: (u8, u8))
     -> Result<Vec<u16>, String>
 {
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
 
     let h_max = height - 1;
     let w_max = width  - 1;
@@ -907,7 +926,10 @@ pub fn demosaic_bayer_mhc(
     phase: (u8, u8),
 ) -> Result<Vec<u16>, String> {
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
     let phase = (phase.0 as usize, phase.1 as usize);
@@ -975,7 +997,9 @@ pub fn demosaic_bayer_mhc_band(
     if ctx.len() < ctx_min {
         return Err(format!("demosaic: band ctx too small ({} < {}×{})", ctx.len(), width, ctx_h));
     }
-    let out_len = num_rows * width * 3;
+    let out_len = num_rows.checked_mul(width)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: band {}×{}×3 overflows usize", num_rows, width))?;
     if rgb_out.len() < out_len {
         return Err(format!("demosaic: band rgb_out too small ({} < {})", rgb_out.len(), out_len));
     }
@@ -983,8 +1007,15 @@ pub fn demosaic_bayer_mhc_band(
     let h_max = (ctx_h - 1) as isize;
     let phase = (phase.0 as usize, phase.1 as usize);
 
+    // Safety: ctx_row is checked below against ctx_h-1; col is clamped to width-1.
+    // The unsafe at() call uses get_unchecked only when the bounds have been validated above.
     for local_row in 0..num_rows {
         let ctx_row = halo + first_local + local_row;
+        if ctx_row >= ctx_h {
+            return Err(format!(
+                "demosaic: band ctx_row {} out of bounds (ctx_h={})", ctx_row, ctx_h
+            ));
+        }
         let r = ctx_row as isize;
         let r_n = clamp(r - 1, 0, h_max);
         let r_s = clamp(r + 1, 0, h_max);
@@ -1036,7 +1067,10 @@ pub fn demosaic_bayer_mhc_band(
 /// All results clamped to [0, 65535].
 pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec<u16>, String> {
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
 
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
@@ -1116,7 +1150,7 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
                 let b_v = sum_b4 >> 2;
                 out_row[o]     = rc as u16;
                 out_row[o+1]   = g_mhc.clamp(0,65535) as u16;
-                out_row[o+2]   = b_v as u16;
+                out_row[o+2]   = b_v.clamp(0,65535) as u16;
 
                 // even row, odd col (0,1): GR site
                 let gc  = here[col+1] as i32;
@@ -1234,7 +1268,9 @@ pub fn demosaic_rggb_mhc_band(
     if ctx.len() < ctx_min {
         return Err(format!("demosaic: band ctx too small ({} < {}×{})", ctx.len(), width, ctx_h));
     }
-    let out_len = num_rows * width * 3;
+    let out_len = num_rows.checked_mul(width)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: band {}×{}×3 overflows usize", num_rows, width))?;
     if rgb_out.len() < out_len {
         return Err(format!("demosaic: band rgb_out too small ({} < {})", rgb_out.len(), out_len));
     }
@@ -1246,6 +1282,11 @@ pub fn demosaic_rggb_mhc_band(
 
     for br in 0..num_rows {
         let local = halo + first_local + br;
+        if local >= ctx_h {
+            return Err(format!(
+                "demosaic: band local row {} out of bounds (ctx_h={})", local, ctx_h
+            ));
+        }
         let global_row = global_row0 + first_local + br;
         let r = local as isize;
         let r_n  = clamp(r - 1, 0, h_max) as usize;
@@ -1284,7 +1325,10 @@ pub fn demosaic_rggb_mhc_with_saliency(raw: &[u16], width: usize, height: usize)
     -> Result<(Vec<u16>, Vec<u32>, usize /* grid_w */), String>
 {
     validate(raw, width, height)?;
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
 
     let grid_w = (width + SALIENCY_BLOCK - 1) / SALIENCY_BLOCK;
     let grid_h = (height + SALIENCY_BLOCK - 1) / SALIENCY_BLOCK;
@@ -1429,7 +1473,10 @@ pub fn demosaic_rggb_mhc_matrix(raw: &[u16], width: usize, height: usize, m: &[i
             return Err("demosaic: matrix coeff |m| > 8<<12".to_string());
         }
     }
-    let mut rgb = vec![0u16; width * height * 3];
+    let n3 = width.checked_mul(height)
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| format!("demosaic: {}×{}×3 overflows usize", width, height))?;
+    let mut rgb = vec![0u16; n3];
 
     let w_max = (width - 1) as isize;
     let h_max = (height - 1) as isize;
