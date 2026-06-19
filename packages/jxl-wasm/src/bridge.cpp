@@ -3447,7 +3447,9 @@ extern "C" int32_t jxl_wasm_butteraugli_compare(
 // ============================================================================
 
 struct JxlWasmButterRef {
-  jxl::Image3F ref_img;
+  JxlMemoryManager mem;                                   // kept alive for the comparator's images
+  std::unique_ptr<jxl::ButteraugliComparator> comp;       // reference pre-processed once
+  jxl::ButteraugliParams params;
   uint32_t width;
   uint32_t height;
 };
@@ -3458,19 +3460,17 @@ extern "C" JxlWasmButterRef* jxl_wasm_butteraugli_ref_create(
   if (!s) return nullptr;
   s->width = width;
   s->height = height;
+  if (!jxl::MemoryManagerInit(&s->mem, nullptr)) { delete s; return nullptr; }
 
-  JxlMemoryManager mem;
-  if (!jxl::MemoryManagerInit(&mem, nullptr)) { delete s; return nullptr; }
-
-  auto img_or = jxl::Image3F::Create(&mem, width, height);
+  auto img_or = jxl::Image3F::Create(&s->mem, width, height);
   if (!img_or.ok()) { delete s; return nullptr; }
-  s->ref_img = std::move(img_or).value_();
+  jxl::Image3F ref_img = std::move(img_or).value_();
 
   const float* gamma_lut = SrgbGamma22Lut();
   for (size_t y = 0; y < height; ++y) {
-    float* JXL_RESTRICT rr = s->ref_img.PlaneRow(0, y);
-    float* JXL_RESTRICT gr = s->ref_img.PlaneRow(1, y);
-    float* JXL_RESTRICT br = s->ref_img.PlaneRow(2, y);
+    float* JXL_RESTRICT rr = ref_img.PlaneRow(0, y);
+    float* JXL_RESTRICT gr = ref_img.PlaneRow(1, y);
+    float* JXL_RESTRICT br = ref_img.PlaneRow(2, y);
     const uint8_t* src = ref_data + y * (size_t)width * 4u;
     for (size_t x = 0; x < width; ++x) {
       rr[x] = gamma_lut[src[x * 4u + 0u]];
@@ -3478,19 +3478,27 @@ extern "C" JxlWasmButterRef* jxl_wasm_butteraugli_ref_create(
       br[x] = gamma_lut[src[x * 4u + 2u]];
     }
   }
+
+  // Pre-process the reference ONCE into a ButteraugliComparator (opsin dynamics +
+  // frequency separation). Each compare then only processes the test image and diffs
+  // against this cached state — no per-compare deep-copy of the reference AND the ref's
+  // opsin/frequency decomposition is computed once instead of every pass. This path uses
+  // the exported HWY dispatches (OpsinDynamicsImage/SeparateFrequencies/MaltaDiffMap/...),
+  // unlike the free-function ButteraugliInterface, which routes through a non-exported
+  // ButteraugliDiffmap in this WASM build (only ButteraugliDiffmapInPlace is HWY_EXPORTed).
+  auto comp_or = jxl::ButteraugliComparator::Make(ref_img, s->params);
+  if (!comp_or.ok()) { delete s; return nullptr; }
+  s->comp = std::move(comp_or).value_();
   return s;
 }
 
 extern "C" int32_t jxl_wasm_butteraugli_ref_compare(
     JxlWasmButterRef* s, const uint8_t* test_data) {
-  if (!s) return -1;
+  if (!s || !s->comp) return -1;
   const uint32_t width = s->width, height = s->height;
 
-  JxlMemoryManager mem;
-  if (!jxl::MemoryManagerInit(&mem, nullptr)) return -1;
-
-  // Build test Image3F.
-  auto test_or = jxl::Image3F::Create(&mem, width, height);
+  // Build test Image3F (gamma-decode) with the state's own memory manager.
+  auto test_or = jxl::Image3F::Create(&s->mem, width, height);
   if (!test_or.ok()) return -1;
   jxl::Image3F test_img = std::move(test_or).value_();
   const float* gamma_lut = SrgbGamma22Lut();
@@ -3506,27 +3514,15 @@ extern "C" int32_t jxl_wasm_butteraugli_ref_compare(
     }
   }
 
-  // Deep-copy ref planes (ButteraugliInterfaceInPlace moves/consumes both args).
-  auto ref_copy_or = jxl::Image3F::Create(&mem, width, height);
-  if (!ref_copy_or.ok()) return -1;
-  jxl::Image3F ref_copy = std::move(ref_copy_or).value_();
-  for (size_t c = 0; c < 3; ++c) {
-    for (size_t y = 0; y < height; ++y) {
-      const float* src_row = s->ref_img.ConstPlaneRow(c, y);
-      float* dst_row = ref_copy.PlaneRow(c, y);
-      memcpy(dst_row, src_row, width * sizeof(float));
-    }
-  }
-
-  auto diffmap_or = jxl::ImageF::Create(&mem, width, height);
+  // Diff the test against the pre-processed cached reference — no reference copy or
+  // re-decomposition per compare. Score via the same ButteraugliScoreFromDiffmap path
+  // that ButteraugliInterfaceInPlace used, so the distance is unchanged.
+  auto diffmap_or = jxl::ImageF::Create(&s->mem, width, height);
   if (!diffmap_or.ok()) return -1;
   jxl::ImageF diffmap = std::move(diffmap_or).value_();
+  if (!s->comp->Diffmap(test_img, diffmap)) return -1;
 
-  jxl::ButteraugliParams params;
-  double diffvalue = 0.0;
-  if (!jxl::ButteraugliInterfaceInPlace(std::move(ref_copy), std::move(test_img),
-                                        params, diffmap, diffvalue)) return -1;
-
+  const double diffvalue = jxl::ButteraugliScoreFromDiffmap(diffmap, &s->params);
   const float dist = static_cast<float>(diffvalue);
   int32_t bits;
   memcpy(&bits, &dist, 4);

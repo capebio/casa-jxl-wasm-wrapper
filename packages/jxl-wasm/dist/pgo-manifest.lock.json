@@ -1,7 +1,7 @@
 {
-  "corpusManifestPath": "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\pgo-manifest.json",
+  "corpusManifestPath": "C:\\Foo\\rcw-ssim-ec\\packages\\jxl-test-corpus\\pgo-manifest.json",
   "source": "jxl-test-corpus/pgo-manifest.json",
-  "corpusHash": "768118393df7a41008c97ba69c82e58880aadb8ac96bee0ad9b8bfdcb8bb02a2",
+  "corpusHash": "98339041ab81130d4c22e76a39dba73ff850ab24aadc8462c0c9331a578682e5",
   "summary": {
     "files": 3,
     "bytes": 59596681
@@ -61,7 +61,7 @@
       "weight": 0.6,
       "op": "encode-tiles",
       "files": [
-        "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\tiles\\256\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        "C:\\Foo\\rcw-ssim-ec\\packages\\jxl-test-corpus\\tiles\\256\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
       ],
       "effort": 3,
       "levels": null,
@@ -72,7 +72,7 @@
       "weight": 0.25,
       "op": "encode-pyramid",
       "files": [
-        "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        "C:\\Foo\\rcw-ssim-ec\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
       ],
       "effort": 3,
       "levels": 5,
@@ -83,7 +83,7 @@
       "weight": 0.1,
       "op": "encode-container",
       "files": [
-        "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\withmeta\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        "C:\\Foo\\rcw-ssim-ec\\packages\\jxl-test-corpus\\full\\withmeta\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
       ],
       "effort": 3,
       "levels": null,
@@ -94,7 +94,7 @@
       "weight": 0.05,
       "op": "encode",
       "files": [
-        "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        "C:\\Foo\\rcw-ssim-ec\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
       ],
       "effort": 7,
       "levels": null,
@@ -103,17 +103,17 @@
   ],
   "files": [
     {
-      "path": "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm",
+      "path": "C:\\Foo\\rcw-ssim-ec\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm",
       "sha256": "6b2feefe5d5d5cedef6068b7fc68dc680b914b4d91172ac65cac11c1db5cd386",
       "bytes": 29724221
     },
     {
-      "path": "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\withmeta\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm",
+      "path": "C:\\Foo\\rcw-ssim-ec\\packages\\jxl-test-corpus\\full\\withmeta\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm",
       "sha256": "6b2feefe5d5d5cedef6068b7fc68dc680b914b4d91172ac65cac11c1db5cd386",
       "bytes": 29724221
     },
     {
-      "path": "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\tiles\\256\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm",
+      "path": "C:\\Foo\\rcw-ssim-ec\\packages\\jxl-test-corpus\\tiles\\256\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm",
       "sha256": "8a09a91129c4b9b3b60cb11dffa00dc7d1a4ba232b87a3cce381a3d82248e206",
       "bytes": 148239
     }
