@@ -16,6 +16,58 @@ import type { Scheduler } from "@casabio/jxl-scheduler";
 import { AsyncEventStream } from "./event-stream.js";
 import { deferred, newSessionId, toTransferableBuffer, type Deferred } from "./util.js";
 
+/**
+ * Forwards all user-provided EncodeOptions to worker. See encodeOptionsToStartMsg for field mapping.
+ *
+ * Intentionally omitted from MsgEncodeStart (session-level or caller-side only):
+ *   signal, onMetric, modular, brotliEffort, decodingSpeed, photonNoiseIso,
+ *   buffering, advancedControls, jpegReconstruction
+ *
+ * distance/quality defaulting is resolved by the caller before invoking this
+ * function (distance defaults to 1.0 when neither is supplied; distance wins
+ * when both are supplied).
+ */
+export function encodeOptionsToStartMsg(
+  sessionId: string,
+  opts: EncodeOptions,
+  distance: number | null,
+  quality: number | null,
+): MsgEncodeStart {
+  const msg: MsgEncodeStart = {
+    type: "encode_start",
+    sessionId,
+    format: opts.format,
+    width: opts.width,
+    height: opts.height,
+    hasAlpha: opts.hasAlpha,
+    iccProfile: opts.iccProfile != null ? toTransferableBuffer(opts.iccProfile) : null,
+    exif: opts.exif != null ? toTransferableBuffer(opts.exif) : null,
+    xmp: opts.xmp != null ? toTransferableBuffer(opts.xmp) : null,
+    distance,
+    quality,
+    effort: opts.effort ?? 4,
+    progressive: opts.progressive ?? false,
+    previewFirst: opts.previewFirst ?? false,
+    chunked: opts.chunked ?? false,
+    priority: opts.priority ?? "visible",
+  };
+  // Optional fields: assign conditionally to satisfy exactOptionalPropertyTypes
+  // (explicit undefined in an object literal is rejected by strict mode).
+  if (opts.progressiveDc != null) msg.progressiveDc = opts.progressiveDc;
+  if (opts.groupOrder != null) msg.groupOrder = opts.groupOrder;
+  if (opts.progressiveFlavor != null) msg.progressiveFlavor = opts.progressiveFlavor;
+  if (opts.progressiveAc != null) msg.progressiveAc = opts.progressiveAc;
+  if (opts.qProgressiveAc != null) msg.qProgressiveAc = opts.qProgressiveAc;
+  if (opts.sidecarSizes !== undefined) msg.sidecarSizes = opts.sidecarSizes;
+  if (opts.orientation != null) msg.orientation = opts.orientation;
+  if (opts.centerX != null) msg.centerX = opts.centerX;
+  if (opts.centerY != null) msg.centerY = opts.centerY;
+  if (opts.intrinsicSize != null) msg.intrinsicSize = opts.intrinsicSize;
+  if (opts.disablePerceptualHeuristics === true) msg.disablePerceptualHeuristics = true;
+  if (opts.codestreamLevel != null) msg.codestreamLevel = opts.codestreamLevel;
+  return msg;
+}
+
 const KNOWN_JXL_ERROR_CODES: ReadonlySet<JxlErrorCode> = new Set<JxlErrorCode>([
   "MalformedCodestream",
   "TruncatedStream",
@@ -28,6 +80,7 @@ const KNOWN_JXL_ERROR_CODES: ReadonlySet<JxlErrorCode> = new Set<JxlErrorCode>([
   "ConfigError",
   "QueueOverflow",  // task 007-contracts-2d3e4f: was missing, decode side already had it
   "Internal",
+  "DuplicateSession", "UnhandledError", "UnhandledRejection", "WorkerError", "MessageDeserializeError",
 ] as const);
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   return typeof (value as Promise<T>)?.then === "function";
@@ -62,38 +115,7 @@ export class EncodeSessionImpl implements EncodeSession {
     const distance = hasDistance ? opts.distance! : hasQuality ? null : 1.0;
     const quality = !hasDistance && hasQuality ? opts.quality! : null;
 
-    const startMsg: MsgEncodeStart = {
-      type: "encode_start",
-      sessionId: this.id,
-      format: opts.format,
-      width: opts.width,
-      height: opts.height,
-      hasAlpha: opts.hasAlpha,
-      iccProfile: opts.iccProfile != null ? toTransferableBuffer(opts.iccProfile) : null,
-      exif: opts.exif != null ? toTransferableBuffer(opts.exif) : null,
-      xmp: opts.xmp != null ? toTransferableBuffer(opts.xmp) : null,
-      distance,
-      quality,
-      effort: opts.effort ?? 4,
-      progressive: opts.progressive ?? false,
-      previewFirst: opts.previewFirst ?? false,
-      chunked: opts.chunked ?? false,
-      priority: opts.priority ?? "visible",
-    };
-    // progressiveDc + groupOrder (predator): assign conditionally to satisfy exactOptionalPropertyTypes in MsgEncodeStart
-    // (the ? in protocol + exact mode dislikes explicit undefined in the literal from opts?: )
-    if (opts.progressiveDc != null) (startMsg as any).progressiveDc = opts.progressiveDc;
-    if (opts.groupOrder != null) (startMsg as any).groupOrder = opts.groupOrder;
-    if (opts.progressiveFlavor != null) (startMsg as any).progressiveFlavor = opts.progressiveFlavor;
-    if (opts.progressiveAc != null) (startMsg as any).progressiveAc = opts.progressiveAc;
-    if (opts.qProgressiveAc != null) (startMsg as any).qProgressiveAc = opts.qProgressiveAc;
-    if (opts.sidecarSizes !== undefined) startMsg.sidecarSizes = opts.sidecarSizes;
-    if (opts.orientation != null) startMsg.orientation = opts.orientation;
-    if (opts.centerX != null) startMsg.centerX = opts.centerX;
-    if (opts.centerY != null) startMsg.centerY = opts.centerY;
-    if (opts.intrinsicSize != null) startMsg.intrinsicSize = opts.intrinsicSize;
-    if (opts.disablePerceptualHeuristics === true) startMsg.disablePerceptualHeuristics = true;
-    if (opts.codestreamLevel != null) startMsg.codestreamLevel = opts.codestreamLevel;
+    const startMsg = encodeOptionsToStartMsg(this.id, opts, distance, quality);
 
     // No-op catch so a rejected done() promise with no caller handler (caller
     // used only chunks()) does not surface as an unhandledRejection.

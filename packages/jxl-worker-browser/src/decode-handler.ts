@@ -478,7 +478,7 @@ export class DecodeHandler {
           // marks the stop.
           if (this.checkBudget()) {
             this.postMetric("dropped_due_to_budget", 1);
-            this.postBudgetExceeded(event.stage, event.info, new ArrayBuffer(0), event.format, event.pixelStride, event.region);
+            this.postBudgetExceeded(event.stage, event.info, new ArrayBuffer(0), event.format, event.pixelStride, event);
             return;
           }
           const t0 = performance.now();
@@ -495,7 +495,7 @@ export class DecodeHandler {
               this.postMetric("copied_bytes", transfer.buffer.byteLength);
             }
             this.postMetric("dropped_due_to_budget", 1);
-            this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event.region);
+            this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event);
             return;
           }
           const msg: MsgDecodeProgress = {
@@ -530,7 +530,7 @@ export class DecodeHandler {
           // event.pixels if budget is already exceeded. (Same lazy pattern as "progress".)
           if (this.checkBudget()) {
             this.postMetric("dropped_due_to_budget", 1);
-            this.postBudgetExceeded("final", event.info, new ArrayBuffer(0), event.format, event.pixelStride, event.region);
+            this.postBudgetExceeded("final", event.info, new ArrayBuffer(0), event.format, event.pixelStride, event);
             return;
           }
           const t0 = performance.now();
@@ -546,7 +546,7 @@ export class DecodeHandler {
               this.postMetric("copied_bytes", transfer.buffer.byteLength);
             }
             this.postMetric("dropped_due_to_budget", 1);
-            this.postBudgetExceeded("final", event.info, transfer.buffer, event.format, event.pixelStride, event.region);
+            this.postBudgetExceeded("final", event.info, transfer.buffer, event.format, event.pixelStride, event);
             return;
           }
           const now = performance.now();
@@ -585,7 +585,7 @@ export class DecodeHandler {
             this.postMetric("copy_to_transfer_ms", performance.now() - t0);
           }
           this.postMetric("dropped_due_to_budget", 1);
-          this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event.region);
+          this.postBudgetExceeded(event.stage, event.info, transfer.buffer, event.format, event.pixelStride, event);
           return;
         }
         case "error": {
@@ -652,7 +652,7 @@ export class DecodeHandler {
     pixels: ArrayBuffer,
     format: MsgDecodeBudgetExceeded["format"],
     pixelStride: number,
-    region?: Region,
+    meta: FrameMetaSource,
   ): void {
     if (this.ended) return;
     const msg: MsgDecodeBudgetExceeded = {
@@ -664,7 +664,7 @@ export class DecodeHandler {
       format,
       pixelStride,
     };
-    if (region !== undefined) msg.region = region;
+    assignFrameMeta(msg, meta);
     this.postMetric("output_bytes", pixels.byteLength);
     self.postMessage(msg, transferList(pixels));
     this.finishSession("budget_exceeded");
@@ -696,7 +696,7 @@ type FrameMetaSource = {
   animTicksPerSecond?: number | undefined;
 };
 
-function assignFrameMeta(msg: MsgDecodeProgress | MsgDecodeFinal, src: FrameMetaSource): void {
+function assignFrameMeta(msg: MsgDecodeProgress | MsgDecodeFinal | MsgDecodeBudgetExceeded, src: FrameMetaSource): void {
   if (src.region !== undefined) msg.region = src.region;
   if (src.sourceScale !== undefined) msg.sourceScale = src.sourceScale;
   if (src.progressiveRegion !== undefined) msg.progressiveRegion = src.progressiveRegion;

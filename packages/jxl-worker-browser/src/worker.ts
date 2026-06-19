@@ -570,27 +570,43 @@ async function doShutdown(): Promise<void> {
 // Uncaught error reporting
 // ---------------------------------------------------------------------------
 
+/** Returns the sessionId of the single active session on this worker, if any. */
+function activeSessionId(): string | undefined {
+  // Workers run at most one decode and one encode session concurrently (pool
+  // assigns one session per worker). Prefer the decode session as crashes mid-
+  // decode are the primary use-case, then fall back to encode.
+  for (const id of decodeSessions.keys()) return id;
+  for (const id of encodeSessions.keys()) return id;
+  return undefined;
+}
+
 self.addEventListener("error", (event) => {
+  const sid = activeSessionId();
   self.postMessage({
     type: "worker_error",
     code: "UnhandledError",
     message: event.message ?? "Unknown worker error",
+    ...(sid !== undefined ? { sessionId: sid } : {}),
   });
 });
 
 self.addEventListener("unhandledrejection", (event) => {
+  const sid = activeSessionId();
   self.postMessage({
     type: "worker_error",
     code: "UnhandledRejection",
     message: event.reason instanceof Error ? event.reason.message : String(event.reason),
+    ...(sid !== undefined ? { sessionId: sid } : {}),
   });
 });
 
 self.addEventListener("messageerror", () => {
+  const sid = activeSessionId();
   self.postMessage({
     type: "worker_error",
     code: "MessageDeserializeError",
     message: "Failed to deserialize incoming message",
+    ...(sid !== undefined ? { sessionId: sid } : {}),
   });
 });
 

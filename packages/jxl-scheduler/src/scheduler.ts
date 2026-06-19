@@ -1171,6 +1171,11 @@ export class Scheduler {
         }
       }
 
+      // worker_error without a sessionId is a worker-lifecycle event — it cannot
+      // be attributed to any session. Drop it here so it does not accidentally
+      // terminate the currently-active session.
+      if (msg.type === "worker_error" && raw === undefined) return;
+
       const sessionId = worker.activeSessionId;
       if (sessionId === null || sessionId === RESERVED_SESSION_ID) return;
       this.handleWorkerMessage(sessionId, worker, msg);
@@ -1254,6 +1259,10 @@ export class Scheduler {
       case "encode_cancelled":
       case "encode_error":
         return true;
+      case "worker_error":
+        // worker_error is terminal only when it carries a sessionId — the session-
+        // less variant is a worker lifecycle event, not a per-session terminal.
+        return (msg as { sessionId?: string }).sessionId !== undefined;
       default:
         return false;
     }

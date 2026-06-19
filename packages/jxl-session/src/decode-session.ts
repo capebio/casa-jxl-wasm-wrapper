@@ -23,6 +23,7 @@ const KNOWN_JXL_ERROR_CODES: ReadonlySet<JxlErrorCode> = new Set<JxlErrorCode>([
   "MalformedCodestream", "TruncatedStream", "UnsupportedFeature", "OutOfMemory",
   "BudgetExceeded", "Cancelled", "WorkerCrashed", "CapabilityMissing", "ConfigError",
   "QueueOverflow", "Internal",
+  "DuplicateSession", "UnhandledError", "UnhandledRejection", "WorkerError", "MessageDeserializeError",
 ] as const);
 
 // Typed literals for JxlError ctor sites (ensures assignability to JxlErrorCode param
