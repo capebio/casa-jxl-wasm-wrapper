@@ -67,6 +67,10 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
         lane_seed(0), lane_seed(1), lane_seed(2), lane_seed(3),
         lane_seed(4), lane_seed(5), lane_seed(6), lane_seed(7),
     ];
+    // Kahan compensated summation for l_sq to prevent f64 precision loss at 24MP+.
+    // At 24MP luma values up to 65025 lead to l_sq sums ~1e17, which exceeds f64's
+    // exact integer range (~9e15). Compensation keeps the running error below 1 ULP.
+    let mut l_sq_c = 0f64; // Kahan compensation term
     for p in 0..px {
         let i = p * 4;
         let r = d[i] as u32;
@@ -83,7 +87,10 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
         let l = 54 * r + 183 * g + 18 * b;
         let lf = l as f64;
         l_sum += lf;
-        l_sq += lf * lf;
+        let term = lf * lf - l_sq_c;
+        let new_sq = l_sq + term;
+        l_sq_c = (new_sq - l_sq) - term;
+        l_sq = new_sq;
     }
     if px == 0 { a_min = 255; a_max = 0; }
     FrameStats {
@@ -126,6 +133,9 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
     let mut arr_lo = [0i32; 8];
     let mut arr_hi = [0i32; 8];
 
+    // Kahan compensation for l_sq to prevent f64 precision loss at 24MP+.
+    let mut l_sq_c = 0f64;
+
     for c in 0..chunks {
         let pv = _mm256_loadu_si256(d.as_ptr().add(c * 32) as *const __m256i);
 
@@ -149,7 +159,10 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         for &lz in luma.iter() {
             let lf = lz as f64;
             l_sum += lf;
-            l_sq += lf * lf;
+            let term = lf * lf - l_sq_c;
+            let new_sq = l_sq + term;
+            l_sq_c = (new_sq - l_sq) - term;
+            l_sq = new_sq;
         }
     }
 
@@ -185,7 +198,10 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         let l = 54 * r + 183 * g + 18 * b;
         let lf = l as f64;
         l_sum += lf;
-        l_sq += lf * lf;
+        let term = lf * lf - l_sq_c;
+        let new_sq = l_sq + term;
+        l_sq_c = (new_sq - l_sq) - term;
+        l_sq = new_sq;
     }
     if px == 0 { a_min = 255; a_max = 0; }
 

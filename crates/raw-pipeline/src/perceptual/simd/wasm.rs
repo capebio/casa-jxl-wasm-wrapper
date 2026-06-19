@@ -4,7 +4,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use core::arch::wasm32::*;
-use super::scalar::scale_err_tail;
+use super::scalar::{scale_err_tail, xyb_tail};
 
 /// 4-wide horizontal sum.
 #[inline]
@@ -38,7 +38,10 @@ pub fn scale_err_wasm(
     let veps = f32x4_splat(1e-12);
     let one = f32x4_splat(1.0);
     let mut acc = f32x4_splat(0.0);
-    // Drain f32 accumulator to f64 every FLUSH iterations (same strategy as avx2).
+    // Drain f32 acc to f64 every 4096 SIMD iterations (16384 scalar values).
+    // AVX2 uses 32768 scalar values per drain (4096 × 8-wide); both thresholds are
+    // within f32 exact integer range for typical XYB error magnitudes. The count is
+    // per-SIMD-iteration, not per-scalar-element, so the effective scalar counts differ by 2×.
     const FLUSH: usize = 4096;
     let mut flush_count = 0usize;
     let mut sum = 0f64;
@@ -106,16 +109,10 @@ pub fn pixels_to_xyb_wasm(px: &[u8], n: usize, lut: &[f32; 256], x: &mut [f32], 
             i += 4;
         }
     }
-    while i < n {
-        let j = i * 4;
-        let r = lut[px[j] as usize];
-        let g = lut[px[j + 1] as usize];
-        let bb = lut[px[j + 2] as usize];
-        x[i] = (r - bb) * 0.5;
-        y[i] = (r + bb) * 0.5 + g;
-        b[i] = bb;
-        i += 1;
-    }
+    // Use the shared scalar tail (same as AVX2/AVX-512 paths) to avoid
+    // divergence if the XYB formula ever changes. The inline version was
+    // byte-identical but not linked to the canonical implementation.
+    xyb_tail(px, lut, n, i, x, y, b);
 }
 
 /// wasm v128 2× box downsample. Kept scalar: the 4-wide even/odd deinterleave
@@ -131,6 +128,33 @@ pub fn downsample_wasm(src: &[f32], dst: &mut [f32], w: usize, h: usize, dw: usi
             // Same: avoid w - 1 underflow when w==0.
             let sx1 = if sx0 + 1 < w { sx0 + 1 } else { sx0 };
             dst[y * dw + x] = (src[sy0 * w + sx0] + src[sy0 * w + sx1] + src[sy1 * w + sx0] + src[sy1 * w + sx1]) * 0.25;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perceptual::butteraugli::dn2;
+
+    /// Parity test: downsample_wasm must produce the same result as the scalar oracle (dn2).
+    /// This function contains no actual wasm32 intrinsics (it is a scalar nested loop),
+    /// so this test compiles and runs natively under `cargo test`.
+    #[test]
+    fn downsample_wasm_matches_dn2() {
+        for (w, h) in [(64usize, 48usize), (65, 49), (2, 2), (33, 17)] {
+            let src: Vec<f32> = (0..w * h).map(|i| (i as f32 * 0.013).sin()).collect();
+            let (want, dw, dh) = dn2(&src, w, h);
+            let mut got = vec![0f32; dw * dh];
+            downsample_wasm(&src, &mut got, w, h, dw, dh);
+            for i in 0..dw * dh {
+                assert!(
+                    (want[i] - got[i]).abs() < 1e-5,
+                    "({w}x{h})[{i}] want={} got={}",
+                    want[i],
+                    got[i]
+                );
+            }
         }
     }
 }

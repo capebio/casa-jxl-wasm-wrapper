@@ -65,6 +65,11 @@ pub fn analyze_fused_scalar(d: &[u8], px: usize) -> TelemetryMetrics {
     ];
     let mut hist = RgbHistogram::new();
 
+    // Kahan compensated summation for l_sq to prevent f64 precision loss at 24MP+.
+    // At 24MP luma values up to 65025 lead to l_sq sums ~1e17, exceeding f64's
+    // exact integer range (~9e15). Compensation keeps the running error below 1 ULP.
+    let mut l_sq_c = 0f64; // Kahan compensation term
+
     for p in 0..px {
         let i = p * 4;
         let r = d[i] as u32;
@@ -86,7 +91,10 @@ pub fn analyze_fused_scalar(d: &[u8], px: usize) -> TelemetryMetrics {
         let l = 54 * r + 183 * g + 18 * b;
         let lf = l as f64;
         l_sum += lf;
-        l_sq += lf * lf;
+        let term = lf * lf - l_sq_c;
+        let new_sq = l_sq + term;
+        l_sq_c = (new_sq - l_sq) - term;
+        l_sq = new_sq;
     }
 
     if px == 0 { a_min = 255; a_max = 0; }
@@ -119,6 +127,8 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
     let chunks = px / 8;
     let (mut a_zero, mut rgb_nz) = (0u64, 0u64);
     let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    // Kahan compensation for l_sq to prevent f64 precision loss at 24MP+.
+    let mut l_sq_c = 0f64;
 
     let mut hv = _mm256_setr_epi32(
         lane_seed(0) as i32, lane_seed(1) as i32, lane_seed(2) as i32, lane_seed(3) as i32,
@@ -164,15 +174,24 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
         for &lz in luma.iter() {
             let lf = lz as f64;
             l_sum += lf;
-            l_sq += lf * lf;
+            let term = lf * lf - l_sq_c;
+            let new_sq = l_sq + term;
+            l_sq_c = (new_sq - l_sq) - term;
+            l_sq = new_sq;
         }
 
-        let ptr = d.as_ptr().add(c * 32);
+        // Store the already-loaded pv register to a 32-byte scratch and use it
+        // for histogram updates. This avoids re-reading the 8-pixel chunk from
+        // main memory a second time (the data is already in registers/L1 from the
+        // _mm256_loadu_si256 above), eliminating the double-traversal under
+        // memory-bound workloads at 24MP.
+        let mut scratch = [0u8; 32];
+        _mm256_storeu_si256(scratch.as_mut_ptr() as *mut __m256i, pv);
         for p_off in 0..8 {
             let i = p_off * 4;
-            let r = *ptr.add(i) as usize;
-            let g = *ptr.add(i + 1) as usize;
-            let b = *ptr.add(i + 2) as usize;
+            let r = scratch[i] as usize;
+            let g = scratch[i + 1] as usize;
+            let b = scratch[i + 2] as usize;
             hist.r[r] += 1;
             hist.g[g] += 1;
             hist.b[b] += 1;
@@ -217,7 +236,10 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
         let l = 54 * r + 183 * g + 18 * b;
         let lf = l as f64;
         l_sum += lf;
-        l_sq += lf * lf;
+        let term = lf * lf - l_sq_c;
+        let new_sq = l_sq + term;
+        l_sq_c = (new_sq - l_sq) - term;
+        l_sq = new_sq;
     }
     if px == 0 { a_min = 255; a_max = 0; }
 

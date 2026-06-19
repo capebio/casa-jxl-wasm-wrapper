@@ -104,12 +104,18 @@ impl Comparer {
         for s in 0..3 {
             let blur_r = ((w >> 6).max(1)).min(8);
             let mask = blur::box_blur(&cy, w, h, blur_r);
-            levels.push(Level { x: cx.clone(), y: cy.clone(), b: cb.clone(), mask, w, h });
             if s < 2 && w > 1 && h > 1 {
+                // Not the last level: clone cx/cy/cb so we can keep using them for dn2.
+                levels.push(Level { x: cx.clone(), y: cy.clone(), b: cb.clone(), mask, w, h });
                 let (nx, _, _) = butteraugli::dn2(&cx, w, h);
                 let (ny, _, _) = butteraugli::dn2(&cy, w, h);
                 let (nb, dw, dh) = butteraugli::dn2(&cb, w, h);
                 cx = nx; cy = ny; cb = nb; w = dw; h = dh;
+            } else {
+                // Last level (s==2, or image too small to downsample): move cx/cy/cb
+                // directly into the Level — saves 3 × n f32 allocations (up to 288 MB at 24MP).
+                levels.push(Level { x: cx, y: cy, b: cb, mask, w, h });
+                break;
             }
         }
         let (ssim_sb, ssim_sbb) = ssim::ref_moments(ref_rgba, n, 4);
@@ -199,6 +205,10 @@ impl Comparer {
                 downsample_inplace(&self.tb, &mut self.db, w, h, dw, dh);
             }
         }
+        // Only tx[..dn]/ty[..dn]/tb[..dn] are valid after this point.
+        // tx[dn..]/ty[dn..]/tb[dn..] contain stale data from the previous scale and
+        // must not be read. scale_err_dispatch correctly receives the current n via
+        // lvl.w*lvl.h, so it only reads the valid prefix.
         self.tx[..dn].copy_from_slice(&self.dx[..dn]);
         self.ty[..dn].copy_from_slice(&self.dy[..dn]);
         self.tb[..dn].copy_from_slice(&self.db[..dn]);
@@ -225,8 +235,13 @@ impl Comparer {
         // of the default [4, 2, 1]). Any caller supplying custom Opts.weights would
         // otherwise receive a result scaled by 7.0/sum(custom_weights) — silently wrong.
         let weight_sum: f32 = self.opts.weights.iter().sum();
-        debug_assert!(weight_sum.is_finite() && weight_sum > 0.0,
-            "butteraugli: opts.weights sum must be finite and > 0");
+        // Use assert! (not debug_assert!) so callers passing Opts { weights: [0.0, ..] }
+        // or NaN weights get a clear panic in release builds rather than silent NaN propagation
+        // through Metrics and downstream comparisons.
+        assert!(
+            weight_sum.is_finite() && weight_sum > 0.0,
+            "Opts.weights must sum to a finite positive value, got {weight_sum}"
+        );
         total / weight_sum
     }
 
@@ -345,7 +360,14 @@ fn resolve_forced_backend(id: u8) -> Backend {
             _ => Backend::Scalar,
         };
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "wasm32")]
+    {
+        // id=4 is Backend::WasmSimd (discriminant 4); all other ids fall back to Scalar.
+        // Without this branch, Force(4) on wasm32 silently returns Scalar, making
+        // the flip-flop bench override useless on the primary production target.
+        return if id == 4 { Backend::WasmSimd } else { Backend::Scalar };
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
     {
         let _ = id;
         Backend::Scalar
