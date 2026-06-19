@@ -149,9 +149,10 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
     // FS-001/FS-003: hoist scratch arrays outside the loop — stack frame allocated once,
     // not re-initialized per chunk. Rust hoists them, but explicit placement also prevents
     // the store-to-load stall pattern from being obscured by optimizer decisions.
+    // `pv_lanes` reused for histogram byte extraction, eliminating the separate 32-byte scratch.
     let mut arr_lo = [0i32; 8];
     let mut arr_hi = [0i32; 8];
-    let mut scratch = [0u8; 32];
+    let mut pv_lanes = [0u32; 8];
 
     let mut hist = RgbHistogram::new();
 
@@ -185,15 +186,16 @@ unsafe fn analyze_fused_avx2(d: &[u8], px: usize) -> TelemetryMetrics {
         l_sq_c = (new_sq - l_sq) - term;
         l_sq = new_sq;
 
-        // FS-003: `scratch` declared outside the loop (hoisted above). The pv register is already
-        // live from the loadu above; storeu to scratch then scalar re-read is still one store +
-        // 24 loads, but the stack frame cost is amortized over all chunks.
-        _mm256_storeu_si256(scratch.as_mut_ptr() as *mut __m256i, pv);
+        // FS-003: Extract R/G/B bytes for the histogram from pv_lanes (already populated
+        // above via storeu into arr_lo/arr_hi). We store pv into pv_lanes once and extract
+        // R=(lane & 0xFF), G=((lane>>8)&0xFF), B=((lane>>16)&0xFF) — no separate 32-byte
+        // scratch allocation needed.
+        _mm256_storeu_si256(pv_lanes.as_mut_ptr() as *mut __m256i, pv);
         for p_off in 0..8 {
-            let i = p_off * 4;
-            let r = scratch[i] as usize;
-            let g = scratch[i + 1] as usize;
-            let b = scratch[i + 2] as usize;
+            let px = pv_lanes[p_off];
+            let r = (px & 0xFF) as usize;
+            let g = ((px >> 8) & 0xFF) as usize;
+            let b = ((px >> 16) & 0xFF) as usize;
             hist.r[r] += 1;
             hist.g[g] += 1;
             hist.b[b] += 1;

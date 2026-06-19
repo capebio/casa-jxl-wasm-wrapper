@@ -44,6 +44,9 @@ pub(crate) fn scale_err(
 }
 
 /// 2× area downsample (box) of one plane → (dst, dw, dh). Port of `dn2`.
+///
+/// Allocates its own output Vec. For construction-time use where a pre-allocated
+/// buffer is available, prefer `dn2_into` to avoid the internal allocation.
 pub(crate) fn dn2(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
     // A 0-extent source has no pixels to sample. The `.max(1)` below would still
     // claim a 1x1 destination, and `h - 1` / `w - 1` would underflow usize and
@@ -56,6 +59,15 @@ pub(crate) fn dn2(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
     let dw = (w >> 1).max(1);
     let dh = (h >> 1).max(1);
     let mut dst = vec![0f32; dw * dh];
+    dn2_into(src, &mut dst, w, h, dw, dh);
+    (dst, dw, dh)
+}
+
+/// 2× area downsample (box) into a caller-supplied output slice.
+/// `dst` must have length >= dw*dh where dw=(w>>1).max(1), dh=(h>>1).max(1).
+/// Avoids the internal allocation of `dn2`; useful when the caller pre-allocates
+/// the destination buffer (e.g. during Comparer construction to reduce peak RSS).
+pub(crate) fn dn2_into(src: &[f32], dst: &mut [f32], w: usize, h: usize, dw: usize, dh: usize) {
     for y in 0..dh {
         let sy0 = y << 1;
         let sy1 = (sy0 + 1).min(h - 1);
@@ -69,7 +81,6 @@ pub(crate) fn dn2(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
                 * 0.25;
         }
     }
-    (dst, dw, dh)
 }
 
 #[cfg(test)]

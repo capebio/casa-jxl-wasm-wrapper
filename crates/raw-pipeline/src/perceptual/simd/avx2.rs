@@ -230,23 +230,30 @@ pub unsafe fn pixels_to_xyb_avx2(
         "pixels_to_xyb_avx2: px.len() must be >= n*4 and x/y/b len >= n"
     );
     let half = _mm256_set1_ps(0.5);
+    // Byte-lane masks for extracting R/G/B from packed RGBA i32 lanes.
+    // Each pixel occupies one i32 lane as [R, G, B, A] in little-endian order.
+    // After loading 8 RGBA pixels into one __m256i via cvtepu8→widen+deinterleave,
+    // we use AND masks to isolate each channel byte in the i32 lane, then shift
+    // to build the gather index (0..255).
+    let mask_r = _mm256_set1_epi32(0x0000_00FF); // byte 0 of each i32 lane
+    let mask_g = _mm256_set1_epi32(0x0000_FF00); // byte 1 of each i32 lane
+    let mask_b = _mm256_set1_epi32(0x00FF_0000); // byte 2 of each i32 lane
     let lanes = n / 8 * 8;
     let mut i = 0;
     while i < lanes {
-        // Gather the 8 R/G/B bytes (stride 4) for px[i..i+8] into i32 index vectors.
-        let mut ri = [0i32; 8];
-        let mut gi = [0i32; 8];
-        let mut bi = [0i32; 8];
-        for l in 0..8 {
-            let base = (i + l) * 4;
-            ri[l] = *px.get_unchecked(base) as i32;
-            gi[l] = *px.get_unchecked(base + 1) as i32;
-            bi[l] = *px.get_unchecked(base + 2) as i32;
-        }
+        // Load 8 RGBA pixels (32 bytes) as one __m256i: each i32 lane = [R,G,B,A].
+        // A single 256-bit load replaces 24 scalar byte reads (8 pixels × 3 channels).
+        let pv = _mm256_loadu_si256(px.as_ptr().add(i * 4) as *const __m256i);
+        // Extract R indices: byte 0 of each i32 lane (already in bits [7:0], no shift needed).
+        let ri = _mm256_and_si256(pv, mask_r);
+        // Extract G indices: byte 1 → shift right 8 to bring into bits [7:0].
+        let gi = _mm256_srli_epi32::<8>(_mm256_and_si256(pv, mask_g));
+        // Extract B indices: byte 2 → shift right 16 to bring into bits [7:0].
+        let bi = _mm256_srli_epi32::<16>(_mm256_and_si256(pv, mask_b));
         let lp = lut.as_ptr();
-        let r = _mm256_i32gather_ps(lp, _mm256_loadu_si256(ri.as_ptr() as *const __m256i), 4);
-        let g = _mm256_i32gather_ps(lp, _mm256_loadu_si256(gi.as_ptr() as *const __m256i), 4);
-        let bb = _mm256_i32gather_ps(lp, _mm256_loadu_si256(bi.as_ptr() as *const __m256i), 4);
+        let r = _mm256_i32gather_ps(lp, ri, 4);
+        let g = _mm256_i32gather_ps(lp, gi, 4);
+        let bb = _mm256_i32gather_ps(lp, bi, 4);
         // X=(r-b)*0.5 ; Y=(r+b)*0.5+g ; B=b
         _mm256_storeu_ps(x.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_sub_ps(r, bb), half));
         _mm256_storeu_ps(

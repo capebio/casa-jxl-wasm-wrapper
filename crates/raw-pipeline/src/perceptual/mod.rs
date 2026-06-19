@@ -107,9 +107,17 @@ impl Comparer {
             if s < 2 && w > 1 && h > 1 {
                 // Not the last level: clone cx/cy/cb so we can keep using them for dn2.
                 levels.push(Level { x: cx.clone(), y: cy.clone(), b: cb.clone(), mask, w, h });
-                let (nx, _, _) = butteraugli::dn2(&cx, w, h);
-                let (ny, _, _) = butteraugli::dn2(&cy, w, h);
-                let (nb, dw, dh) = butteraugli::dn2(&cb, w, h);
+                let dw = (w >> 1).max(1);
+                let dh = (h >> 1).max(1);
+                let dn = dw * dh;
+                // Pre-allocate output buffers and use dn2_into to avoid the hidden
+                // allocation inside dn2 (PERC-09: makes allocation explicit at the call site).
+                let mut nx = vec![0f32; dn];
+                let mut ny = vec![0f32; dn];
+                let mut nb = vec![0f32; dn];
+                butteraugli::dn2_into(&cx, &mut nx, w, h, dw, dh);
+                butteraugli::dn2_into(&cy, &mut ny, w, h, dw, dh);
+                butteraugli::dn2_into(&cb, &mut nb, w, h, dw, dh);
                 cx = nx; cy = ny; cb = nb; w = dw; h = dh;
             } else {
                 // Last level (s==2, or image too small to downsample): move cx/cy/cb
@@ -179,7 +187,6 @@ impl Comparer {
     }
 
     fn downsample_dispatch(&mut self, w: usize, h: usize, dw: usize, dh: usize) {
-        let dn = dw * dh;
         match self.backend {
             #[cfg(target_arch = "x86_64")]
             Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe {
@@ -205,13 +212,18 @@ impl Comparer {
                 downsample_inplace(&self.tb, &mut self.db, w, h, dw, dh);
             }
         }
-        // Only tx[..dn]/ty[..dn]/tb[..dn] are valid after this point.
-        // tx[dn..]/ty[dn..]/tb[dn..] contain stale data from the previous scale and
-        // must not be read. scale_err_dispatch correctly receives the current n via
-        // lvl.w*lvl.h, so it only reads the valid prefix.
-        self.tx[..dn].copy_from_slice(&self.dx[..dn]);
-        self.ty[..dn].copy_from_slice(&self.dy[..dn]);
-        self.tb[..dn].copy_from_slice(&self.db[..dn]);
+        // Swap tx↔dx (and ty↔dy, tb↔db) so the downsampled output is now in
+        // tx/ty/tb — ready for the next scale's scale_err_dispatch — while dx/dy/db
+        // are recycled as the scratch for the following downsample. This replaces
+        // 3×dw*dh×4 bytes of memcpy (up to 288 MB at scale 0 for a 24 MP image)
+        // with 3 pointer swaps (zero-copy, PERC-04). Both Vecs remain large enough
+        // for all scales since tx/dx are sized to n (full resolution) at construction.
+        // Only tx[..dw*dh]/ty[..dw*dh]/tb[..dw*dh] are valid after this swap; the
+        // stale tail in the now-dx buffer is never read by scale_err_dispatch (which
+        // uses lvl.w*lvl.h as its bound) and is overwritten on the next downsample.
+        std::mem::swap(&mut self.tx, &mut self.dx);
+        std::mem::swap(&mut self.ty, &mut self.dy);
+        std::mem::swap(&mut self.tb, &mut self.db);
     }
 
     /// 3-scale butteraugli. Mutates test scratch (tx/ty/tb get downsampled in place).
@@ -448,5 +460,38 @@ mod tests {
         assert!((m.butteraugli - cmp2.butteraugli(&noisy)).abs() < 1e-5);
         assert!((m.ssim - cmp2.ssim(&noisy)).abs() < 1e-6);
         assert!((m.psnr - cmp2.psnr(&noisy)).abs() < 1e-3);
+    }
+
+    /// Parity guard: all() must produce the same values as the three individual calls
+    /// on the same Comparer instance. This guards any future fused test-side pass
+    /// (e.g., PERC-02) against introducing divergent rounding or state mutation.
+    /// Uses the same Comparer for both paths to catch internal state bugs.
+    #[test]
+    fn all_fused_parity_vs_individual_same_comparer() {
+        let (w, h) = (32, 32);
+        let img = checker(w, h);
+        let mut noisy = img.clone();
+        for (i, p) in noisy.iter_mut().enumerate() {
+            if i % 4 != 3 { *p = p.saturating_add(((i * 13) % 17) as u8); }
+        }
+        let mut cmp = Comparer::new(&img, w, h, Opts::default());
+        // Call all() first — this mutates tx/ty/tb via butteraugli.
+        let m = cmp.all(&noisy);
+        // Call individual metrics on the same Comparer after all() resets state.
+        let ba = cmp.butteraugli(&noisy);
+        let ss = cmp.ssim(&noisy);
+        let ps = cmp.psnr(&noisy);
+        assert!(
+            (m.butteraugli - ba).abs() < 1e-5,
+            "butteraugli: all()={} vs individual={}", m.butteraugli, ba
+        );
+        assert!(
+            (m.ssim - ss).abs() < 1e-6,
+            "ssim: all()={} vs individual={}", m.ssim, ss
+        );
+        assert!(
+            (m.psnr - ps).abs() < 1e-3,
+            "psnr: all()={} vs individual={}", m.psnr, ps
+        );
     }
 }
