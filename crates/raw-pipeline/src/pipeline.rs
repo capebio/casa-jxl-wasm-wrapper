@@ -3472,4 +3472,28 @@ mod downscale_recip_parity_tests {
         // Sanity: values in range
         assert!(out.iter().all(|&v| v <= 0x3fff), "output out of 14-bit source range");
     }
+
+    #[test]
+    #[cfg(feature = "parallel")]
+    fn parallel_path_instrumentation() {
+        // Test that parallel path counter is instrumented and fires (if feature enabled).
+        // On a 1920×1440 image (8.3 MP), rayon should dispatch to workers if > 1 thread available.
+        parallel_path_reset();
+
+        const W: u32 = 1920;
+        const H: u32 = 1440;
+        let rgb16 = synth_rgb16(W as usize, H as usize);
+        let mut out = vec![0u8; rgb16.len()];
+
+        let params = PipelineParams::default_olympus();
+        process_into(&rgb16, &params, &mut out);
+
+        let calls = parallel_path_call_count();
+        eprintln!("parallel_path_call_count: {} (process_into on {}×{})", calls, W, H);
+
+        // If parallel feature is on and rayon has threads, we expect calls > 0.
+        // With 1920×1440×3 = 8.3M pixels, that's well above rayon's min_len threshold (4096).
+        // If calls == 0 but feature is on, parallel isn't firing (check threadpool init, workload size).
+        assert!(calls > 0, "parallel path not taken on {}×{} image; rayon may not be initialized", W, H);
+    }
 }
