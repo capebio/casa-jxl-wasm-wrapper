@@ -31,7 +31,7 @@
 //! Native only (the WASM JXL path stays on `web/pkg` + `bridge.cpp`).
 
 #![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
-// SpeedCodeReview ✓ 2026-06-20 · opus-4.8[1m] · sweeps=2 · Arch 1/0/1 Alg 2/0/1 Code 3/3/0 (x/y/z=found/green/red, +1 deferred)
+// SpeedCodeReview ✓ 2026-06-20 · opus-4.8[1m] · sweeps=2 +peer-review · Arch 1/0/1 Alg 2/0/1 Code 4/4/0 (x/y/z=found/green/red, +1 deferred)
 
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1194,14 +1194,10 @@ pub fn decode_jxtc_region(
         return None;
     }
 
-    let mut tile_index: Vec<(u32, u32)> = Vec::with_capacity(num_tiles);
-    for i in 0..num_tiles {
-        let base = index_start + i * JXTC_INDEX_ENTRY_BYTES;
-        let off = u32::from_le_bytes(container[base..base + 4].try_into().ok()?);
-        let len = u32::from_le_bytes(container[base + 4..base + 8].try_into().ok()?);
-        tile_index.push((off, len));
-    }
-
+    // The index table is validated present (container.len() >= index_end above);
+    // each overlapping tile's 8-byte entry is read directly inside the fan-out
+    // rather than materializing a Vec<(off,len)> for *all* num_tiles up front
+    // (most are never touched for a small viewport).
     let overlapping = overlapping_tile_indices(&header, ImageRegion { x: rx, y: ry, w: rw, h: rh });
 
     let is16 = header.bits_per_sample == 16;
@@ -1215,7 +1211,16 @@ pub fn decode_jxtc_region(
                 // dest-copy convention below): ty*tiles_x is bounded by num_tiles,
                 // which is a usize-checked product — the intermediate must widen too.
                 let idx = ty as usize * header.tiles_x as usize + tx as usize;
-                let (off, len) = *tile_index.get(idx)?;
+                // Read this tile's index entry directly from the validated table.
+                // overlapping_tile_indices guarantees tx<tiles_x && ty<tiles_y, so
+                // idx<num_tiles ⇒ base+8 <= index_end <= container.len(); the
+                // explicit guard keeps the None-on-OOB contract (no panic) regardless.
+                let base = index_start + idx * JXTC_INDEX_ENTRY_BYTES;
+                if base + JXTC_INDEX_ENTRY_BYTES > index_end {
+                    return None;
+                }
+                let off = u32::from_le_bytes(container[base..base + 4].try_into().ok()?);
+                let len = u32::from_le_bytes(container[base + 4..base + 8].try_into().ok()?);
                 let start = off as usize;
                 // Checked add: on 32-bit `start + len` can wrap below
                 // container.len() and slip past the bounds test.
