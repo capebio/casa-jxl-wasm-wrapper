@@ -1264,3 +1264,21 @@ Both items are ADR-level opportunities.
   `cargo test -p jxl-ffi` + the libjxl unit suite. (4) Run a flipflop encode/decode bench against
   the non-LTO baseline; require ≥3% geomean gain before enabling in CI. (5) Document the risk in
   CLAUDE.md build notes.
+
+---
+
+## SpeedCodeReview deferral — jxl_casadecoder.rs (2026-06-20, opus-4.8[1m])
+
+**[DEFERRED · Alg · perf_sensitive] JXTC 16-bit tile decode double-copies.**
+In `decode_jxtc_region`, the 16-bit path does:
+`u16_samples_to_ne_bytes(&img.data)` (allocates + copies a full-tile byte Vec) → later
+row-copied again into `dest`. The intermediate byte Vec could be eliminated by
+reinterpret-viewing the decoded `Vec<u16>` as `&[u8]` (native-endian, sound as a *view*;
+the unsound part is only an in-place `Vec` ownership transmute) and row-copying straight
+from that view into `dest`.
+
+Why deferred (not implemented): perf_sensitive edit; the saved copy (tile_size²·8 bytes,
+e.g. ~2 MB at 512²) is dwarfed by the libjxl tile-decode cost, so the end-to-end win is
+expected to fall below the ≥5% SpeedCodeReview gate. Needs a flipflop measurement over a
+real JXTC-16 container (`.flipflop/tests/jxtc-vs-full-decode.mjs` exists) + a libjxl build to
+confirm before touching the hot path. Implement only if a measurement clears the gate.

@@ -31,6 +31,7 @@
 //! Native only (the WASM JXL path stays on `web/pkg` + `bridge.cpp`).
 
 #![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
+// SpeedCodeReview ✓ 2026-06-20 · opus-4.8[1m] · sweeps=2 · Arch 1/0/1 Alg 2/0/1 Code 3/3/0 (x/y/z=found/green/red, +1 deferred)
 
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -828,8 +829,10 @@ pub fn decode_full_threaded(jxl_bytes: &[u8], num_threads: usize) -> Option<Dura
 
 #[inline]
 fn u16_samples_to_ne_bytes(px: &[u16]) -> Vec<u8> {
-    // Safe zero-copy transmute: u16 is always 2-byte aligned; the slice is
-    // already native-endian in memory, so reinterpret the bytes directly.
+    // Cheap byte-for-byte copy into a fresh Vec<u8> (NOT zero-copy): the slice is
+    // already native-endian in memory, so the bytes are copied verbatim. A true
+    // in-place reinterpret (Vec<u16> -> Vec<u8>) is unsound — the allocator would
+    // free a u8 layout that was allocated as u16 (size/align mismatch).
     // SAFETY: u16 has no padding/uninit bytes; u8 alignment is <= u16 alignment.
     let byte_len = px.len() * std::mem::size_of::<u16>();
     let mut bytes = Vec::with_capacity(byte_len);
@@ -902,7 +905,7 @@ where
                 {
                     let bi = info.assume_init_ref();
                     // Decompression-bomb guard: reject before allocating output buffers.
-                    // Use the same default limits as Decoder (400 MP / 1.6 GB RGBA8).
+                    // Use the same default limits as Decoder (1 Gpx / 16 GiB; see DecodeLimits::default).
                     let pixels = bi.xsize as u64 * bi.ysize as u64;
                     let out_bytes = pixels.saturating_mul(4);
                     if pixels > DecodeLimits::default().max_pixels
@@ -1208,7 +1211,10 @@ pub fn decode_jxtc_region(
             || Decoder::new(DecodeOptions::default()),
             |dec_slot, &(tx, ty)| {
                 let dec = dec_slot.as_mut()?;
-                let idx = (ty * header.tiles_x + tx) as usize;
+                // Cast to usize before multiplying to avoid u32 wrap (matches the
+                // dest-copy convention below): ty*tiles_x is bounded by num_tiles,
+                // which is a usize-checked product — the intermediate must widen too.
+                let idx = ty as usize * header.tiles_x as usize + tx as usize;
                 let (off, len) = *tile_index.get(idx)?;
                 let start = off as usize;
                 // Checked add: on 32-bit `start + len` can wrap below
