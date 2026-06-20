@@ -676,3 +676,13 @@ Source: `docs/ai-unification/.../pipeline.rs-optimization-handoff` + the 0/1 arc
 **Handoff item 1 — move f32→u16 quantize out of the post gather loop.** Spike `examples/quantize_flip.rs`: splitting into a vectorizable convert pass + bare gather is **−21%** — the u16 intermediate's memory round-trip exceeds the convert saving. The inline `clamp+cast+gather` is the floor. **Rejected.**
 
 **Net:** the per-pixel tone *function* is at its memory floor; the only remaining lever is the *seam* — WASM multithreading (rayon+SAB; native parallel is ~5× over serial). Full per-doc outputs in `docs/outputs/ChatGPT plus Claude Outputs/Done Deal/`.
+
+## 2026-06-20 — decompress.rs Olympus VLC parity-unroll — measured rejection (ScannerBot)
+
+Source: ScannerBot run 20-06-26-1125 (branch `ScannerBotDecompressDotRs`, ledger `docs/ScannerBot-20-06-26-Start-11.25-Stop-OPEN.md`).
+
+**Claim:** unroll the per-pixel column loop ×2 so even/odd columns get their own scalar `acarry`/`west`/`north_west` locals instead of one `[[i32;3];2]` indexed by `col & 1`; the dynamic `[parity]` index was showing stack traffic in the release asm (135 stack-memory operands in `decompress_rows_into`), so register-keeping the running-average chain "should" save latency.
+
+**Built bit-exact** (golden + pseudo-random A/B parity at even / odd / width-1 all EXACT — random bytes are a valid Olympus bitstream: `read_huff` covers all 4096 12-bit patterns, only running out of bytes truncates), measured via a 5239×600 synthetic-bitstream flipflop (`examples/decompress_unroll_flip.rs`, not retained).
+
+**Measured: +6.7 / −2.6 / −2.6 / −1.3 / +2.2 % across warm runs — mean ≈ +0.5 %, sign-unstable**, entirely inside this box's ±4–6 % thermal noise band (array ref itself swung 56–100 ms run-to-run). Sub-V2 (≥5 % gate) and trust:low (V1). Root cause: the decode is **latency-bound on the bit-serial stream + the 8 KB huff table-load**, not on the `acarry` chain — the OoO core already hides the `[parity]` spill; the stack operands are spread across row setup, not the binding per-pixel critical path. ea3fca93's branchless predictor (1.27×) remains the achievable single-thread win. **Rejected.** Cf. in-file `parity_unroll_reject` ignore-note, and the prior `d3_one_fill_bench_reject` (single fill+get_unchecked, 0.3 %) / `d6_skip_zero_init_reject` (MaybeUninit). The serial Olympus decoder is at its single-thread floor; further speedup needs a different axis (e.g. per-strip threading), not loop micro-restructuring.

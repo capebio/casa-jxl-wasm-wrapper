@@ -300,6 +300,23 @@ mod tests {
         assert_eq!(out2, GOLDEN_EXPECT);
     }
 
+    // Parity-unroll micro, REJECT (ScannerBot 20-06-26, branch ScannerBotDecompressDotRs).
+    // Hypothesis: unroll the column loop ×2 so even/odd columns get scalar
+    // `acarry`/`west`/`nw` locals instead of `[[i32;3];2]` indexed by `col & 1`,
+    // hoping the running-average chain stays in registers (asm showed stack traffic).
+    // Built bit-exact (golden + random even/odd/width-1 parity all EXACT) and measured
+    // via a 5239x600 synthetic-bitstream flipflop. Result: +6.7 / -2.6 / -2.6 / -1.3 /
+    // +2.2 % across warm runs — mean ~+0.5%, sign-unstable, entirely inside this box's
+    // ±4-6% thermal noise band. Sub-V2 (>=5%) and trust:low (V1). The decode is
+    // latency-bound on the bit-serial stream + huff table-load; the [parity] spill is
+    // not on the binding critical path (OoO hides it). ea3fca93's branchless predictor
+    // remains the achievable single-thread win. Don't re-chase (cf. D3/D6 below).
+    #[test]
+    #[ignore]
+    fn parity_unroll_reject() {
+        let _ = decompress(GOLDEN_FULL, GOLDEN_W, GOLDEN_H);
+    }
+
     // D8(b): D2 formula matches the original search loop for all u16 carry, i in {0,2}.
     #[test]
     fn d2_equivalence_sweep() {
