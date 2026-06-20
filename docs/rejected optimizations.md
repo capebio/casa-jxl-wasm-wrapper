@@ -692,3 +692,32 @@ Source: LJPEG Decoder Optimization handoff (LjpegPlan + monomorphized kernels + 
 **REJECTED — fused "refill once, decode many" bit decode (next-lever exploration).** Hypothesis: the three per-symbol bit-buffer updates (huffman peek + consume + magnitude `get_bits`, each with its own `nbits<n` refill branch) can be collapsed into one refill + one update via a fast path (`fused_symbol`) gated on `real_in_buf >= max_bits+16`, with the safe `next_category`/`decode_diff` pair for the truncated tail. Built `decode_c2_fused::<P>`, A/B vs the shipped `decode_c2` on the 165 tiles, parity EXACT. **Measured: fused is 4.7–6.8% SLOWER than `decode_c2` (two runs).** The per-symbol `nbits<need` + `real_in_buf>=need` guards plus the fast/safe branch cost more than collapsing the bit-buffer updates saves — LLVM already optimizes the simple `peek`/`consume`/`get_bits` path well (fill is called rarely; its branches predict). **Rejected — reverted; do not re-attempt bit-decode fusion without a fundamentally cheaper refill-readiness test.**
 
 **Net:** the entire LJPEG decode win is the cps=2 monomorphization. The bitstream layer (`BitReader` peek/consume/get_bits, fast8 table) is already at its practical floor; magnitude `get_bits` (45.7 M reads, ~4.2 bits/symbol) is not separately reducible by fusion.
+
+### 2026-06-20 follow-up — fused receive, second (gate-free) attempt + root cause
+
+The first fused-bit rejection above used a per-symbol readiness **gate**
+(`real_in_buf >= max_bits+16`, worst-case) with a duplicate-peek safe path. That
+gate was the confound. Second attempt (`fused_diff` + `BitReader::consume_and_receive`)
+kept the proven `peek`+fast8 lookup untouched and fused only `consume(hlen)` +
+`get_bits(t)` + `extend` into one bit-buffer update, with an **exact-total**
+readiness branch (`nbits >= hlen+t`, predicts ~perfectly; `nbits==real_in_buf` is
+invariant so the fast branch can't truncate) and the proven `consume`/`get_bits`
+pair as the rare tail fallback. Parity EXACT on all 165 tiles.
+
+**Measured vs shipped decode_c2: -0.9%, -12.0%, -12.2% (three runs) — never wins.**
+Removing the gate recovered most of the first attempt's loss (-6.8% → best -0.9%),
+confirming the gate diagnosis, but fusion is still break-even-to-worse and
+high-variance while decode_c2 is rock-stable (~130 ms).
+
+**Root cause (why 45.7 M magnitude reads don't yield headroom):** LJPEG decode is
+**latency-bound, not bit-op-bound**. The per-symbol critical path is the `fast8[peek8]`
+table gather (memory latency) → serial left/up predictor dependency → store. The
+three bit-buffer updates (`peek`/`consume`/`get_bits`) are cheap ALU ops that
+already overlap with those loads on an out-of-order core; fusing off-critical-path
+ALU work saves nothing and the deeper call chain / extra readiness branch can hurt.
+The category histogram (added as `LjpegStats.category_hist`) shows a bell curve
+peaked at cat 5 (avg 4.22), so per-category special-casing of 0/1/2 is also out.
+
+**Permanently rejected — do not re-attempt bit-decode fusion or magnitude
+special-casing for LJPEG.** The only remaining decode-time lever is parallelism
+(tiles already decode per-tile in parallel via rayon in `dng::decode_tiles`).
