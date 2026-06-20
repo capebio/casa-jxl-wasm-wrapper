@@ -91,6 +91,19 @@ pub fn ljpeg_tile_ranges(data: &[u8]) -> Result<Vec<(usize, usize)>> {
 }
 
 pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
+    decode_bytes_inner(data, false)
+}
+
+/// A/B bench entry: identical to `decode_bytes` but routes LJPEG tiles through the
+/// legacy compact-buffer + serial-blit path (`decode_tiles_blit`) instead of the
+/// band-parallel direct-write path. Exists only so an example can flip the two on a
+/// real file for parity + timing; not part of the stable API.
+#[doc(hidden)]
+pub fn decode_bytes_blit(data: &[u8]) -> Result<DngImage> {
+    decode_bytes_inner(data, true)
+}
+
+fn decode_bytes_inner(data: &[u8], use_blit: bool) -> Result<DngImage> {
     let (state, raw, le) = load_dng(data)?;
 
     let width = raw.width as usize;
@@ -118,6 +131,7 @@ pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
 
     match raw.compression {
         1 => decode_uncompressed(data, &raw, width, height, le, &mut out)?,
+        7 if use_blit => decode_tiles_blit(data, &raw, width, height, cps, &mut out)?,
         7 => decode_tiles(data, &raw, width, height, cps, &mut out)?,
         c => bail!("DNG compression {c} not supported"),
     }
@@ -160,7 +174,105 @@ pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
     })
 }
 
+/// Decode LJPEG tiles (compression=7) directly into the strided output mosaic,
+/// parallelised over **row-tile bands**.
+///
+/// Each band is a disjoint, contiguous run of `out` rows (`par_chunks_mut`), so bands
+/// can be decoded concurrently with no aliasing — and tiles *within* a band are decoded
+/// serially via the strided `ljpeg::decode_tile` (the same primitive the fused
+/// `decode_bytes_demosaiced` path uses), writing straight into their sub-rect of the band.
+///
+/// This replaces `decode_tiles_blit`'s per-tile scratch `Vec` + single-threaded serial
+/// blit (measured ~34% of `decode_bytes` wall time: 165 allocations + a full-image copy
+/// that ran *after* all parallel decode finished — pure Amdahl serialization). Output is
+/// byte-identical to the blit path (proven by `examples/dng_tiles_direct_flip.rs`).
+///
+/// Parallelism granularity drops from `coltiles*rowtiles` independent tasks to `rowtiles`
+/// bands; for real DNGs `rowtiles` comfortably exceeds the core count, and removing the
+/// serial blit + allocations more than compensates (see the flip example's numbers).
 fn decode_tiles(
+    data: &[u8],
+    raw: &RawIfd,
+    width: usize,
+    height: usize,
+    cps: usize,
+    out: &mut [u16],
+) -> Result<()> {
+    let tw = raw.tile_width.ok_or_else(|| anyhow!("missing TileWidth"))? as usize;
+    let tl = raw
+        .tile_length
+        .ok_or_else(|| anyhow!("missing TileLength"))? as usize;
+    if tw == 0 || tl == 0 {
+        bail!("DNG: zero TileWidth/TileLength");
+    }
+    let coltiles = width.div_ceil(tw);
+    let rowtiles = height.div_ceil(tl);
+    let expected = coltiles
+        .checked_mul(rowtiles)
+        .ok_or_else(|| anyhow!("DNG: tile grid overflow"))?;
+    if raw.tile_offsets.len() != expected || raw.tile_byte_counts.len() != expected {
+        bail!(
+            "tile count mismatch: expected {} got {}/{}",
+            expected,
+            raw.tile_offsets.len(),
+            raw.tile_byte_counts.len()
+        );
+    }
+    let _ = cps; // implied by SOF
+
+    // One row-tile band (tr) decoded into its slice of `out`. `band` covers rows
+    // [tr*tl, row_end) at full `width` stride, so a tile at column tc writes its active
+    // sub-rect at base = col_start (row 0 of the band), stride = width.
+    let decode_band = |tr: usize, band: &mut [u16]| -> Result<()> {
+        let row_start = tr * tl;
+        let row_end = ((tr + 1) * tl).min(height);
+        let active_h = row_end - row_start; // == band.len() / width
+        for tc in 0..coltiles {
+            let idx = tr * coltiles + tc;
+            let off = raw.tile_offsets[idx] as usize;
+            let bc = raw.tile_byte_counts[idx] as usize;
+            // checked_add (000-security-11): off+bc can wrap usize on wasm32.
+            let end = off.checked_add(bc).ok_or_else(|| anyhow!("tile {idx} OOB"))?;
+            let src = data
+                .get(off..end)
+                .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
+            let col_start = tc * tw;
+            let col_end = ((tc + 1) * tw).min(width);
+            let active_w = col_end - col_start;
+            // Decode the active sub-rect straight into the band. decode_tile clamps its
+            // writes to active_w×active_h (active ≤ the tile's SOF dims for valid DNGs:
+            // interior tiles are exactly tw×tl, edge tiles are smaller) and bounds-checks
+            // its destination — same contract the fused band path relies on.
+            ljpeg::decode_tile(src, band, col_start, width, active_w, active_h)
+                .with_context(|| format!("tile r={tr} c={tc}"))?;
+        }
+        Ok(())
+    };
+
+    // par_chunks_mut(tl*width) yields exactly `rowtiles` disjoint bands (the last shorter
+    // when height isn't a multiple of tl); tl*width ≤ height*width ≤ 200 MP (caller guard)
+    // so it cannot overflow usize on wasm32.
+    let band_stride = tl * width;
+    #[cfg(feature = "parallel")]
+    {
+        out.par_chunks_mut(band_stride)
+            .enumerate()
+            .try_for_each(|(tr, band)| decode_band(tr, band))?;
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for (tr, band) in out.chunks_mut(band_stride).enumerate() {
+            decode_band(tr, band)?;
+        }
+    }
+    Ok(())
+}
+
+/// Legacy LJPEG tile path: decode each tile into a private compact `Vec<u16>` (so tiles
+/// can run as fully independent parallel tasks with no shared `&mut` stride borrow), then
+/// serially blit each decoded tile's active rect into `out`. Retained as the A/B baseline
+/// for `examples/dng_tiles_direct_flip.rs`; superseded in production by `decode_tiles`.
+fn decode_tiles_blit(
     data: &[u8],
     raw: &RawIfd,
     width: usize,
@@ -227,9 +339,13 @@ fn decode_tiles(
             .get(off..end)
             .ok_or_else(|| anyhow!("tile {idx} OOB"))?;
         let info = ljpeg::probe_tile(src).with_context(|| format!("probe tile {idx}"))?;
-        let bw = info.width as usize;
+        // Pixel width = SOF sample-width × component count. CFA DNGs from e.g. Pixel
+        // phones encode the tile with cps=2 (two column-interleaved components, the
+        // decoder emits `raw_col = col*cps + comp`), so the reconstructed tile is
+        // `sof_w * cps` pixels wide — NOT `sof_w`. The earlier `// cps=1` assumption
+        // silently truncated the right half of every cps≥2 tile to zero.
+        let bw = info.width as usize * info.components.max(1) as usize;
         let bh = info.height as usize;
-        // Buf sized to declared tile (units match the grid tw/tl and prior calls; cps=1 for CFA raw).
         let mut buf = vec![0u16; bw * bh];
         ljpeg::decode_tile_compact(src, &mut buf, bw, bh)
             .with_context(|| format!("compact tile r={tr} c={tc}"))?;
