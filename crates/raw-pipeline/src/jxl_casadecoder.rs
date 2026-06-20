@@ -1674,4 +1674,154 @@ mod tests {
         assert_eq!((img.width, img.height), (w, h));
         assert_eq!(img.data.len(), (w * h * 4) as usize);
     }
+
+    // ── JXTC ROI container round-trip ────────────────────────────────────────
+    // `decode_jxtc_region` is `pub` API consumed by the Tauri/WASM layer; it has
+    // no in-crate caller, so these tests are its only regression guard. They pin
+    // the lazy per-tile index read (P0) + the trust-boundary checks it relies on.
+
+    /// Assemble a JXTC container (8-bit RGBA, one lossless JXL codestream per
+    /// tile, row-major `idx = ty*tiles_x + tx`) from a full reference image — the
+    /// inverse of [`decode_jxtc_region`], so a ROI decode can be checked against a
+    /// plain crop of `ref_rgba`. Edge tiles are encoded at their true partial dims.
+    fn build_jxtc_rgba8(ref_rgba: &[u8], w: u32, h: u32, tile_size: u32) -> Vec<u8> {
+        let tiles_x = w.div_ceil(tile_size);
+        let tiles_y = h.div_ceil(tile_size);
+        let num_tiles = (tiles_x * tiles_y) as usize;
+
+        let mut streams: Vec<Vec<u8>> = Vec::with_capacity(num_tiles);
+        for ty in 0..tiles_y {
+            for tx in 0..tiles_x {
+                let (tx0, ty0) = (tx * tile_size, ty * tile_size);
+                let tw = tile_size.min(w - tx0);
+                let th = tile_size.min(h - ty0);
+                let mut tile = vec![0u8; (tw * th * 4) as usize];
+                for ry in 0..th {
+                    for rx in 0..tw {
+                        let s = (((ty0 + ry) * w + (tx0 + rx)) * 4) as usize;
+                        let d = ((ry * tw + rx) * 4) as usize;
+                        tile[d..d + 4].copy_from_slice(&ref_rgba[s..s + 4]);
+                    }
+                }
+                streams.push(enc_lossless(&Frame::rgba8(&tile, tw, th)));
+            }
+        }
+
+        let index_bytes = num_tiles * JXTC_INDEX_ENTRY_BYTES;
+        let mut c: Vec<u8> = Vec::new();
+        c.extend_from_slice(&JXTC_MAGIC.to_le_bytes());
+        c.extend_from_slice(&JXTC_VERSION.to_le_bytes());
+        c.extend_from_slice(&w.to_le_bytes());
+        c.extend_from_slice(&h.to_le_bytes());
+        c.extend_from_slice(&tile_size.to_le_bytes());
+        c.extend_from_slice(&tiles_x.to_le_bytes());
+        c.extend_from_slice(&tiles_y.to_le_bytes());
+        c.extend_from_slice(&1u32.to_le_bytes()); // flags: has_alpha=1, 8-bit
+        assert_eq!(c.len(), JXTC_HEADER_BYTES);
+
+        // Index entries carry absolute offsets into the bytes past header+index.
+        let mut cursor = JXTC_HEADER_BYTES + index_bytes;
+        for s in &streams {
+            c.extend_from_slice(&(cursor as u32).to_le_bytes());
+            c.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            cursor += s.len();
+        }
+        assert_eq!(c.len(), JXTC_HEADER_BYTES + index_bytes);
+        for s in &streams {
+            c.extend_from_slice(s);
+        }
+        c
+    }
+
+    #[test]
+    fn decode_jxtc_region_roi_matches_full_crop() {
+        // 100x70 @ tile 32 → 4x3 grid; the right column is 4 px wide and the
+        // bottom row 6 px tall, so this exercises *partial edge tiles*. The ROI
+        // (x:40..98, y:30..68) straddles interior, right-edge, and bottom-edge
+        // tiles in one shot (tx 1..3, ty 0..2).
+        let (w, h, ts) = (100u32, 70u32, 32u32);
+        let reference = gradient_rgba8(w, h);
+        let container = build_jxtc_rgba8(&reference, w, h, ts);
+
+        let (rx, ry, rw, rh) = (40u32, 30u32, 58u32, 38u32);
+        let out = decode_jxtc_region(&container, rx, ry, rw, rh).expect("jxtc roi decode");
+        assert_eq!(out.len(), (rw * rh * 4) as usize);
+        for dy in 0..rh {
+            for dx in 0..rw {
+                let s = (((ry + dy) * w + (rx + dx)) * 4) as usize;
+                let d = ((dy * rw + dx) * 4) as usize;
+                assert_eq!(
+                    &out[d..d + 4],
+                    &reference[s..s + 4],
+                    "roi pixel ({dx},{dy}) must equal source ({},{})",
+                    rx + dx,
+                    ry + dy
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decode_jxtc_region_single_interior_tile_reads_one_entry() {
+        // ROI fully inside one interior tile → the lazy index path reads exactly
+        // ONE 8-byte entry (the O(overlapping)-not-O(all-tiles) win P0 protects).
+        let (w, h, ts) = (128u32, 128u32, 64u32);
+        let reference = gradient_rgba8(w, h);
+        let container = build_jxtc_rgba8(&reference, w, h, ts);
+
+        let (rx, ry, rw, rh) = (72u32, 72u32, 20u32, 20u32); // inside tile (1,1)
+        assert_eq!(
+            overlapping_tile_indices(
+                &parse_jxtc_header(&container).unwrap(),
+                ImageRegion { x: rx, y: ry, w: rw, h: rh },
+            ),
+            vec![(1, 1)],
+            "interior ROI must touch exactly one tile"
+        );
+        let out = decode_jxtc_region(&container, rx, ry, rw, rh).unwrap();
+        for dy in 0..rh {
+            for dx in 0..rw {
+                let s = (((ry + dy) * w + (rx + dx)) * 4) as usize;
+                let d = ((dy * rw + dx) * 4) as usize;
+                assert_eq!(&out[d..d + 4], &reference[s..s + 4]);
+            }
+        }
+    }
+
+    #[test]
+    fn parse_jxtc_header_rejects_malformed() {
+        let (w, h, ts) = (64u32, 64u32, 32u32);
+        let good = build_jxtc_rgba8(&gradient_rgba8(w, h), w, h, ts);
+        assert!(parse_jxtc_header(&good).is_some(), "valid header parses");
+
+        let mut bad_magic = good.clone();
+        bad_magic[0] ^= 0xFF;
+        assert!(parse_jxtc_header(&bad_magic).is_none(), "bad magic rejected");
+
+        // tiles_x (bytes 20..24) must equal ceil(w/tile_size); a mismatch could let
+        // tx*tile_size exceed image_w and underflow the dimension math downstream.
+        let mut bad_grid = good.clone();
+        bad_grid[20..24].copy_from_slice(&99u32.to_le_bytes());
+        assert!(parse_jxtc_header(&bad_grid).is_none(), "tiles_x != ceil rejected");
+
+        assert!(
+            parse_jxtc_header(&good[..JXTC_HEADER_BYTES - 1]).is_none(),
+            "short header rejected"
+        );
+    }
+
+    #[test]
+    fn decode_jxtc_region_skips_tile_entry_overlapping_index() {
+        // Trust boundary: an index entry whose offset points back into the
+        // header/index region (off < index_end) must be refused, never handed to
+        // the JXL decoder. The overlapping tile is dropped (zeroed hole) and the
+        // call still returns gracefully — no panic, no index bytes decoded.
+        let (w, h, ts) = (64u32, 32u32, 32u32); // 2x1 tiles
+        let mut c = build_jxtc_rgba8(&gradient_rgba8(w, h), w, h, ts);
+        // Rewrite tile (0,0)'s offset (first index entry, bytes 32..36) to 0.
+        c[JXTC_HEADER_BYTES..JXTC_HEADER_BYTES + 4].copy_from_slice(&0u32.to_le_bytes());
+        let out = decode_jxtc_region(&c, 0, 0, ts, ts).expect("graceful skip, not None/panic");
+        assert_eq!(out.len(), (ts * ts * 4) as usize);
+        assert!(out.iter().all(|&b| b == 0), "rejected tile yields a zeroed hole");
+    }
 }
