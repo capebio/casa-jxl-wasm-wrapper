@@ -173,3 +173,43 @@ risk budget; recorded for a dedicated uninit-audit pass.
 E1 is a free, byte-exact win (**−5.1 ms + −45 MB peak** per multi-slice CR2). The only other cr2
 memory lever (E2) is an unsafe uninit-skip in the previously-rejected class — deferred deliberately.
 Memory bases covered.
+
+---
+
+# `crates/raw-pipeline/src/casabio_encode.rs`
+
+**Branch:** `crawlbot/casabio-encode-rs-20260620T2150` · **Status:** ✅ F1 SHIPPED; F2/F4/F7/F8 analyzed
+
+## F1 — drop discarded full-res RGB strip in alpha detection ✅ SHIPPED
+
+`encode_variants` and the sidecar path called `alpha_strip(rgba)` to learn `has_alpha`, but
+**discarded** the full-frame n*3 RGB strip it built in the same pass (the variants re-strip at their
+own 3 sizes). Both sites now use `has_meaningful_alpha` — the same early-out alpha scan with **zero
+allocation**.
+
+**Measured** (`alpha_scan_membench`, 24 MP opaque RGBA, the RAW case):
+
+| fn | median_ms | alloc/call |
+|----|-----------|-----------|
+| `alpha_strip` (old) | 55.19 | 68.7 MB (1) |
+| `has_meaningful_alpha` (new) | **13.53** | **0 MB (0)** |
+
+**4.1× faster + −68.7 MB allocation per call**, at **both** call sites — every RAW encode_variants
+invocation. 146/146 lib tests pass. (RAW is always opaque, so the full strip was always built then
+thrown away — pure waste.)
+
+## Other casabio bases (analyzed)
+
+- **F2 (strip_rgba_to_rgb per-level alloc) — DEFERRED.** Each no-alpha encode level allocates a
+  fresh RGB strip though the `Encoder` handle is reused. A caller-held `&mut Vec<u8>` scratch would
+  cut 2 allocs/variant-set; needs threading scratch through `encode_into`/`encode_distance_into`/the
+  rayon `map_init`. Real but smaller than F1.
+- **F4 (RGB16 unsharp `to_vec()` clone) — conditional.** Only when texture/clarity ≠ 0; the borrow
+  contract makes the clone intrinsic unless the signature takes `Vec<u16>` by value. List-only.
+- **F7 (encode() output Vec per call) — minor.** Output is the smallest buffer.
+- **F8 (strided 4→3 strip not SIMD) — speculative speed**, not a reduction.
+
+## Conclusion
+
+F1 is a large, byte-exact win (**4.1× + −68.7 MB** per encode on the RAW path) shipped at two sites.
+Remaining casabio levers (F2/F7) are incremental and need scratch threading; deferred. Bases covered.
