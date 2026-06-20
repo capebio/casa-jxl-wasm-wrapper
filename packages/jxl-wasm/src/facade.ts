@@ -1489,6 +1489,12 @@ class LibjxlDecoder implements JxlDecoder {
       let progressiveSequence = 0;
       let progFramePrepMs = 0;
       let progFrameCount = 0;
+      // P0 probe (docs/Boundaries and Pipelines/traversal-report.md #2): isolate the
+      // region-crop + downsample cost (a subset of take_frame_ms) and the resize cost
+      // out of the aggregate prog_frame_prep_ms. Sizes the "move progressive crop to C++"
+      // migration decision — region_crop_ms is exactly the JS work that move would replace.
+      let regionCropMs = 0;
+      let progResizeMs = 0;
 
       // Helper: emit with deferred-release or normal transfer
       // Modifies pixData in-place: when deferredRelease=true, copies into reusablePixelBuf.
@@ -1514,7 +1520,9 @@ class LibjxlDecoder implements JxlDecoder {
         if (handle === 0) return null;
         const buf = retainBufferView(module, handle, "decode");
         try {
+          const tCrop0 = performance.now();
           let pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region ?? null, resolvedDownsample, bpc);
+          regionCropMs += performance.now() - tCrop0;
           if (pixels.data === buf.data) {
             pixels = { ...pixels, data: new Uint8Array(buf.data) };
           }
@@ -1648,7 +1656,9 @@ class LibjxlDecoder implements JxlDecoder {
             const fitMode = this.options.fitMode ?? "contain";
             let outPixels = rawPixels;
             if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
+              const tResize0 = performance.now();
               const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4, resizePlan);
+              progResizeMs += performance.now() - tResize0;
               outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(rawPixels.region !== undefined ? { region: rawPixels.region } : {}) };
             }
             progFramePrepMs += performance.now() - tFramePrep0;
@@ -1710,7 +1720,9 @@ class LibjxlDecoder implements JxlDecoder {
           const fitMode = this.options.fitMode ?? "contain";
           let outPixels = rawPixels;
           if (targetW != null && targetH != null && targetW > 0 && targetH > 0) {
+            const tResize0 = performance.now();
             const resized = applyTargetResize(rawPixels.data, rawPixels.width, rawPixels.height, targetW, targetH, fitMode, bpc as 1 | 2 | 4, resizePlan);
+            progResizeMs += performance.now() - tResize0;
             outPixels = { data: resized.data, width: resized.width, height: resized.height, ...(rawPixels.region !== undefined ? { region: rawPixels.region } : {}) };
           }
 
@@ -1719,6 +1731,9 @@ class LibjxlDecoder implements JxlDecoder {
           if (onMetric) {
             onMetric("prog_frame_prep_ms", progFramePrepMs);
             onMetric("prog_frame_count", progFrameCount);
+            // P0 breakdown: region_crop_ms ⊆ take_frame_ms; resize is the remainder of prep.
+            onMetric("region_crop_ms", regionCropMs);
+            onMetric("prog_frame_resize_ms", progResizeMs);
           }
 
           const outInfo: ImageInfo = (outPixels.width !== evInfo.width || outPixels.height !== evInfo.height)

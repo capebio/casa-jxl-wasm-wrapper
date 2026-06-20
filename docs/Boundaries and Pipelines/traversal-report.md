@@ -102,8 +102,37 @@ JS chunk  ──postMessage──────>  Main thread  (transfer, zero-cos
 
 ---
 
+## P0 Measurement Results — 2026-06-20 (settles P1/#2)
+
+**Probes wired** (`facade.ts` progressive path): `region_crop_ms` (cumulative `applyRegionAndDownsample` time, a subset of `take_frame_ms`) and `prog_frame_resize_ms`, emitted beside `prog_frame_prep_ms`. Combined with the existing `decode_scale_used` (= `resolvedDownsample`), production telemetry can now bucket frames by downsample factor.
+
+**Bench** (`.flipflop/tests/region-crop-downsample.mjs`): `applyRegionAndDownsample` measured in isolation on full-frame rgba8 at photo sizes — exactly the JS pass a C++ migration would replace. Verbatim copy of the facade function; flipflop interleaved/thermally-fair medians.
+
+`median_warm_ms` @ **4096² (16.7 MP)**, baseline = `full-copy` (the irreducible per-frame detach copy):
+
+| config (bpc=1) | ms | vs full-copy | trust | pipeline meaning |
+|----------------|-----|-------------|-------|------------------|
+| full-copy | 12.9 | — | high | no-region frame copy |
+| crop50-ds1 | 3.8 | **−70%** | low (variance) | region crop, full-res — row memcpy |
+| full-ds2 | 27.6 | **+114%** | high | downsample 2× preview — per-pixel gather |
+| full-ds4 | 9.8 | −24% | low (variance) | downsample 4× preview |
+| crop50-ds2 | 10.4 | +19% | high | ROI + 2× preview |
+
+Scales linearly with output-pixel count (2048²: full-copy 3.6 / crop-ds1 1.3 / full-ds2 10.2 / full-ds4 4.9 / crop-ds2 5.0 ms). Thermal `unknown` (no LibreHardwareMonitor; static desktop freq) — lean on interleave + stdev; the two load-bearing rows (full-copy, full-ds2 @4096) are `trust:high`.
+
+### Verdict
+
+The original P1 ("move region crop to C++") was **mis-aimed**: the *crop* is not the cost.
+
+1. **Pure region crop (downsample=1) — NO-GO.** Uses native `TypedArray.set` row memcpy; 3.8 ms @16 MP, already *cheaper than a full-frame copy*. C++ would add a cropped-size slice-out copy and cannot beat memcpy — net loss. Most full-res progressive + region queries hit this path.
+2. **Per-pixel downsample gather (ds≥2) — CONDITIONAL-GO, gated on telemetry.** `full-ds2` at 27.6 ms (2.1× a full copy, `trust:high`) is the only genuinely expensive JS, and it **compounds per emitted pass** under `emitEveryPass`. The C++ machinery already exists (`DownsampleRgba`, `bridge.cpp:379`) and is *already used by the one-shot path*. BUT downscaled previews usually take the one-shot (C++) route, not progressive — so progressive+downsample frames may be rare.
+
+**Re-scoped P1**: not "crop → C++", but "**skip JS downsample on progressive flush; route the flushed buffer through the existing C++ `DownsampleRgba`**" — and ship it only if production `region_crop_ms` with `decode_scale_used > 1` shows real, repeated cost. Pure-crop (ds1) frames stay in JS. Gate per CLAUDE.md (adaptive change needs benchmark data); this measurement bounds the upside, telemetry must confirm frequency. Needs a WASM rebuild.
+
+---
+
 ## Notes
 
 - **No per-pixel probes**: All traversals are instrumented at batch/frame level (per handoff: "no probes inside tight inner loops per-pixel").
-- **Existing probes**: `prog_frame_prep_ms` includes applyRegion + applyResize time (not split).
+- **Existing probes**: `prog_frame_prep_ms` includes applyRegion + applyResize time. As of 2026-06-20, `region_crop_ms` + `prog_frame_resize_ms` split these out (see P0 Results above).
 - **New probes** (Phase 4): Add `heap_set_ms`, `malloc_grow_ms`, `take_frame_ms`, `enc_heap_set_ms` to isolate specific boundaries.
