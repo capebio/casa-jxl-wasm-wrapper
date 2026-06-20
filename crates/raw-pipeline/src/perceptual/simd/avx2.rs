@@ -186,11 +186,12 @@ unsafe fn drain8_rgb(v: __m256i, acc: &mut [u64; 3]) {
     }
 }
 
-/// EXPERIMENTAL AVX2 channel-as-lane SSIM moments (8-wide, 2 px/iter). Same contract
-/// as `ssim_moments_avx2`, but packs 2 RGBA pixels into the 8 i32 lanes and fuses the
-/// three products — the layout the wasm v128 bench proved wins 3.73× (vs the old AVX2
-/// *deinterleave* wash). Not yet wired into dispatch: flip-flop it vs the scalar
-/// `ssim_moments_avx2` (examples/ssim_moments_avx2_flip.rs) before promoting.
+/// AVX2 channel-as-lane SSIM moments (8-wide, 2 px/iter). Same contract as
+/// `ssim_moments_avx2`, but packs 2 RGBA pixels into the 8 i32 lanes and fuses the
+/// three products. flip-measured 1.33–1.51× over the scalar kernel at 24MP, parity
+/// exact (examples/ssim_moments_avx2_flip.rs) — so this is the WIRED Avx2 SSIM path.
+/// The old AVX2 *deinterleave* attempt that lost was a different layout; the scalar
+/// `ssim_moments_avx2` below is kept as the parity oracle for tests + the flip.
 #[target_feature(enable = "avx2")]
 pub unsafe fn ssim_moments_avx2_cal(a: &[u8], b: &[u8], np: usize) -> ([u64; 3], [u64; 3], [u64; 3]) {
     assert!(
@@ -252,10 +253,10 @@ pub unsafe fn ssim_moments_avx2_cal(a: &[u8], b: &[u8], np: usize) -> ([u64; 3],
 /// SSIM moment accumulation over RGBA test+ref. Produces three per-channel sums
 /// (sa, saa, sab) for c in 0..3; sb/sbb are precomputed on the reference.
 ///
-/// NOTE: this is a *scalar* u64 reduction, not vectorized. A madd-based SIMD
-/// deinterleave gave no measured win in pilot timing (confirmed by the flip-flop
-/// bench), so the scalar loop is kept here — inside the avx2 module purely so the
-/// dispatcher has one call site. Correctness == scalar oracle by construction.
+/// NOTE: this is a *scalar* u64 reduction. A madd-based SIMD *deinterleave* gave no
+/// measured win, so it stayed scalar — BUT the channel-as-lane layout
+/// (`ssim_moments_avx2_cal`) since flip-measured 1.33–1.51× and is now the wired Avx2
+/// path. This scalar version is retained as the exact parity oracle (tests + flip).
 /// Carries `#[target_feature(enable = "avx2")]` only for call-site uniformity; it
 /// uses no AVX2 intrinsics. This is intentional: FMA is also not needed here.
 /// Do not add AVX2 intrinsics without a measured win from the flip-flop bench.

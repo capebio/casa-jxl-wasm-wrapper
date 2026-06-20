@@ -15,6 +15,10 @@ pub use simd::{detect_native, Backend};
 // native builds and adds no native API surface).
 #[cfg(target_arch = "wasm32")]
 pub use simd::wasm as wasm_kernels;
+// x86 kernels, surfaced for the native flip-flop examples (examples/*_flip.rs). The
+// fns are arch-gated + unsafe; this just lets an out-of-crate example A/B them.
+#[cfg(target_arch = "x86_64")]
+pub use simd::avx2 as avx2_kernels;
 pub use telemetry::{TelemetryMetrics, RgbHistogram, analyze_fused};
 
 pub use butteraugli::Kweights;
@@ -268,10 +272,12 @@ impl Comparer {
         }
         match self.backend {
             #[cfg(target_arch = "x86_64")]
-            // AVX2 keeps the deliberately-scalar moments: the AVX2 deinterleave SIMD
-            // attempt was a measured wash (see avx2::ssim_moments_avx2).
+            // Channel-as-lane SIMD moments (8-wide, 2 px/iter). flip-measured 1.33–1.51×
+            // over the old scalar kernel (examples/ssim_moments_avx2_flip.rs, 24MP, parity
+            // exact). The AVX2 *deinterleave* attempt that lost was a different layout — the
+            // scalar `ssim_moments_avx2` is retained as the parity oracle for tests + flip.
             Backend::Avx2Strict | Backend::Avx2Rsqrt => {
-                let (sa, saa, sab) = unsafe { simd::avx2::ssim_moments_avx2(test, &self.ref_rgba, self.n) };
+                let (sa, saa, sab) = unsafe { simd::avx2::ssim_moments_avx2_cal(test, &self.ref_rgba, self.n) };
                 ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
             }
             #[cfg(target_arch = "x86_64")]
