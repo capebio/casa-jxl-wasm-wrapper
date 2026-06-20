@@ -177,8 +177,8 @@ fn decode_tiles(
     if tw == 0 || tl == 0 {
         bail!("DNG: zero TileWidth/TileLength");
     }
-    let coltiles = (width + tw - 1) / tw;
-    let rowtiles = (height + tl - 1) / tl;
+    let coltiles = width.div_ceil(tw);
+    let rowtiles = height.div_ceil(tl);
     // Overflow guard on the tile grid (000-security-12): crafted tw=tl=1 with
     // large dims could overflow usize on wasm32.
     let expected = coltiles
@@ -1430,8 +1430,8 @@ pub(crate) fn decode_bytes_demosaiced_impl(data: &[u8], subtract_black: bool) ->
     let mut rgb = vec![0u16; width * height * 3];
     let aw = width;
     let ah = height;
-    let coltiles = (width + tw - 1) / tw;
-    let rowtiles = (height + tl - 1) / tl;
+    let coltiles = width.div_ceil(tw);
+    let rowtiles = height.div_ceil(tl);
     // Overflow guard on the tile grid (000-security-12).
     let expected = coltiles
         .checked_mul(rowtiles)
