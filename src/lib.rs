@@ -25,6 +25,8 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 use std::cell::RefCell;
 thread_local! {
     static DEMO_BENCH: RefCell<(Vec<u16>, usize, usize)> = const { RefCell::new((Vec::new(), 0, 0)) };
+    // Scratch buffer for LookRenderer::render() texture/clarity path — avoids Vec::clone on every slider drag.
+    static RENDER_SCRATCH: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
 }
 fn demo_checksum(v: &[u16]) -> u32 {
     v.iter().fold(0u32, |a, &x| a.wrapping_mul(31).wrapping_add(x as u32))
@@ -1736,8 +1738,9 @@ mod tests {
 /// at construction; every subsequent edit stays inside WASM.
 ///
 /// When `texture` and `clarity` are both zero (the common case), `render` reads the
-/// internal buffer without cloning.  When either is nonzero, a clone is made before
-/// in-place sharpening so the cached buffer is never mutated.
+/// internal buffer without cloning.  When either is nonzero, a thread-local scratch
+/// buffer is reused for in-place sharpening so the cached buffer is never mutated
+/// and no per-call Vec::clone occurs.
 #[wasm_bindgen]
 pub struct LookRenderer {
     rgb16: Vec<u16>,
@@ -1803,7 +1806,6 @@ impl LookRenderer {
                 h
             )));
         }
-        let rgb16 = unpack_rgb16_le(rgb16_bytes);
         let color_matrix = if color_matrix_flat.len() == 9 {
             [
                 [
@@ -1825,6 +1827,7 @@ impl LookRenderer {
         } else {
             pipeline::CAM_TO_SRGB
         };
+        let rgb16 = unpack_rgb16_le(rgb16_bytes);
         Ok(Self {
             rgb16,
             width: w,
@@ -1904,9 +1907,14 @@ impl LookRenderer {
         // SIMD-fused tone path (process_auto → process_into_simd). ≤1-LUT-step vs the byte-exact
         // scalar `process`; same tolerance the heavy RAW decode already ships, invisible for display.
         let rgb8 = if params.texture != 0.0 || params.clarity != 0.0 {
-            let mut rgb16 = self.rgb16.clone();
-            pipeline::apply_unsharp_masks(&mut rgb16, self.width, self.height, &params);
-            pipeline::process_auto(&rgb16, &params)
+            // M8: reuse thread-local scratch instead of Vec::clone (~6.5 MB on every slider drag).
+            RENDER_SCRATCH.with(|cell| {
+                let mut scratch = cell.borrow_mut();
+                scratch.resize(self.rgb16.len(), 0);
+                scratch.copy_from_slice(&self.rgb16);
+                pipeline::apply_unsharp_masks(&mut scratch, self.width, self.height, &params);
+                pipeline::process_auto(&scratch, &params)
+            })
         } else {
             pipeline::process_auto(&self.rgb16, &params)
         };
