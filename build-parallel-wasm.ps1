@@ -164,8 +164,18 @@ $wasmOptBin = Resolve-WasmOptBin
 Write-Host "=== parallel-wasm: cargo +$nightly build ===" -ForegroundColor Cyan
 Assert-RustupComponent $nightly "rust-src"
 
-# SIMD already comes from .cargo/config.toml; keep script RUSTFLAGS focused on thread-required features.
-$env:RUSTFLAGS = "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--max-memory=4294967296"
+# NOTE: env RUSTFLAGS REPLACES .cargo/config.toml's rustflags (they do NOT merge), so
+# +simd128 MUST be repeated here or the build loses SIMD. The threading link-args are all
+# load-bearing — without them wasm-bindgen-rayon's pool fails at runtime:
+#   --shared-memory : +atomics ALONE produces NON-shared memory (workers can't share heap)
+#   --import-memory : wasm-bindgen's threads transform asserts the memory is imported
+#   --export=__heap_base (+ tls) : release strips the name section → wasm-bindgen can't
+#                                  find __heap_base by name unless it's exported
+# (This set matches tools/build-mt-wasm.sh, verified end-to-end: initThreadPool OK, tone 4.7x.)
+$env:RUSTFLAGS = "-C target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals " +
+  "-C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory " +
+  "-C link-arg=--export=__heap_base -C link-arg=--export=__tls_base " +
+  "-C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__wasm_init_tls"
 
 Push-Location $repoRoot
 try {
