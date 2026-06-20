@@ -13,15 +13,16 @@ pub(crate) fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     let inv = 1.0 / (2 * r + 1) as f32;
 
     // Horizontal
+    let w_max = w - 1;
     for y in 0..h {
         let base = y * w;
         let mut sum = src[base] * (r as f32 + 1.0);
         for k in 1..=r {
-            sum += src[base + k.min(w - 1)];
+            sum += src[base + k.min(w_max)];
         }
         for x in 0..w {
             tmp[base + x] = sum * inv;
-            let add = src[base + (x + r + 1).min(w - 1)];
+            let add = src[base + (x + r + 1).min(w_max)];
             let sub = src[base + x.saturating_sub(r)];
             sum += add - sub;
         }
@@ -33,6 +34,7 @@ pub(crate) fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     // together so each y-step reads/writes TILE consecutive floats — reducing
     // cache-line evictions by TILE×.
     const TILE: usize = 8;
+    let h_max = h - 1;
     let mut x = 0usize;
     while x + TILE <= w {
         let mut sums = [0f32; TILE];
@@ -40,7 +42,7 @@ pub(crate) fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
             sums[t] = tmp[x + t] * (r as f32 + 1.0);
         }
         for k in 1..=r {
-            let row = k.min(h - 1) * w;
+            let row = k.min(h_max) * w;
             for t in 0..TILE {
                 sums[t] += tmp[row + x + t];
             }
@@ -50,7 +52,7 @@ pub(crate) fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
             for t in 0..TILE {
                 dst[drow + x + t] = sums[t] * inv;
             }
-            let add_row = (y + r + 1).min(h - 1) * w;
+            let add_row = (y + r + 1).min(h_max) * w;
             let sub_row = y.saturating_sub(r) * w;
             for t in 0..TILE {
                 sums[t] += tmp[add_row + x + t] - tmp[sub_row + x + t];
