@@ -20,6 +20,24 @@
 
 ---
 
+## Synthesis — results so far
+
+| # | File | Issue | Category | Current state | Outcome state | Status |
+|---|------|-------|----------|---------------|---------------|--------|
+| C-1 | perceptual/mod.rs | level-0 plane clone in Comparer::new | memory-copy | 3× full-res + 3× half-res clones; 29 allocs; 599 ms @4096² | move+borrow; 23 allocs; **491 ms (−18%)** | ✅ shipped |
+| A-1 | src/lib.rs | preview demosaic+downscales built then discarded | memory-alloc | always runs; 115 MB + 86 ms per image | gated on need_previews; **0 on OUT_FULL_RGB8-only** (~8.6 s/100-img batch) | ✅ shipped |
+| E1 | cr2.rs | multi-slice reassembly copy-back | memory-copy | clear()+extend = 45 MB memcpy + 45 MB transient | `*raw_buf = raster` move; **−5.1 ms, −45 MB peak** | ✅ shipped |
+| F1 | casabio_encode.rs | discarded full-res RGB strip in alpha detect | memory-alloc | alpha_strip builds 68.7 MB strip, drops it; 55.2 ms | has_meaningful_alpha; **0 MB, 13.5 ms (4.1×)**, ×2 sites | ✅ shipped |
+| C-3 | perceptual/mod.rs | serial 3-way X/Y/B plane downsample | memory-mt | 3 sequential calls; 124 ms @4096² butteraugli | rayon::join over SoA planes; **116 ms (−6.6%) / −12.6% @2048²** (native) | ✅ shipped |
+| A-4 | pipeline.rs | parallel tone per-block scratch zeroing | memory-mt | re-zeros 24 KB/block in parallel path | for_each_init hoist | ❌ **measured non-win** (L1-absorbed; reverted) |
+| A-5 | src/lib.rs | pack_rgb16_full doubles full-res buffer | memory-copy | rgb16 + packed coexist (~120 MB) | transmute after tone reorder | ⏸ deferred (needs output reorder; WASM-batch session) |
+| A-3 | pipeline.rs | RGBA8/16-bit-scalar tone not SIMD | math/speed | per-pixel apply_tone_fused | SoA apply_tone_bulk (3.6×) | ⏸ deferred (secondary path) |
+| F3 | jxl_casadecoder.rs | extra-plane zero-fill on normal path | memory-alloc | unconditional write_bytes(0) | gate on allow_partial (mirror of line 579) | ⏸ deferred (jxl-codec build) |
+| E2/B2/B6 | cr2/demosaic | zero-fill before full overwrite | memory-alloc | vec![0;..]/resize(0) then fully written | uninit set_len | ⏸ deferred (rejected uninit class, D6) |
+| C-2/F2/F5/F6/E4/E6 | various | scratch/key/Vec reuse | memory-alloc | per-call transient allocs | reuse/on-demand | ⏸ analyzed, low/incremental |
+
+**Net shipped:** 5 measured wins (4 native-benched byte-exact + 1 native-MT), 1 honest measured rejection, the rest analyzed with rationale. Recurring lesson: **byte-traffic ≠ latency** — transient clone/memset "wins" rarely move peak RSS or wall-clock once L1/store-buffer and required resident scratch are accounted for; the wins that landed are **work-elimination** (skip/again-never-build) and **move-not-copy**, not micro-trimming.
+
 <!-- File chapters appended below as work completes. Each ends with a Conclusion. -->
 
 ---
@@ -289,3 +307,44 @@ Benching/testing requires a full libjxl cmake build — out of this session's to
 
 Real but codec-build-gated. F3 is a trivial, zero-risk mirror of a proven gate and should be picked
 up first in a dedicated jxl-codec session. Nothing shipped to keep the bench-gate honest.
+
+---
+
+# `crates/raw-pipeline/src/perceptual/mod.rs` — MT pass (C-3)
+
+**Branch:** `crawlbot/perceptual-mod-mt-20260620T2235` · **Status:** ✅ C-3 SHIPPED
+
+## C-3 — parallelize the 3-way X/Y/B plane downsample ✅ SHIPPED
+
+`downsample_dispatch` ran the three XYB planes' downsample sequentially (`self.tx→dx`, `ty→dy`,
+`tb→db`). The planes are **disjoint** (separate Vecs, no cross-dependency), so I split the field
+borrows and run them via `rayon::join` under the `parallel` feature, factoring a `downsample_one`
+backend-dispatch helper. The SoA layout (PERC-04) means **no per-thread allocation** — each task
+writes its own output plane. This is the directive's "memory improving to MT": the existing SoA
+memory layout *is* what enables the free parallelism.
+
+**Measured** (`perc_butteraugli_bench`, native AVX2, `--features parallel`, back-to-back A/B):
+
+| size | base (serial) | C-3 (rayon::join) | Δ |
+|------|--------------|-------------------|---|
+| 2048² (4.2 MP) | 34.63 ms | **30.25 ms** | **−12.6%** |
+| 4096² (16.8 MP) | 124.32 ms | **116.13 ms** | **−6.6%** |
+
+The benefit **shrinks with size** — the box-downsample (read 4, write 1) is memory-bandwidth-bound,
+so at larger planes one core already nears the bandwidth ceiling and 3-way parallelism helps less.
+This is the same bandwidth reality that made A-4 a wash; here it still nets a real gain because the
+downsample also has per-element compute (XYB-domain) that parallelizes.
+
+**Scope & safety:** affects **native** parallel builds only (Tauri desktop, native batch/quality
+tools). **WASM — the primary deployment — is serial** (`parallel` off) and bit-for-bit unaffected.
+`rayon::join` is nesting-safe (degrades to inline steal under a saturated outer pool), so a parallel
+batch caller cannot regress. 27/27 perceptual tests pass on **both** serial and parallel builds;
+parity preserved.
+
+## Conclusion
+
+A real, measured MT win (**−7 to −13%** butteraugli) that costs nothing in the primary WASM path and
+is nesting-safe. It leverages the existing SoA layout rather than adding memory — the cleanest form
+of "memory improving to MT." Shipped. Contrast with A-4 (parallel tone scratch), a *measured non-win*
+on the same bandwidth-bound reality — the difference is that downsample carries enough per-element
+compute to reward parallelism, whereas a 24 KB stack memset does not.
