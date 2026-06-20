@@ -262,3 +262,30 @@ pipeline.rs (the tone cost-center) is at its memory/compute floor for the **prim
 one MT-memory idea here (A-4) is a **measured non-win** — the per-block stack zeroing is free in
 practice. The only remaining real lever (A-3, SoA SIMD for RGBA/16-bit) is a secondary-path speed win
 deferred on effort/priority. No code shipped from this file; the negative result is the finding.
+
+---
+
+# `crates/raw-pipeline/src/jxl_casadecoder.rs` (BSD JXL decoder, `jxl-codec` feature)
+
+**Status:** ⏸ F3/F5/F6 analyzed — DEFERRED to a jxl-codec build session
+
+This whole module is gated behind `feature = "jxl-codec"` (jxl-ffi FFI over `external/libjxl`).
+Benching/testing requires a full libjxl cmake build — out of this session's toolchain/time budget
+(the GNU toolchain `dlltool` issue + a 10+ min libjxl build). Findings recorded for a codec pass:
+
+- **F3 (extra-channel plane zero-fill) — correct-by-inspection, deferred.** Line 605 unconditionally
+  `write_bytes(plane, 0, n)` for each extra channel, while the **main color buffer 26 lines above
+  (579)** already gates the identical zero-sweep on `self.opts.allow_partial` with a comment proving
+  libjxl writes every byte before `S_FULL`. The fix is a **1:1 mirror** of that proven gate (same
+  invariant, same flag). Zero-risk; the existing `reads_back_one_planar_extra_channel` test covers
+  it. Saves one full per-plane memory sweep on multi-band hyperspectral/depth decodes (0 for the
+  common 0-extra photo). Not shipped only because I won't commit code I couldn't build+bench this
+  session.
+- **F5 (time_full_decode realloc + 4ch grayscale inflation) — measurement-path only**, low priority.
+- **F6 (JXTC region materializes full tile-index Vec) — niche** (large grid + small viewport / AR
+  tile-seam); read entries on demand inside the map_init closure. Deferred.
+
+## Conclusion
+
+Real but codec-build-gated. F3 is a trivial, zero-risk mirror of a proven gate and should be picked
+up first in a dedicated jxl-codec session. Nothing shipped to keep the bench-gate honest.
