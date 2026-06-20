@@ -638,8 +638,10 @@ fn decode_impl(
         } else {
             reassemble_slices(raw_buf, stride, sof_h, n, nw, lw)
         };
-        raw_buf.clear();
-        raw_buf.extend_from_slice(&raster);
+        // CRAWL E1: move the reassembled raster into raw_buf (O(1) pointer move) instead
+        // of clear()+extend_from_slice, which copied the whole frame back (~48MB @24MP).
+        // The old stacked-slice buffer is dropped here.
+        *raw_buf = raster;
     }
 
     // -----------------------------------------------------------------------
