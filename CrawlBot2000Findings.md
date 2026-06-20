@@ -142,3 +142,34 @@ A-1 is a solid, byte-exact batch-encode speedup (**~86 ms + 115 MB/image**) — 
 peak-RSS lever in this file is A-5 (~120 MB on the 16-bit export path), deferred only because a safe
 implementation needs an output-assembly reorder best done in a dedicated WASM-bench session, not
 under slow MSVC iteration. A-2/A-6/A-9 are washes or ABI-bound non-wins. Memory bases covered.
+
+---
+
+# `crates/raw-pipeline/src/cr2.rs`
+
+**Branch:** `crawlbot/cr2-rs-20260620T2135` · **Status:** ✅ E1 SHIPPED; E2 deferred
+
+## E1 — move reassembled raster into raw_buf ✅ SHIPPED
+
+Multi-slice CR2 reassembly finalized with `raw_buf.clear(); raw_buf.extend_from_slice(&raster)` —
+a full-frame copy-back. Replaced with `*raw_buf = raster` (O(1) move). The reassemble permute itself
+is unavoidable (scatters slice columns into a fresh raster), but the copy-back is pure waste.
+
+**Measured** (`cr2_finalize_membench`, 24 MP / 45 MB): eliminated copy = **5.1 ms** per multi-slice
+decode; **−45 MB peak** during finalize (raster + raw_buf no longer coexist). Byte-identical; 13/13
+cr2 tests pass. Single-slice files (`have_slices=false`) skip this block entirely — unaffected.
+
+## E2 — zero-fill before LJPEG overwrite (DEFERRED)
+
+`raw_buf.resize(total_pixels, 0)` zero-fills the decode buffer before `ljpeg::decode_tile` writes
+every cell. The zero is dead work (~45 MB memset). **Deferred:** this is the uninit-skip class that
+was already rejected crate-wide (D6, unsafe-surface / WASM-audit grounds). A safe version needs the
+"decode_tile writes all `total_pixels` on Ok" invariant formally audited plus a guard that any short
+write returns Err (buffer discarded). Not worth the unsafe surface for one memset under this crawl's
+risk budget; recorded for a dedicated uninit-audit pass.
+
+## Conclusion
+
+E1 is a free, byte-exact win (**−5.1 ms + −45 MB peak** per multi-slice CR2). The only other cr2
+memory lever (E2) is an unsafe uninit-skip in the previously-rejected class — deferred deliberately.
+Memory bases covered.
