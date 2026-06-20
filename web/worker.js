@@ -18,9 +18,22 @@
 //   { id, type: 'done',          jxl, jxlMs, w, h }
 //   { id, type: 'error',         error }
 
-import init, * as rawWasm from './pkg/raw_converter_wasm.js';
+// COI-gated WASM build selection (single-thread fallback). The threaded build
+// (./pkg/) hard-codes shared memory and needs SharedArrayBuffer + crossOriginIsolated
+// (COOP/COEP). Where those are unavailable — a production host without the headers,
+// file://, or an older browser — that build fails to instantiate, so fall back to the
+// single-thread build (./pkg-st/, no shared memory, no rayon). Selected + bound lazily
+// in ensureWasm(), before any message handler touches these bindings.
+let init, rawWasm;
 // A3: rgb_to_rgba removed — send RGB8 directly to JXL worker (saves ~250ms + 25% transfer)
-const { process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_with_flags, LookRenderer, rotate_rgb8 } = rawWasm;
+let process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_with_flags, LookRenderer, rotate_rgb8;
+async function loadWasm() {
+    const useMt = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated)
+        && typeof SharedArrayBuffer !== 'undefined';
+    rawWasm = await import(useMt ? './pkg/raw_converter_wasm.js' : './pkg-st/raw_converter_wasm.js');
+    init = rawWasm.default;
+    ({ process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_with_flags, LookRenderer, rotate_rgb8 } = rawWasm);
+}
 
 // Route a RAW buffer to the right decoder by magic bytes (robust vs. filename):
 //   Olympus ORF: 'IIR' (IIRO/IIRS/IIUS).  Canon CR2: TIFF 'II*\0' with 'CR' at offset 8.
@@ -64,6 +77,7 @@ const thumbStateMap = new Map(); // taskId → same shape but thumb-sized LookRe
 
 async function ensureWasm() {
     if (!wasmReady) wasmReady = (async () => {
+        await loadWasm();
         await init();
         // A2: init rayon thread pool when parallel-wasm feature is compiled in.
         // Guard: shared memory requires crossOriginIsolated (COOP/COEP). Falls
@@ -74,7 +88,7 @@ async function ensureWasm() {
                 console.log('[worker] thread pool disabled (test mode)');
             } else if (crossOriginIsolated) {
                 try {
-                    await rawWasm.initThreadPool(navigator.hardwareConcurrency);
+                    await rawWasm.initThreadPool(Math.max(1, navigator.hardwareConcurrency || 4));
                 } catch (e) {
                     console.warn('[worker] rayon thread pool init failed, using single-thread WASM:', e.message);
                 }
