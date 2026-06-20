@@ -31,7 +31,31 @@ nature of serial entropy coding. The real gallery-ingest throughput lever is **f
 parallelism** (N files / N workers), which is **already implemented** in
 `packages/pyramid-ingest` (`pMapLimit`/`boundedConcurrency`/`availableParallelism`).
 
-## "Encode under 1 second" — the real picture
+## ★ ENCODE UNDER 1 SECOND — ACHIEVED (and already the production config)
+
+Final clean measurement on an idle machine, **full-res 18 MP CR2**, at the **exact
+pyramid-ingest production settings** — `relaxed-simd-mt` (auto tier) + **effort 3** +
+**hasAlpha:false** + distance 1.0:
+
+```
+encode: 626 ms (min 614)  →  2.08 MB   ✓ UNDER 1s
+ORF 20.5MP, same config:  765 ms       ✓ UNDER 1s
+```
+
+**The ingest is already configured for this** — `pyramid-ingest/quality.ts:19`
+`EFFORT = 3` ("RATIFIED: effort=3 measured best speed+filesize") and
+`backends.ts` passes `hasAlpha:false`. So **production RAW→JXL encode is already <1s**;
+it had simply never been cleanly measured at full-res (StandardMultifileTest's 339–471 ms
+were *downscaled* pyramid levels).
+
+The two levers that matter (vs the naive effort-7 + alpha-on path I first benchmarked):
+- **effort 7 → 3 = 8.7× faster** (6427 → ~730 ms). Costs ~9% file size (1.89 → 2.08 MB).
+  effort 7 is not worth it; effort 3 is the ratified knee.
+- **drop the alpha channel = 34% faster** (1119 → 736 ms at effort 3). RAW has no alpha
+  (decoder fills 255); encoding it is pure waste. Ingest already does this; ad-hoc encode
+  callers should pass `hasAlpha:false` for RAW.
+
+## "Encode under 1 second" — the effort/size landscape (how I got there)
 Full-res **18 MP** CR2, `simd-mt` tier, distance 1.0, under heavy load:
 
 | effort | encode (median, contended) | size | <1s? |
