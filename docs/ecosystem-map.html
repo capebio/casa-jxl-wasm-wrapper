@@ -56,7 +56,7 @@
   #spark:hover{color:#ffd76a}
   .chip{pointer-events:auto;display:flex;gap:6px;align-items:center;color:var(--dim)}
   .chip input{accent-color:#4ea1d3}
-  #zoomlbl{margin-left:auto;color:var(--dim);font-variant-numeric:tabular-nums}
+  #zoomlbl{color:var(--dim);font-variant-numeric:tabular-nums;font-size:12px}
   /* dockable legend wrapper */
   #legendwrap{position:fixed;z-index:5;top:54px;left:0;bottom:12px;display:flex;align-items:stretch;pointer-events:none}
   #legendinner{display:flex;flex-direction:column;justify-content:space-between;padding:0 0 0 14px;gap:8px;pointer-events:auto;transition:all .18s}
@@ -124,7 +124,7 @@
   #crumbs{position:fixed;z-index:5;top:48px;left:16px;color:var(--dim);font-size:11.5px;pointer-events:none}
   #crumbs b{color:var(--ink)}
   /* git heat player */
-  #heatplayer{position:fixed;z-index:8;bottom:0;left:50%;transform:translateX(-50%);
+  #heatplayer{position:fixed;z-index:8;bottom:0;left:50%;
     background:var(--panel);border:1px solid var(--line);border-bottom:none;
     border-radius:10px 10px 0 0;padding:8px 14px 10px;display:flex;gap:8px;
     align-items:center;pointer-events:auto;backdrop-filter:blur(6px)}
@@ -248,6 +248,196 @@
     display:flex;align-items:baseline;gap:5px}
   .lb-tier2 .lb-kind-tag{font-size:9px;color:#334455;text-transform:uppercase;
     letter-spacing:.6px;flex-shrink:0}
+  /* ── perf leaderboard panel ─────────────────────────────────────── */
+  #perflb{
+    position:fixed;z-index:30;bottom:0;left:50%;transform:translateX(-50%);
+    width:min(780px,98vw);
+    background:var(--panel);border:1px solid var(--line);border-bottom:none;
+    border-radius:14px 14px 0 0;padding:16px 20px 20px;
+    backdrop-filter:blur(8px);
+    max-height:70vh;overflow-y:auto;
+    display:none;
+    box-shadow:0 -4px 32px rgba(0,0,0,.55);
+  }
+  #perflb.open{ display:block; }
+  .plb-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  .plb-title{font-size:15px;font-weight:700;color:#e8f0ff;letter-spacing:-.3px}
+  .plb-close{background:none;border:none;color:var(--dim);font-size:18px;cursor:pointer;padding:2px 8px}
+  .plb-close:hover{color:#e8f0ff}
+  .plb-summary{font-size:11px;color:#89b040;margin-left:auto;margin-right:12px;letter-spacing:.3px}
+  .plb-person{margin-bottom:18px;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .plb-person-hdr{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .plb-avatar{width:28px;height:28px;border-radius:50%;font-size:15px;display:flex;align-items:center;justify-content:center;background:var(--line)}
+  .plb-pname{font-size:13px;font-weight:600;color:#e0eaff}
+  .plb-pstats{font-size:10px;color:var(--dim);margin-left:auto;text-align:right;line-height:1.5}
+  .plb-sparkline{margin-left:auto}
+  .plb-entries{display:flex;flex-direction:column;gap:4px}
+  .plb-entry{display:flex;align-items:center;gap:8px;font-size:11px;padding:4px 6px;border-radius:6px;background:rgba(255,255,255,.03)}
+  .plb-entry:hover{background:rgba(255,255,255,.07)}
+  .plb-entry-id{font-family:ui-monospace,monospace;color:#4ea1d3;min-width:110px;font-size:10px}
+  .plb-entry-desc{color:#9aacbf;flex:1}
+  .plb-entry-ms{color:#89b040;min-width:56px;text-align:right;font-family:ui-monospace,monospace;font-size:10px}
+  .plb-entry-mem{min-width:48px;text-align:right;font-family:ui-monospace,monospace;font-size:10px}
+  .plb-entry-fs{min-width:48px;text-align:right;font-family:ui-monospace,monospace;font-size:10px}
+  .plb-entry-date{color:var(--dim);min-width:60px;text-align:right;font-size:9px}
+  .mem-pos{color:#c44a4a}.mem-neg{color:#56a854}.fs-neg{color:#56a854}
+
+  /* ── intro overlay ─────────────────────────────────────────────────────── */
+  #intro-overlay{
+    position:fixed;inset:0;z-index:200;
+    background:rgba(4,8,16,.82);backdrop-filter:blur(6px);
+    display:flex;align-items:center;justify-content:center;
+    opacity:0;pointer-events:none;
+    transition:opacity .35s;
+  }
+  #intro-overlay.open{ opacity:1;pointer-events:auto; }
+
+  #intro-book{
+    position:relative;
+    width:min(640px,94vw);
+    height:min(700px,88vh);
+    min-height:460px;
+    background:#0d1520;
+    border:1px solid #2a3a50;
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 8px 60px rgba(0,0,0,.7);
+    display:flex;flex-direction:column;
+  }
+
+  /* particles canvas behind content */
+  #intro-particles{
+    position:absolute;inset:0;z-index:0;
+    pointer-events:none;
+  }
+
+  /* page container */
+  #intro-pages{
+    position:relative;z-index:1;
+    flex:1;
+    height:0;
+    overflow-y:auto;
+    scrollbar-width:thin;
+    scrollbar-color:#1e2e40 transparent;
+  }
+  .intro-page{ display:none; padding:28px 28px 12px; }
+  .intro-page.active{ display:block; }
+
+  /* footer nav */
+  #intro-footer{
+    position:relative;z-index:1;
+    display:flex;align-items:center;gap:10px;
+    padding:12px 20px;
+    border-top:1px solid #1a2a3a;
+    background:#0a1018;
+    flex-shrink:0;
+  }
+  .intro-dot{
+    width:8px;height:8px;border-radius:50%;
+    background:#1e2e40;cursor:pointer;transition:background .2s;
+  }
+  .intro-dot.active{ background:#4ea1d3; }
+  .intro-nav-btn{
+    background:none;border:1px solid #2a3a50;
+    color:#9aacbf;padding:5px 14px;border-radius:20px;
+    font-size:12px;cursor:pointer;transition:border-color .2s,color .2s;
+  }
+  .intro-nav-btn:hover{ border-color:#4ea1d3;color:#c6d8f0; }
+  #intro-skip{
+    margin-left:auto;
+    background:none;border:none;color:var(--dim);
+    font-size:11px;cursor:pointer;padding:4px 8px;
+  }
+  #intro-skip:hover{ color:#c6d8f0; }
+
+  /* ── page 0: lore ─────────────────────────────────────────────────── */
+  .intro-lore-title{
+    font-size:22px;font-weight:800;color:#e8f0ff;
+    letter-spacing:-.5px;margin-bottom:6px;
+  }
+  .intro-lore-sub{
+    font-size:12px;color:#4ea1d3;letter-spacing:.6px;
+    text-transform:uppercase;margin-bottom:20px;
+  }
+  .intro-lore-body{ font-size:13px;line-height:1.7;color:#9aacbf; }
+
+  /* mandala */
+  #intro-mandala-wrap{
+    display:flex;justify-content:center;margin:16px 0 8px;
+  }
+  #intro-mandala-desc{
+    text-align:center;font-size:11px;color:#4ea1d3;
+    min-height:16px;margin-bottom:4px;
+    transition:opacity .2s;
+  }
+
+  /* lore nav hint */
+  .intro-lore-hint{
+    font-size:10px;color:var(--dim);margin-top:16px;letter-spacing:.2px;
+  }
+
+  /* ── page 1 & 2: feature / relevance cards ────────────────────────── */
+  .intro-page-title{
+    font-size:14px;font-weight:700;color:#e8f0ff;letter-spacing:-.2px;
+    margin-bottom:4px;
+  }
+  .intro-page-sub{
+    font-size:11px;color:var(--dim);margin-bottom:16px;
+  }
+  .intro-cards{
+    display:grid;grid-template-columns:1fr 1fr;gap:10px;
+  }
+  .intro-feat,.intro-rel-card{
+    background:#0f1c2a;border:1px solid #1e2e40;
+    border-radius:10px;padding:10px 12px;
+    cursor:pointer;transition:border-color .2s,background .2s;
+    overflow:hidden;
+  }
+  .intro-feat:hover,.intro-rel-card:hover{
+    border-color:#2e4a6a;background:#121f30;
+  }
+  .intro-feat.expanded,.intro-rel-card.expanded{
+    border-color:#4ea1d3;background:#0d1926;
+  }
+  .intro-card-icon{ font-size:20px;margin-bottom:4px; }
+  .intro-card-name{
+    font-size:11px;font-weight:600;color:#c6d8f0;
+    font-family:ui-monospace,monospace;margin-bottom:2px;
+  }
+  .intro-card-tagline{
+    font-size:10px;color:var(--dim);line-height:1.4;
+  }
+  /* detail (hidden until expanded) */
+  .intro-feat-detail,.intro-rel-detail{
+    display:none;margin-top:8px;padding-top:8px;
+    border-top:1px solid #1e2e40;
+  }
+  .intro-feat.expanded .intro-feat-detail,
+  .intro-rel-card.expanded .intro-rel-detail{
+    display:block;
+  }
+  .ifd-sym{
+    display:inline-flex;align-items:center;gap:5px;
+    font-size:10px;font-weight:600;margin-bottom:4px;
+    font-family:ui-monospace,monospace;
+  }
+  .ifd-dot{
+    width:9px;height:9px;border-radius:50%;flex-shrink:0;
+  }
+  .ifd-fact{
+    font-size:10px;color:#9aacbf;line-height:1.5;margin-bottom:6px;
+  }
+  .ifd-explore{
+    font-size:10px;color:#4ea1d3;text-decoration:none;
+    display:inline-block;margin-top:2px;
+  }
+  .ifd-explore:hover{ text-decoration:underline; }
+
+  /* hints */
+  .intro-hint{
+    font-size:10px;color:var(--dim);text-align:center;
+    margin-top:10px;
+  }
   /* dict tabs */
   .dict-tabs{display:flex;gap:4px;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--line)}
   .dict-tab-btn{background:none;border:1px solid transparent;color:var(--dim);border-radius:6px;
@@ -311,10 +501,268 @@
   #gh-form .submit-row{display:flex;gap:10px;margin-top:4px}
   #gh-step2 h2{font-size:16px;margin:0 0 4px}
   .gh-copy-ok{color:#5cc98c;font-size:11px;display:none}
+  .math-copy-btn{position:absolute;top:5px;right:6px;background:#15203a;border:1px solid #2c3a5a;
+    color:#9aacbf;border-radius:4px;padding:2px 6px;font-size:10px;cursor:pointer;line-height:1.4}
+  .math-copy-btn:hover{border-color:#4ea1d3;color:#e0f0ff}
+  .math-src-row{margin-top:5px;font-size:10px}
+  .math-src-link{color:#4ea1d3;text-decoration:none;border-bottom:1px dotted rgba(78,161,211,.4)}
+  .math-src-link:hover{color:#9dd4f4}
+  #wt-overlay{position:fixed;inset:0;z-index:9000;pointer-events:all;display:none}
+  #wt-overlay.show{display:block}
+  #wt-bg{position:absolute;inset:0;background:rgba(0,0,0,.72)}
+  #wt-spotlight{position:absolute;border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.72),0 0 0 3px #4ea1d3;
+    transition:all .35s cubic-bezier(.4,0,.2,1);pointer-events:none}
+  #wt-card{position:absolute;background:#0d1b30;border:1px solid #2a4a7a;border-radius:12px;
+    padding:20px 22px;width:300px;box-shadow:0 8px 32px rgba(0,0,0,.6);z-index:1}
+  #wt-icon{font-size:32px;margin-bottom:8px}
+  #wt-title{margin:0 0 6px;font-size:16px;color:#e0f0ff;font-weight:700}
+  #wt-body{margin:0 0 14px;font-size:13px;color:#9aacbf;line-height:1.55}
+  #wt-step-indicator{display:flex;gap:5px;margin-bottom:10px}
+  .wt-dot{width:7px;height:7px;border-radius:50%;background:#1a3a6a;transition:background .2s}
+  .wt-dot.active{background:#4ea1d3}
+  #wt-actions{display:flex;align-items:center;gap:8px}
+  #wt-skip{background:none;border:none;color:#4a6a8a;font-size:12px;cursor:pointer;padding:0}
+  #wt-skip:hover{color:#9aacbf}
+  #wt-prev,#wt-next{background:#1a3a6a;border:1px solid #2a5a9a;color:#a0c8f0;border-radius:6px;
+    padding:6px 14px;font-size:12px;cursor:pointer;transition:all .15s}
+  #wt-prev:hover,#wt-next:hover{background:#2a4a7a;border-color:#4ea1d3;color:#fff}
+  #wt-reopen{position:fixed;bottom:12px;right:12px;width:30px;height:30px;border-radius:50%;
+    background:#0d1b30;border:1px solid #2a4a7a;color:#6a9abf;font-size:14px;cursor:pointer;
+    z-index:500;display:flex;align-items:center;justify-content:center;line-height:1}
+  #wt-reopen:hover{border-color:#4ea1d3;color:#e0f0ff}
+  /* ── GAME HUB ─────────────────────────────────────────────── */
+  #gamehub{position:fixed;inset:0;z-index:950;background:rgba(4,10,24,.97);
+    display:none;flex-direction:column;align-items:center;overflow-y:auto}
+  #gamehub.open{display:flex}
+  #gh-header{width:100%;max-width:860px;padding:16px 20px;display:flex;align-items:center;gap:12px;
+    border-bottom:1px solid #1a2a4a;flex-shrink:0;box-sizing:border-box}
+  #gh-header h2{margin:0;font-size:20px;color:#e0f0ff;flex:1;font-family:ui-sans-serif,system-ui}
+  #gh-close{background:none;border:none;color:#9aacbf;font-size:24px;cursor:pointer;padding:4px 8px;line-height:1}
+  #gh-close:hover{color:#fff}
+  #gh-select{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;padding:20px;max-width:860px;width:100%;box-sizing:border-box}
+  .gh-card{background:#0d1b30;border:1px solid #1e3050;border-radius:12px;padding:18px 14px;
+    display:flex;flex-direction:column;align-items:center;gap:8px;position:relative;font-family:ui-sans-serif,system-ui}
+  .gh-card:not(.disabled){cursor:default}
+  .gh-card.disabled{opacity:.38;pointer-events:none}
+  .gh-card-icon{font-size:34px;line-height:1}
+  .gh-card h3{margin:0;font-size:13px;color:#e0f0ff;text-align:center}
+  .gh-card p{margin:0;font-size:11px;color:#6a8aaf;text-align:center;line-height:1.4}
+  .gh-card-btns{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;justify-content:center}
+  .gh-play-btn{background:#1a3a6a;border:1px solid #2a5a9a;color:#a0c8f0;border-radius:6px;
+    padding:5px 14px;font-size:12px;cursor:pointer;transition:all .15s}
+  .gh-play-btn:hover{background:#2a4a7a;border-color:#4ea1d3;color:#fff}
+  .gh-shh-btn{background:#3a1a0a;border:1px solid #7a3a1a;color:#f0a060;border-radius:6px;
+    padding:5px 10px;font-size:11px;cursor:pointer;transition:all .15s;white-space:nowrap}
+  .gh-shh-btn:hover{background:#5a2a0a;border-color:#d06020;color:#ffd0a0}
+  .gh-soon{position:absolute;top:7px;right:8px;font-size:9px;background:#0a2040;
+    color:#4a6a8a;padding:2px 6px;border-radius:4px;letter-spacing:.5px;text-transform:uppercase}
+  /* Pixel Surgeon */
+  #gh-ps{display:none;flex-direction:column;width:100%;max-width:860px;padding:0 20px 20px;gap:10px;box-sizing:border-box}
+  #gh-ps.active{display:flex}
+  #ps-hdr{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #1a2a4a;flex-wrap:wrap}
+  #ps-level-badge{background:#1a3a6a;border:1px solid #2a5a9a;color:#a0c8f0;border-radius:6px;
+    padding:3px 10px;font-size:13px;font-weight:600;font-family:ui-sans-serif,system-ui;white-space:nowrap}
+  #ps-shh-badge{background:#3a1a0a;border:1px solid #7a3a1a;color:#f0a060;border-radius:6px;
+    padding:3px 8px;font-size:11px;font-weight:600;display:none}
+  #ps-score-disp{color:#e0f0ff;font-size:14px;font-variant-numeric:tabular-nums;font-family:ui-sans-serif,system-ui}
+  .ps-lives{display:flex;gap:3px}
+  .ps-heart{font-size:16px;transition:all .3s;line-height:1}
+  .ps-heart.lost{opacity:.18;transform:scale(.65)}
+  #ps-timer-bar{flex:1;height:5px;background:#0d1b30;border-radius:3px;overflow:hidden;min-width:60px}
+  #ps-timer-fill{height:100%;background:linear-gradient(90deg,#2a8a4a,#d4a017,#c0392b);background-size:300% 100%;
+    background-position:0%;border-radius:3px;transition:width .25s linear,background-position .25s}
+  #ps-body{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  #ps-left{display:flex;flex-direction:column;gap:10px;align-items:center}
+  #ps-canvas{border-radius:8px;border:2px solid #1e3050;display:block;max-width:300px;width:100%;
+    image-rendering:pixelated;transition:filter .15s}
+  #ps-symptoms{background:#08131f;border:1px solid #1a2a4a;border-radius:8px;
+    padding:10px;width:100%;box-sizing:border-box}
+  #ps-symptoms h4{margin:0 0 6px;font-size:10px;color:#6a8aaf;text-transform:uppercase;letter-spacing:.6px;font-family:ui-sans-serif,system-ui}
+  .ps-symptom{font-size:12px;color:#c0d8f0;padding:2px 0;display:flex;align-items:flex-start;gap:6px;line-height:1.4;font-family:ui-sans-serif,system-ui}
+  .ps-symptom::before{content:"\25E6";color:#4ea1d3;flex-shrink:0}
+  #ps-right{display:flex;flex-direction:column;gap:8px}
+  #ps-ops-label{font-size:10px;color:#6a8aaf;text-transform:uppercase;letter-spacing:.6px;font-family:ui-sans-serif,system-ui}
+  .ps-op{background:#0d1b30;border:2px solid #1e3050;border-radius:8px;padding:10px 12px;
+    cursor:pointer;transition:border-color .15s,background .15s;display:flex;align-items:flex-start;gap:9px}
+  .ps-op:hover{border-color:#4ea1d3;background:#122040}
+  .ps-op.wrong{border-color:#8a2a2a!important;background:#1a0808!important;animation:ps-shake .35s}
+  .ps-op.correct{border-color:#2a8a4a!important;background:#081e10!important}
+  .ps-op-sym{font-size:18px;line-height:1.2;flex-shrink:0}
+  .ps-op-text{flex:1;min-width:0}
+  .ps-op-label{font-size:12px;color:#e0f0ff;font-weight:600;font-family:ui-sans-serif,system-ui}
+  .ps-op-stage{font-size:10px;color:#6a8aaf;margin-top:2px;font-family:ui-sans-serif,system-ui}
+  .ps-new-badge{background:#1a4a2a;border:1px solid #2a8a4a;color:#60d080;border-radius:4px;
+    font-size:8px;padding:1px 4px;margin-left:5px;letter-spacing:.3px;vertical-align:middle}
+  @keyframes ps-shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(5px)}}
+  #ps-feedback{min-height:28px;padding:6px 10px;border-radius:6px;font-size:12px;text-align:center;
+    transition:opacity .25s;opacity:0;font-family:ui-sans-serif,system-ui}
+  #ps-feedback.show{opacity:1}
+  #ps-feedback.ok{background:#0d2a18;color:#60d080;border:1px solid #2a6a40}
+  #ps-feedback.err{background:#1a0808;color:#f07070;border:1px solid #6a2a2a}
+  #ps-new-op-banner{background:linear-gradient(135deg,#0d2a18,#1a4a2a);border:1px solid #2a8a4a;
+    border-radius:8px;padding:10px 14px;text-align:center;display:none;animation:ps-fadein .4s}
+  #ps-new-op-banner.show{display:block}
+  #ps-new-op-banner h4{margin:0 0 3px;color:#60d080;font-size:13px;font-family:ui-sans-serif,system-ui}
+  #ps-new-op-banner p{margin:0;font-size:11px;color:#80b090;font-family:ui-sans-serif,system-ui}
+  @keyframes ps-fadein{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  /* Victory */
+  #ps-victory{display:none;position:absolute;inset:0;background:rgba(4,12,20,.9);z-index:10;
+    align-items:center;justify-content:center;flex-direction:column;gap:12px;border-radius:12px;text-align:center}
+  #ps-victory.show{display:flex}
+  #ps-victory h2{margin:0;font-size:28px;color:#60d080;font-family:ui-sans-serif,system-ui;animation:ps-fadein .5s}
+  #ps-victory p{margin:0;font-size:14px;color:#9acfb0;font-family:ui-sans-serif,system-ui}
+  /* Leaderboard */
+  #gh-lb{display:none;flex-direction:column;align-items:center;gap:14px;padding:20px;max-width:520px;width:100%;box-sizing:border-box}
+  #gh-lb.active{display:flex}
+  #gh-lb-title{font-size:20px;font-weight:700;color:#e0f0ff;font-family:ui-sans-serif,system-ui}
+  #gh-lb-score-wrap{text-align:center}
+  #gh-lb-score{font-size:40px;font-weight:700;color:#4ea1d3;font-variant-numeric:tabular-nums;font-family:ui-sans-serif,system-ui;display:block}
+  #gh-lb-rank{font-size:13px;color:#6a8aaf;font-family:ui-sans-serif,system-ui;margin-top:4px;display:block}
+  #gh-lb-table{width:100%;background:#08131f;border:1px solid #1a2a4a;border-radius:8px;overflow:hidden}
+  .lb-row{display:grid;grid-template-columns:30px 1fr 70px 70px;padding:7px 10px;font-size:11px;
+    border-bottom:1px solid #0d1b30;align-items:center;font-family:ui-sans-serif,system-ui}
+  .lb-row:last-child{border:none}
+  .lb-row.header{background:#0d1b30;color:#6a8aaf;font-size:9px;letter-spacing:.5px;text-transform:uppercase}
+  .lb-row.you{background:#0d2a40;color:#a0d8f8}
+  .lb-rank-cell{color:#4a6a8a;font-weight:600}
+  .lb-rank-cell.top3{color:#d4a017}
+  .lb-name-cell{color:#c0d8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lb-pts{color:#e0f0ff;font-variant-numeric:tabular-nums;text-align:right}
+  .lb-date{color:#4a6a8a;text-align:right;font-size:9px}
+  #gh-lb-btns{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .lb-action-btn{background:#0d1b30;border:1px solid #1e3050;color:#a0c8f0;border-radius:6px;
+    padding:7px 16px;font-size:12px;cursor:pointer;transition:all .15s;font-family:ui-sans-serif,system-ui}
+  .lb-action-btn:hover{border-color:#4ea1d3;color:#fff}
+  /* SHH banner */
+  #ps-shh-info{background:linear-gradient(135deg,#2a1005,#4a2010);border:1px solid #8a4020;
+    border-radius:8px;padding:8px 14px;text-align:center;display:none}
+  #ps-shh-info.show{display:block}
+  #ps-shh-info h4{margin:0 0 2px;color:#f0a060;font-size:12px;font-family:ui-sans-serif,system-ui}
+  #ps-shh-info p{margin:0;font-size:10px;color:#c09070;font-family:ui-sans-serif,system-ui}
+  /* SHH leaderboard tab */
+  .gh-lb-tabs{display:flex;gap:0;border:1px solid #1a2a4a;border-radius:6px;overflow:hidden;width:100%}
+  .gh-lb-tab{flex:1;padding:6px;text-align:center;font-size:12px;cursor:pointer;font-family:ui-sans-serif,system-ui;
+    background:#0d1b30;color:#6a8aaf;border:none;transition:all .15s}
+  .gh-lb-tab.active{background:#1a3a6a;color:#e0f0ff}
+
 </style>
 </head>
 <body>
 <canvas id="map"></canvas>
+<div id="heatplayer">
+  <button class="hpbtn" id="hp-toggle" title="Toggle heat map on/off" style="font-size:11px;padding:4px 8px">🔥 on</button>
+  <span id="hp-label">git heat</span>
+  <button class="hpbtn" id="hp-rewind" title="Rewind to first date">&#9194;</button>
+  <button class="hpbtn" id="hp-back" title="Step back one day">&#9664;</button>
+  <button class="hpbtn" id="hp-play" title="Play / Pause">&#9654;</button>
+  <button class="hpbtn" id="hp-fwd" title="Step forward one day">&#9654;&#9654;</button>
+  <input type="range" id="hp-slider" min="0" max="35" value="35">
+  <span id="hp-date">2026-06-20</span>
+</div>
+
+<div id="top" class="hud">
+  <h1 style="margin-left:50px">raw-pipeline <small>codec ecosystem · semantic-zoom map</small></h1>
+  <input id="search" class="pointer" placeholder="find…" autocomplete="off">
+  <button class="btn pointer" id="reset">⤢ Fit</button>
+  <button class="btn pointer" id="flowtoggle">▶ Flow mode</button>
+  <span class="chip" style="gap:6px;padding:4px 8px">
+    <span style="color:var(--dim);font-size:10px;letter-spacing:.3px">flow</span>
+    <label style="cursor:pointer;font-size:12px;color:var(--ink);display:flex;align-items:center;gap:3px"><input type="checkbox" id="showconn" checked> lines</label>
+    <label style="cursor:pointer;font-size:12px;color:var(--ink);display:flex;align-items:center;gap:3px"><input type="checkbox" id="showlbl"> labels</label>
+  </span>
+  <span class="chip" style="gap:5px;margin-left:4px"><span style="color:var(--dim);font-size:11px">tech</span>
+    <button class="btn pointer techbtn on" id="techRust">Rust</button>
+    <button class="btn pointer techbtn on" id="techWasm">WASM</button>
+    <button class="btn pointer techbtn on" id="techJs">JS</button></span>
+  <button class="btn pointer" id="seamtoggle">◆ Seams</button>
+  <span id="zoomlbl" style="font-size:12px;font-variant-numeric:tabular-nums;color:var(--dim);min-width:40px;text-align:right"></span>
+  <span style="flex:1"></span>
+  <button class="btn pointer" id="snakebtn" title="Pipeline timing" style="font-size:18px;padding:4px 8px">🐍</button>
+  <button class="btn pointer" id="dictbtn" title="Glossary / dictionary" style="margin-left:4px">📖</button>
+  <button class="btn pointer" id="cog" title="Dev notes &amp; credits" style="margin-left:4px">⚙</button>
+  <button class="btn pointer" id="refreshbtn" title="Refresh / pull latest status" style="margin-left:4px;font-size:22px;padding:4px 10px;line-height:1">🔄</button>
+  <button class="btn pointer" id="gamebtn" title="Games — learn &amp; test your knowledge" style="margin-left:4px;font-size:16px">🎮</button>
+  <button class="btn pointer" id="perflbbtn" title="Perf leaderboard" style="margin-left:4px;font-size:14px">⚡</button>
+  <button class="btn pointer" id="sharebtn" title="About this map / intro" style="margin-left:4px;font-size:14px">ℹ️</button>
+</div>
+<div id="crumbs" class="hud"></div>
+
+<aside id="panel">
+  <span class="back" id="pback" title="Back to where you were">‹</span>
+  <span class="close" id="pclose">×</span>
+  <div class="kind" id="pkind"></div>
+  <h2 id="ptitle"></h2>
+  <div class="path" id="ppath"></div>
+  <p id="pdesc"></p>
+  <div id="pnote"></div>
+  <button class="btn flowbtn" id="ptrace">⇣ Trace data flow from here</button>
+  <div class="sec" id="pout"></div>
+  <div class="sec" id="pin"></div>
+</aside>
+
+<div id="legendwrap">
+  <div id="legendinner">
+    <div id="symslegend">
+      <h4>node types <span style="color:var(--dim);font-weight:400;font-size:10px">· click to isolate</span></h4>
+      <div class="lg" data-kind="system"><span class="sym sm">⊕</span><span>system</span></div>
+      <div class="lg" data-kind="fn"><span class="sym">λ</span><span>algorithm / fn</span></div>
+      <div class="lg" data-kind="module"><span class="sym">≡</span><span>module</span></div>
+      <div class="lg" data-kind="component"><span class="sym">◈</span><span>component</span></div>
+      <div class="lg sep" style="color:var(--dim);font-size:10px;letter-spacing:.4px;text-transform:uppercase">files</div>
+      <div class="lg" data-kind="file"><span class="sym">⚙</span><span>.rs — Rust</span></div>
+      <div class="lg" data-kind="file"><span class="sym">∥</span><span>.rs simd / arch</span></div>
+      <div class="lg" data-kind="file"><span class="sym">Δ</span><span>.ts — TypeScript</span></div>
+      <div class="lg" data-kind="file"><span class="sym">◎</span><span>.js / .mjs</span></div>
+      <div class="lg" data-kind="file"><span class="sym">⊞</span><span>.cpp — C++</span></div>
+      <div class="lg" data-kind="file"><span class="sym">⊤</span><span>.h — header</span></div>
+    </div>
+    <div id="legend">
+      <h4>data payloads</h4>
+      <div id="legitems"></div>
+    </div>
+  </div>
+  <div id="legdock" title="Toggle legend panel">◄</div>
+</div>
+
+<div id="snakepanel">
+  <div id="snake-bar">
+    <span class="snake-title">🐍 Pipeline timing</span>
+    <button class="sbtn active" id="snake-log">linear scale</button>
+    <select id="snake-mp" title="Megapixel target">
+      <option value="6">6 MP</option>
+      <option value="12" selected>12 MP</option>
+      <option value="24">24 MP</option>
+      <option value="48">48 MP</option>
+    </select>
+    <button class="sbtn" id="snake-anim" title="Start / stop">▶</button>
+    <button class="sbtn" id="snake-pause" title="Pause / resume">⏸</button>
+    <span style="display:flex;align-items:center;gap:4px;font-size:11px">
+      <input type="range" id="snake-speed-sl" min="0" max="200" value="50"
+        style="width:54px;accent-color:#d67c3a" title="Animation speed">
+      <span id="snake-speed-lbl" style="min-width:34px;color:#d67c3a">×0.10</span>
+    </span>
+    <span id="snake-time-disp" style="font-size:11px;color:#89b040;min-width:44px">—</span>
+    <div class="snake-legend">
+      <div id="snake-legend-wrap"></div>
+    </div>
+    <button id="snake-close">×</button>
+  </div>
+  <div id="snake-svg-wrap">
+    <svg id="snake-svg"></svg>
+  </div>
+</div>
+
+<div id="leaderboard">
+  <div id="lb-row1">
+    <span class="lb-field-label">zoom</span><span id="lb-zval">1×</span>
+  </div>
+  <div class="lb-divider"></div>
+  <div id="lb-tiers"></div>
+</div>
+
+<div id="probepopup"></div>
+<div class="mem-tooltip" id="mem-tooltip"></div>
+
 <a id="casabio-wrap" href="https://casabio.org" target="_blank" rel="noopener" title="Casabio.org — citizen science biodiversity platform">
   <img id="casabio-icon" src="https://casabio.org/favicon.ico"
        onerror="this.style.display='none';document.getElementById('casabio-fb').style.display='flex'">
@@ -723,8 +1171,27 @@ function drawBoxes(node,depth){
           ctx.font=`600 ${lblSz}px ui-sans-serif`;
           ctx.fillStyle=hex(col,0.82);
           const raw=(node.l||'').replace(/★/g,'').trim();
-          const lbl=fitText(raw, sx+sw-icx-iconW-24);
-          ctx.fillText(lbl, icx+iconW+4, icy+Math.max(0,(iconSz-lblSz)*0.45));
+          const avail=sx+sw-icx-iconW-28;
+          const fullW=ctx.measureText(raw).width;
+          if(fullW<=avail){
+            ctx.fillText(raw, icx+iconW+4, icy+Math.max(0,(iconSz-lblSz)*0.45));
+          } else {
+            const tid=node.id, now2=performance.now();
+            if(!_tickerState.has(tid)) _tickerState.set(tid,{off:0,vel:0.04,pause:0,dir:1});
+            const ts=_tickerState.get(tid);
+            const maxOff=fullW-avail+8;
+            if(ts.pause>now2){/* paused */}
+            else{
+              ts.off+=ts.vel*ts.dir;
+              if(ts.off>=maxOff){ts.off=maxOff;ts.dir=-1;ts.pause=now2+500;}
+              else if(ts.off<=0){ts.off=0;ts.dir=1;ts.pause=now2+500;}
+            }
+            const tx=icx+iconW+4, ty=icy+Math.max(0,(iconSz-lblSz)*0.45);
+            ctx.save();
+            ctx.beginPath(); ctx.rect(tx-2,icy-2,avail+4,iconSz+4); ctx.clip();
+            ctx.fillText(raw, tx-ts.off, ty);
+            ctx.restore();
+          }
         }
         ctx.restore();
       }
@@ -917,10 +1384,32 @@ function buildRepEdges(){
   });
   repEdges.forEach(re=>{ re.path=bez(re.a,re.b); });
 }
+function showEggTimerPop(node, cx, cy){
+  const cutoff=HEATMAP_DATA.dates[heatIdx];
+  const commits=HEATMAP_DATA.nodes[node.id]?.[cutoff]||0;
+  const pop=_gitpop;
+  document.getElementById('gp-name').textContent=node.l||node.id;
+  document.getElementById('gp-stat').textContent='Active on '+cutoff;
+  document.getElementById('gp-pct').textContent=commits+' line-changes';
+  const bar=document.getElementById('gp-bar');
+  if(bar) bar.style.cssText='height:4px;background:rgba(240,120,30,0.7);width:100%;margin-top:4px;border-radius:2px';
+  let extra=pop.querySelector('.et-extra');
+  if(!extra){extra=document.createElement('div'); extra.className='et-extra';
+    extra.style.cssText='margin-top:8px;font-size:11px;color:#9aacbf;line-height:1.5';
+    pop.appendChild(extra);}
+  extra.innerHTML='<b style="color:#e8f0ff">David Gwynne-Evans</b> &amp; AI collaborators<br>'+
+    '<span style="color:var(--dim)">capebio@gmail.com · Casabio.org</span>';
+  pop.style.display='block';
+  pop.style.left=Math.min(cx+10,window.innerWidth-220)+'px';
+  pop.style.top=Math.max(8,cy-80)+'px';
+}
 function drawEdges(){
   buildRepEdges();
-  const showAll=document.getElementById("showconn").checked;
+  const connOn=document.getElementById("showconn").checked;
+  const showAll=document.getElementById("showlbl")?.checked||false;
+  if(!connOn && !flowSet && !selEdge) return;
   repEdges.forEach(re=>{
+    if(!connOn && flowSet && !re.edges.some(e=>flowSet.has(e.f))) return;
     const active=flowSet && re.edges.some(e=>e.k!=="uses" && flowSet.has(e.f));
     const p=re.path, pal=GRAPH.payloads[re.pay]||GRAPH.payloads.bytes;
     const baseCol=pal.c[0];
@@ -1031,6 +1520,7 @@ function draw(){
    Interaction
    ========================================================================== */
 let hovId=null, selId=null, selEdge=null, hovEdge=null, drag=null;
+const _tickerState=new Map();
 function pickNode(sx,sy){ for(let i=rendered.length-1;i>=0;i--){ const r=rendered[i];
   if(sx>=r.sx&&sx<=r.sx+r.sw&&sy>=r.sy&&sy<=r.sy+r.sh) return r; } return null; }
 function pickEdge(sx,sy){ let best=null,bd=16;   // ~16px click padding either side of the line
@@ -1065,6 +1555,14 @@ window.addEventListener("mouseup",e=>{
   if(drag){ const moved=Math.hypot(e.clientX-drag.x,e.clientY-drag.y)>4; cv.classList.remove("grabbing");
     if(!moved){
       // git bar click — check before node pick (bar is inside node bounds)
+      const _cutoff=HEATMAP_DATA.dates[heatIdx];
+      const _etNode=rendered.find(r=>{
+        if(!HEATMAP_DATA.nodes[r.node.id]||!HEATMAP_DATA.nodes[r.node.id][_cutoff]) return false;
+        const cx=r.sx+r.sw*0.5, cy=r.sy+r.sh*0.08+Math.max(6,r.sh*0.04);
+        const fs=Math.max(9,Math.min(22,r.sh*0.20));
+        return Math.hypot(e.clientX-cx,e.clientY-cy)<Math.max(fs,14);
+      });
+      if(_etNode){ showEggTimerPop(_etNode.node, e.clientX, e.clientY); drag=null; return; }
       const gb=gitBarRects.find(r=>e.clientX>=r.barX&&e.clientX<=r.barX+r.barW&&e.clientY>=r.barY&&e.clientY<=r.barY+r.barH);
       if(gb){ showGitPop(gb, e.clientX, e.clientY); drag=null; return; }
       _gitpop.style.display="none";
@@ -1348,16 +1846,20 @@ const DICT_ENTRIES=_buildDictEntries();
 const MATH_DICT=[
 {cat:"Signal Processing",name:"MSE — Mean Squared Error",
  formula:"MSE = (1/N) · Σᵢ (aᵢ − bᵢ)²",
- desc:"Foundation of all image quality metrics. N = total pixel channels compared; a and b are the two images. MSE = 0 means identical."},
+ desc:"Foundation of all image quality metrics. N = total pixel channels compared; a and b are the two images. MSE = 0 means identical.",
+ src:"crates/raw-pipeline/src/perceptual/ssim.rs"},
 {cat:"Signal Processing",name:"PSNR — Peak Signal-to-Noise Ratio",
  formula:"PSNR = 10 · log₁₀(MAX² / MSE)",
- desc:"Quality in decibels. MAX = 255 (8-bit) or 65535 (16-bit). ∞ when identical; >40 dB is visually near-lossless for natural photographs. Simpler than Butteraugli but ignores spatial masking."},
+ desc:"Quality in decibels. MAX = 255 (8-bit) or 65535 (16-bit). ∞ when identical; >40 dB is visually near-lossless for natural photographs. Simpler than Butteraugli but ignores spatial masking.",
+ src:"crates/raw-pipeline/src/perceptual/ssim.rs"},
 {cat:"Signal Processing",name:"SSIM — Structural Similarity Index",
  formula:"SSIM(x,y) = [(2μₓμᵧ + C₁)(2σₓᵧ + C₂)]\n         / [(μₓ² + μᵧ² + C₁)(σₓ² + σᵧ² + C₂)]",
- desc:"μ = local mean, σ² = variance, σₓᵧ = cross-covariance. C₁, C₂ stabilise near-zero denominators. Score ∈ [0,1], 1 = identical. Captures luminance, contrast and structure separately."},
+ desc:"μ = local mean, σ² = variance, σₓᵧ = cross-covariance. C₁, C₂ stabilise near-zero denominators. Score ∈ [0,1], 1 = identical. Captures luminance, contrast and structure separately.",
+ src:"crates/raw-pipeline/src/perceptual/ssim.rs"},
 {cat:"Perceptual / Colour",name:"Butteraugli p-norm",
  formula:"Score = (Σᵢ εᵢᵖ / N)^(1/p),  p ≈ 3",
- desc:"Weights worst errors more than the average. With p=3, one bad pixel has 3× the influence of a median one. Used in libjxl to drive lossy quality; the distance target is this score."},
+ desc:"Weights worst errors more than the average. With p=3, one bad pixel has 3× the influence of a median one. Used in libjxl to drive lossy quality; the distance target is this score.",
+ src:"crates/raw-pipeline/src/perceptual/butteraugli_kernel.rs"},
 {cat:"Perceptual / Colour",name:"Non-Riemannian colour damping  (Bujack 2022)",
  formula:"D_perceived(A,C) < D(A,B) + D(B,C)",
  desc:"Strict sub-additivity even along the geodesic: a 2× physical colour change is perceived as only ~1.5× the sensation. The damping function f is concave and approximately logarithmic (a second-order Weber–Fechner law). ΔE2000 is valid only for small differences."},
@@ -1366,7 +1868,8 @@ const MATH_DICT=[
  desc:"Geodesics of the true non-Riemannian metric and its Riemannian approximation coincide (Theorem 1). The non-Riemannian behaviour lives entirely in a monotone scalar function f applied to arc-length. This collapses exotic geometry to a 1-D lookup table—implementable in a WASM hot loop."},
 {cat:"Perceptual / Colour",name:"sRGB EOTF  (gamma linearisation)",
  formula:"Cₗᵢₙ = ((C + 0.055) / 1.055)^2.4   [C > 0.04045]\nCₗᵢₙ = C / 12.92             [C ≤ 0.04045]",
- desc:"Converts stored sRGB byte values to linear physical light before matrix multiplication, blending, and tone operations. The pipeline bakes this into the LUT so it costs zero per-pixel floating-point ops."},
+ desc:"Converts stored sRGB byte values to linear physical light before matrix multiplication, blending, and tone operations. The pipeline bakes this into the LUT so it costs zero per-pixel floating-point ops.",
+ src:"crates/raw-pipeline/src/pipeline.rs"},
 {cat:"Perceptual / Colour",name:"Camera → sRGB colour matrix",
  formula:"[R, G, B]ₛᵣᴳᴮ = M₃₃ · [R, G, B]ᴄᴀᴍᴇᴣᴀ",
  desc:"Per-camera 3×3 matrix maps raw sensor RGB to sRGB. Coefficients are manufacturer-specific (stored in MakerNote or hardcoded per model). Applied after white-balance scaling and before tone curve."},
@@ -1378,10 +1881,12 @@ const MATH_DICT=[
  desc:"Screen-pixel radius of each node’s heat glow ring. Grows logarithmically with cumulative churn via t, then proportional to zoom level so the glow feels stable as you zoom."},
 {cat:"Pipeline math",name:"EMA — Exponential Moving Average",
  formula:"EMAₙ = α·xₙ + (1−α)·EMAₙ₋₁",
- desc:"α ∈ (0,1) is the smoothing factor. High α tracks recent values quickly; low α gives a stable long-term average. Used in decode-handler to track byte drain rates without storing a full history buffer."},
+ desc:"α ∈ (0,1) is the smoothing factor. High α tracks recent values quickly; low α gives a stable long-term average. Used in decode-handler to track byte drain rates without storing a full history buffer.",
+ src:"packages/jxl-worker-browser/src/decode-handler.ts"},
 {cat:"Hash",name:"FNV-1a  (32-bit)",
  formula:"hash₀  = 2166136261  (offset basis)\nhashₙ = (hashₙ₋₁ ⊕ byteₙ) × 16777619  mod 2³²",
- desc:"⊕ = XOR. Non-cryptographic: XOR then multiply by a large prime. Fast and well-distributed for short strings. ~100× faster than SHA-256; used here for content-addressed cache keys where collision resistance requirements are modest."},
+ desc:"⊕ = XOR. Non-cryptographic: XOR then multiply by a large prime. Fast and well-distributed for short strings. ~100× faster than SHA-256; used here for content-addressed cache keys where collision resistance requirements are modest.",
+ src:"packages/jxl-cache/src/browser.ts"},
 {cat:"Hash",name:"Pro-isomorphic zeta function  (Berman)",
  formula:"ζ̂_Γ(s) = Σₙ₌₁⁾ â_n(Γ) · n^(-s)",
  desc:"Dirichlet generating series that enumerates all finite-index subgroups of a nilpotent group Γ whose profinite completion is isomorphic to Γ itself. Admits an Euler product over rational primes. Studied by Dr Mark N. Berman as a structural framework with potential future application to the non-Riemannian colour pipeline."},
@@ -1416,18 +1921,32 @@ function _renderDictList(q){
   return h;
 }
 
+function _copyMathFormula(formula){
+  navigator.clipboard.writeText(formula).catch(()=>{});
+  const el=event.currentTarget;
+  const old=el.textContent; el.textContent='✓';
+  setTimeout(()=>el.textContent=old, 1500);
+}
+function _openNodeForPath(src){
+  const node=GRAPH.nodes.find(n=>n.path&&n.path.replace(/\\/g,'/').endsWith(src.replace(/\\/g,'/')));
+  if(node){ selectNode(node); animTo(node.rect.x+node.rect.w/2, node.rect.y+node.rect.h/2, 2.5); }
+  else { alert('Node for '+src+' not currently on the map.'); }
+}
 function _renderMath(){
-  let h='';
-  let curCat='';
+  let h=''; let curCat='';
   for(const e of MATH_DICT){
-    if(e.cat!==curCat){
-      curCat=e.cat;
-      h+='<div class="dict-alpha">'+e.cat+'</div>';
-    }
+    if(e.cat!==curCat){ curCat=e.cat; h+='<div class="dict-alpha">'+e.cat+'</div>'; }
+    const nameJ=JSON.stringify(e.name);
+    const srcLink=e.src
+      ?'<a href="#" class="math-src-link" onclick="_openNodeForPath('+JSON.stringify(e.src)+');return false;" title="Jump to file in map">📂 '+escapeHtml(e.src.split('/').pop())+'</a>'
+      :'<span class="math-src-link" style="color:#3a5070;font-style:italic">theoretical</span>';
     h+='<div class="math-entry">'
       +'<div class="math-name">'+escapeHtml(e.name)+'</div>'
-      +'<div class="math-formula">'+escapeHtml(e.formula)+'</div>'
+      +'<div class="math-formula" style="position:relative">'
+      +'<button class="math-copy-btn" onclick="_copyMathFormula(MATH_DICT.find(x=>x.name==='+nameJ+').formula)">📋</button>'
+      +escapeHtml(e.formula)+'</div>'
       +'<div class="math-desc">'+escapeHtml(e.desc)+'</div>'
+      +'<div class="math-src-row">'+srcLink+'</div>'
       +'</div>';
   }
   return h;
@@ -1684,7 +2203,7 @@ function updateHud(){
   rendered.forEach(r=>{ if(!r.expanded){ if(!best||r.sw*r.sh>best.sw*best.sh) best=r; } });
   crumbs.innerHTML = flowSet ? `<b style="color:#c46bd6">tracing ${nameById(flowSrc)}</b>` : "";
   // gen date only in zoomlbl now
-  zoomlbl.textContent = GRAPH.generated ? ("gen "+GRAPH.generated) : "";
+  const _zv=(cam.scale*100/0.2|0)/100; zoomlbl.textContent = _zv+"×";
 
   // ── leaderboard ──
   const KIND_ORDER=['system','file','module','fn','component'];
@@ -1777,42 +2296,56 @@ const SNAKE_SYSTEMS = {
   tone:   {label:'RAW Pipeline',   col:'#9b59d6', dim:'#2a1a40'},
   enc:    {label:'JXL Encoder',    col:'#d67c3a', dim:'#402010'},
   net:    {label:'Network',        col:'#7a8090', dim:'#202430'},
+  cache:  {label:'OPFS Cache',     col:'#a06030', dim:'#302010'},
   dec:    {label:'JXL Decoder',    col:'#3ab5d4', dim:'#103040'},
   browser:{label:'Browser Runtime',col:'#89b040', dim:'#202010'},
 };
 
-/* ms values are for 12 MP baseline; scaled proportionally for other sizes */
+/* ms values are for 12 MP baseline; scaled proportionally for other sizes.
+   mapId = node id in ecosystem-map (click stage → fly to that node) */
 const SNAKE_STAGES = [
   /* row 0 – RAW decode, left→right */
-  {id:'io',         l:'I/O Read',          sym:'📂', sys:'io',    ms12:5,    mem:+10,  row:0},
-  {id:'magic',      l:'Format detect',     sym:'λ',  sys:'parse', ms12:0.4,  mem:0,    row:0},
-  {id:'exif',       l:'EXIF / IFD parse',  sym:'λ',  sys:'parse', ms12:2,    mem:+0.5, row:0},
-  {id:'makernote',  l:'MakerNote',         sym:'λ',  sys:'parse', ms12:1,    mem:0,    row:0},
-  {id:'ljpeg',      l:'LJPEG decompress',  sym:'λ',  sys:'parse', ms12:42,   mem:+24,  row:0},
-  {id:'blk',        l:'Black/White level', sym:'λ',  sys:'tone',  ms12:3,    mem:0,    row:0},
-  {id:'demosaic',   l:'Demosaic (MHC)',    sym:'λ',  sys:'tone',  ms12:90,   mem:+48,  row:0, hot:true},
-  {id:'wb',         l:'White balance',     sym:'λ',  sys:'tone',  ms12:8,    mem:0,    row:0},
-  {id:'matrix',     l:'Colour matrix',     sym:'λ',  sys:'tone',  ms12:12,   mem:0,    row:0},
-  {id:'tone_lut',   l:'Tone LUT',          sym:'λ',  sys:'tone',  ms12:100,  mem:0,    row:0, hot:true},
-  {id:'sat',        l:'Saturation',        sym:'λ',  sys:'tone',  ms12:18,   mem:0,    row:0},
-  {id:'downscale',  l:'Downscale',         sym:'λ',  sys:'tone',  ms12:20,   mem:-36,  row:0},
-  {id:'rgba_out',   l:'→ RGBA8',           sym:'λ',  sys:'tone',  ms12:5,    mem:0,    row:0},
+  {id:'io',         l:'I/O Read',           sys:'io',    ms12:5,    mem:+10,  row:0, mapId:'we_process'},
+  {id:'magic',      l:'Format detect',      sys:'parse', ms12:0.4,  mem:0,    row:0, mapId:'we_process'},
+  {id:'exif',       l:'EXIF / IFD parse',   sys:'parse', ms12:2,    mem:+0.5, row:0, mapId:'exif'},
+  {id:'makernote',  l:'MakerNote',          sys:'parse', ms12:1,    mem:0,    row:0, mapId:'exif'},
+  {id:'ljpeg',      l:'LJPEG decompress',   sys:'parse', ms12:42,   mem:+24,  row:0, mapId:'we_process'},
+  {id:'blk',        l:'Black/White level',  sys:'tone',  ms12:3,    mem:0,    row:0, mapId:'we_process'},
+  {id:'demosaic',   l:'Demosaic (MHC)',     sys:'tone',  ms12:90,   mem:+48,  row:0, hot:true, mapId:'d_mhc'},
+  {id:'wb',         l:'White balance',      sys:'tone',  ms12:8,    mem:0,    row:0, mapId:'p_tone'},
+  {id:'matrix',     l:'Colour matrix',      sys:'tone',  ms12:12,   mem:0,    row:0, mapId:'p_tone'},
+  {id:'lut_build',  l:'LUT build',          sys:'tone',  ms12:5,    mem:0,    row:0, mapId:'p_tone'},
+  {id:'tone_lut',   l:'LUT apply',          sys:'tone',  ms12:95,   mem:0,    row:0, hot:true, mapId:'p_tone'},
+  {id:'sat',        l:'Saturation',         sys:'tone',  ms12:18,   mem:0,    row:0, mapId:'p_tone'},
+  {id:'downscale',  l:'Downscale',          sys:'tone',  ms12:20,   mem:-36,  row:0, mapId:'we_process'},
+  {id:'rgba_out',   l:'→ RGBA8',            sys:'tone',  ms12:5,    mem:0,    row:0, mapId:'we_process'},
 
   /* row 1 – JXL encode + transit, right→left (stored L→R, rendered reversed) */
-  {id:'jxl_setup',  l:'JXL setup',         sym:'λ',  sys:'enc',   ms12:5,    mem:+2,   row:1},
-  {id:'jxl_enc',    l:'JXL Encode',        sym:'λ',  sys:'enc',   ms12:367,  mem:-46,  row:1, hot:true},
-  {id:'net_send',   l:'Network / OPFS',    sym:'λ',  sys:'net',   ms12:150,  mem:0,    row:1},
-  {id:'fetch',      l:'Fetch stream',      sym:'λ',  sys:'browser',ms12:30,  mem:+2,   row:1},
+  {id:'jxl_setup',  l:'JXL setup',          sys:'enc',   ms12:5,    mem:+2,   row:1, mapId:'enc_rs'},
+  {id:'jxl_enc',    l:'JXL encode',         sys:'enc',   ms12:367,  mem:-46,  row:1, hot:true, mapId:'enc_rs'},
+  {id:'net_send',   l:'Network',            sys:'net',   ms12:120,  mem:0,    row:1, mapId:'web'},
+  {id:'opfs_cache', l:'OPFS write',         sys:'cache', ms12:30,   mem:0,    row:1, mapId:'jxl_cache'},
+  {id:'fetch',      l:'Fetch stream',       sys:'browser',ms12:30,  mem:+2,   row:1, mapId:'web'},
 
   /* row 2 – Browser JXL decode, left→right */
-  {id:'sched',      l:'Scheduler',         sym:'λ',  sys:'browser',ms12:1,   mem:0,    row:2},
-  {id:'wasm_push',  l:'WASM chunk push',   sym:'λ',  sys:'dec',   ms12:10,   mem:+1,   row:2},
-  {id:'dc_frame',   l:'DC frame',          sym:'λ',  sys:'dec',   ms12:30,   mem:+48,  row:2},
-  {id:'ac_frame',   l:'AC refinement',     sym:'λ',  sys:'dec',   ms12:70,   mem:0,    row:2, hot:true},
-  {id:'display',    l:'Canvas display',    sym:'λ',  sys:'browser',ms12:5,   mem:0,    row:2},
+  {id:'decode_hdr', l:'JXL header parse',   sys:'dec',   ms12:5,    mem:+1,   row:2, mapId:'df_prog'},
+  {id:'sched',      l:'Scheduler',          sys:'browser',ms12:1,   mem:0,    row:2, mapId:'jxl_worker'},
+  {id:'wasm_push',  l:'WASM chunk push',    sys:'dec',   ms12:10,   mem:+1,   row:2, mapId:'jxl_worker'},
+  {id:'dc_frame',   l:'DC frame',           sys:'dec',   ms12:30,   mem:+48,  row:2, mapId:'df_prog'},
+  {id:'ac_frame',   l:'AC refinement',      sys:'dec',   ms12:70,   mem:0,    row:2, hot:true, mapId:'df_prog'},
+  {id:'display',    l:'Canvas display',     sys:'browser',ms12:5,   mem:0,    row:2, mapId:'web'},
 ];
-
 const SNAKE_PROBES = [
+  {id:'p_lut_build',stage:'lut_build',
+   label:'LUT split + sRGB EOTF lerp',
+   icon:'⚡',
+   date:'2026-06-19', branch:'GeneralImprovements19062026',
+   desc:'Split ensure_lut pre/post phases (−65% tone-drag, −35% WB-drag). sRGB EOTF: per-entry powf → OnceLock lerp (91% faster).',
+   a_label:'Full rebuild (A)', a_ms:7.5,
+   b_label:'Split+EOTF (B)', b_ms:0.7,
+   speedup:'10.7×', gate:'≥2×', status:'PASS',
+   source:'crates/raw-pipeline/src/pipeline.rs'},
+
   {id:'p_downscale', stage:'downscale',
    label:'downscale_reciprocal_flip.rs',
    icon:'⚡',
@@ -1877,8 +2410,32 @@ const SNAKE_PROBES = [
 
 /* ─── state ─────────────────────────────────────────────────────────────── */
 let snakeOpen=false, snakeLog=true, snakeMp=12;
-let snakeAnimating=false, snakeAnimPos=0, snakeAnimRaf=null;
+let snakeAnimating=false, snakeAnimPaused=false, snakeAnimRaf=null;
+let snakeAnimMs=0, snakeAnimSpeed=0.10, snakeAnimLastT=null;
 let snakeResizeObs=null;
+
+function animTotalMs(){
+  return [0,1,2].map(r=>SNAKE_STAGES.filter(s=>s.row===r).reduce((s,st)=>s+stageMs(st),0)).reduce((a,b)=>a+b,0);
+}
+function animDotPos(ms){
+  const all=[...SNAKE_STAGES.filter(s=>s.row===0),...SNAKE_STAGES.filter(s=>s.row===1),...SNAKE_STAGES.filter(s=>s.row===2)];
+  const total=all.reduce((s,st)=>s+stageMs(st),0);
+  let t=((ms%total)+total)%total;
+  for(const st of all){ const m=stageMs(st); if(t<=m) return {stage:st,within:t/m}; t-=m; }
+  return {stage:all[all.length-1],within:1};
+}
+function snakeNavigate(mapId){
+  if(!mapId) return;
+  closeSnake();
+  setTimeout(function(){
+    var n=typeof N!=='undefined'?N.get(mapId):null;
+    if(n&&n.rect){ animTo(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2,Math.min(8,(W*0.5)/n.rect.w),{slow:true}); selectNode(n); }
+  },720);
+}
+function snakeNavigateStage(sid){
+  const st=SNAKE_STAGES.find(s=>s.id===sid);
+  if(st&&st.mapId) snakeNavigate(st.mapId);
+}
 
 /* ─── open / close ──────────────────────────────────────────────────────── */
 function openSnake(){
@@ -1920,7 +2477,7 @@ function toVisW(ms, totalMs, availW, useLog){
 function rowStages(row){ return SNAKE_STAGES.filter(s=>s.row===row); }
 
 /* ─── SVG render ────────────────────────────────────────────────────────── */
-const ROW_H=60, CONN_H=34, MEM_H=68, AXIS_H=22,
+const ROW_H=88, CONN_H=44, MEM_H=88, AXIS_H=28,
       PAD_L=12, PAD_R=12, PAD_T=10;
 
 function renderSnake(){
@@ -1968,7 +2525,7 @@ function renderSnake(){
   const rowLabels=['RAW Decode →','← JXL Encode + Network','Browser Decode →'];
   for(let r=0;r<3;r++){
     const y=rowY[r];
-    s+=`<text x="${PAD_L}" y="${y-3}" font-size="9" fill="#4a6080" font-family="ui-sans-serif,sans-serif" letter-spacing=".8" font-weight="600" text-transform="uppercase">${rowLabels[r]}</text>`;
+    s+=`<text x="${PAD_L}" y="${y-3}" font-size="13" fill="#5a7a9a" font-family="ui-sans-serif,sans-serif" letter-spacing=".5" font-weight="700" font-weight="600" text-transform="uppercase">${rowLabels[r]}</text>`;
   }
 
   // Stage rectangles
@@ -1997,16 +2554,16 @@ function renderSnake(){
       s+=`<g clip-path="url(#${clipId})">`;
 
       // Symbol circle
-      const sym=st.sym==='λ'?'λ':'?';
-      s+=`<circle cx="${rx+14}" cy="${y+18}" r="9" fill="${col}" opacity=".25"/>`;
-      s+=`<text x="${rx+14}" y="${y+23}" text-anchor="middle" font-size="10" fill="${col}" font-family="ui-monospace,monospace">${sym}</text>`;
+      const sym='λ';
+      s+=`<circle cx="${rx+14}" cy="${y+26}" r="11" fill="${col}" opacity=".25"/>`;
+      s+=`<text x="${rx+14}" y="${y+31}" text-anchor="middle" font-size="13" fill="${col}" font-family="ui-monospace,monospace">${sym}</text>`;
 
       // Stage label
       const labelX=rx+(w>70?22:w/2);
       const anchor=w>70?'start':'middle';
       if(w>36){
-        s+=`<text x="${labelX+(w>70?4:0)}" y="${y+22}" text-anchor="${anchor}"
-              font-size="${w>80?11:w>50?10:9}" fill="#c6d8f0"
+        s+=`<text x="${labelX+(w>70?4:0)}" y="${y+34}" text-anchor="${anchor}"
+              font-size="${w>80?13:w>50?12:10}" fill="#c6d8f0"
               font-family="ui-sans-serif,sans-serif" font-weight="500">${escapeHtml(st.l)}</text>`;
       }
 
@@ -2014,16 +2571,16 @@ function renderSnake(){
       const ms=stageMs(st);
       const msStr=ms<1?ms.toFixed(1)+'ms':ms<100?(ms|0)+'ms':(ms|0)+'ms';
       if(w>30){
-        s+=`<text x="${rx+w-5}" y="${y+ROW_H-6}" text-anchor="end"
-              font-size="9" fill="${col}" opacity=".9" font-family="ui-monospace,monospace">${msStr}</text>`;
+        s+=`<text x="${rx+w-5}" y="${y+ROW_H-8}" text-anchor="end"
+              font-size="14" fill="${col}" opacity=".9" font-family="ui-monospace,monospace">${msStr}</text>`;
       }
 
       // Memory delta badge
       if(st.mem!==0&&w>50){
         const mc=st.mem>0?'#56a854':'#c44a4a';
         const ms2=st.mem>0?'+'+st.mem:st.mem;
-        s+=`<text x="${rx+5}" y="${y+ROW_H-6}" text-anchor="start"
-              font-size="9" fill="${mc}" opacity=".85" font-family="ui-monospace,monospace">${ms2}MB</text>`;
+        s+=`<text x="${rx+5}" y="${y+ROW_H-8}" text-anchor="start"
+              font-size="11" fill="${mc}" opacity=".85" font-family="ui-monospace,monospace">${ms2}MB</text>`;
       }
 
       s+='</g>';
@@ -2074,13 +2631,13 @@ function renderSnake(){
     s+=`<circle cx="${probeX}" cy="${probeBotY}" r="7" fill="#1a1800" stroke="#f5c518" stroke-width="1.5"
           class="snake-probe" data-probe="${probe.id}" style="cursor:pointer" opacity=".95" filter="url(#glow)"/>`;
     // Lightning bolt in circle
-    s+=`<text x="${probeX}" y="${probeBotY+4}" text-anchor="middle" font-size="9"
+    s+=`<text x="${probeX}" y="${probeBotY+4}" text-anchor="middle" font-size="12"
           fill="#f5c518" style="pointer-events:none">⚡</text>`;
     // Small label above needle
     if(item.w>60){
       const shortLbl=probe.label.replace(/\.rs$/,'').slice(-18);
       s+=`<text x="${probeX}" y="${probeTopY-3}" text-anchor="middle"
-            font-size="8" fill="#f5c518" opacity=".7" font-family="ui-monospace,monospace">${shortLbl}</text>`;
+            font-size="11" fill="#f5c518" opacity=".7" font-family="ui-monospace,monospace">${shortLbl}</text>`;
     }
   }
 
@@ -2120,9 +2677,9 @@ function renderSnake(){
     s+=`<path d="${lPath}" fill="none" stroke="#3ab5d4" stroke-width="1.5" opacity=".7"/>`;
 
     // Labels
-    s+=`<text x="${PAD_L}" y="${memY+9}" font-size="9" fill="#4a6080" font-family="ui-sans-serif,sans-serif" letter-spacing=".5">HEAP MB</text>`;
-    s+=`<text x="${PAD_L+avail}" y="${memY+9}" text-anchor="end" font-size="9" fill="#3ab5d4" font-family="ui-monospace,monospace">${maxMem}MB</text>`;
-    s+=`<text x="${PAD_L+2}" y="${memPx(maxMem)-3}" font-size="8" fill="#3ab5d4" opacity=".7" font-family="ui-monospace,monospace">▲${maxMem}MB</text>`;
+    s+=`<text x="${PAD_L}" y="${memY+9}" font-size="13" fill="#5a7a9a" font-family="ui-sans-serif,sans-serif" letter-spacing=".5" font-weight="600">HEAP MB</text>`;
+    s+=`<text x="${PAD_L+avail}" y="${memY+9}" text-anchor="end" font-size="13" fill="#3ab5d4" font-family="ui-monospace,monospace">${maxMem}MB</text>`;
+    s+=`<text x="${PAD_L+2}" y="${memPx(maxMem)-3}" font-size="11" fill="#3ab5d4" opacity=".7" font-family="ui-monospace,monospace">▲${maxMem}MB</text>`;
 
     // Tick at each stage with dot
     for(let i=0;i<pts.length;i++){
@@ -2143,29 +2700,28 @@ function renderSnake(){
       const ms=totalMs*t;
       const x=PAD_L+t*avail;
       s+=`<line x1="${x}" y1="${y}" x2="${x}" y2="${y+4}" stroke="#4a6080" stroke-width="1"/>`;
-      s+=`<text x="${x}" y="${y+13}" text-anchor="middle" font-size="8"
+      s+=`<text x="${x}" y="${y+13}" text-anchor="middle" font-size="12"
             fill="#4a6080" font-family="ui-monospace,monospace">${(ms|0)}ms</text>`;
     }
-    s+=`<text x="${PAD_L+avail/2}" y="${y+AXIS_H-2}" text-anchor="middle" font-size="8"
+    s+=`<text x="${PAD_L+avail/2}" y="${y+AXIS_H-2}" text-anchor="middle" font-size="12"
           fill="#2a3a50" font-family="ui-sans-serif,sans-serif">Browser decode path (ms, ${snakeMp} MP, ${snakeLog?'log':'linear'} scale)</text>`;
   }
 
   // Animation packet placeholder (drawn by animateSnake if active)
   if(snakeAnimating){
-    const t=snakeAnimPos; // 0..1 across full pipeline
-    const stages3=SNAKE_STAGES.length;
-    const si=Math.min(stages3-1, (t*stages3)|0);
-    const st=SNAKE_STAGES[si];
-    const ri=st.row;
-    const rowData=rows[ri];
-    const item=rowData.find(r=>r.st.id===st.id);
-    if(item){
-      const within=(t*stages3)%1;
-      const rx=PAD_L+(ri===1?(avail-item.x-item.w):item.x);
-      const px=ri===1?(rx+item.w-within*item.w):(rx+within*item.w);
-      const py=rowY[ri]+ROW_H/2;
-      s+=`<circle cx="${px}" cy="${py}" r="7" fill="${SNAKE_SYSTEMS[st.sys].col}" opacity=".9" filter="url(#glow2)"/>`;
-      s+=`<circle cx="${px}" cy="${py}" r="4" fill="#ffffff" opacity=".7"/>`;
+    const dp=animDotPos(snakeAnimMs);
+    if(dp){
+      const st=dp.stage; const ri=st.row;
+      const rowData=rows[ri];
+      const item=rowData.find(r=>r.st.id===st.id);
+      if(item){
+        const within=dp.within;
+        const rx=PAD_L+(ri===1?(avail-item.x-item.w):item.x);
+        const px=ri===1?(rx+item.w-within*item.w):(rx+within*item.w);
+        const py=rowY[ri]+ROW_H/2;
+        s+=`<circle cx="${px}" cy="${py}" r="9" fill="${SNAKE_SYSTEMS[st.sys].col}" opacity=".9" filter="url(#glow2)"/>`;
+        s+=`<circle cx="${px}" cy="${py}" r="5" fill="#ffffff" opacity=".75"/>`;
+      }
     }
   }
 
@@ -2181,6 +2737,14 @@ function renderSnake(){
         e.stopPropagation();
         const pid=this.dataset.probe;
         openProbePopup(pid,e.clientX,e.clientY);
+      });
+    });
+    // Stage click → navigate to map node
+    newSvg.querySelectorAll('rect[id^="sr_"]').forEach(el=>{
+      el.addEventListener('click',function(e){
+        e.stopPropagation();
+        const sid=this.id.slice(3);
+        snakeNavigateStage(sid);
       });
     });
     // Stage hover tooltip
@@ -2234,21 +2798,48 @@ function openProbePopup(pid,cx,cy){
 
 /* ─── animation ────────────────────────────────────────────────────────── */
 function startSnakeAnim(){
-  snakeAnimating=true; snakeAnimPos=0;
-  document.getElementById('snake-anim').textContent='■ stop';
-  document.getElementById('snake-anim').classList.add('active');
-  function tick(){
-    snakeAnimPos=(snakeAnimPos+0.004)%1;
+  if(snakeAnimating&&!snakeAnimPaused) return;
+  if(snakeAnimPaused){ snakeAnimPaused=false; 
+    const pb=document.getElementById('snake-pause'); if(pb) pb.textContent='⏸'; return;
+  }
+  snakeAnimating=true; snakeAnimPaused=false; snakeAnimLastT=null;
+  if(snakeAnimMs>=animTotalMs()) snakeAnimMs=0;
+  const ab=document.getElementById('snake-anim');
+  if(ab){ ab.textContent='⏹'; ab.classList.add('active'); }
+  function tick(t){
+    if(!snakeAnimating) return;
+    if(!snakeAnimPaused){
+      if(snakeAnimLastT!==null) snakeAnimMs+=(t-snakeAnimLastT)*snakeAnimSpeed;
+      snakeAnimLastT=t;
+      if(snakeAnimMs>=animTotalMs()) snakeAnimMs=0;
+    } else { snakeAnimLastT=t; }
+    const td=document.getElementById('snake-time-disp');
+    if(td) td.textContent=snakeAnimMs.toFixed(0)+(snakeMp===12?'ms':'ms @'+snakeMp+'MP');
     renderSnake();
     snakeAnimRaf=requestAnimationFrame(tick);
   }
   snakeAnimRaf=requestAnimationFrame(tick);
 }
+function pauseSnakeAnim(){
+  if(!snakeAnimating) return;
+  snakeAnimPaused=!snakeAnimPaused;
+  const pb=document.getElementById('snake-pause');
+  if(pb) pb.textContent=snakeAnimPaused?'▶':'⏸';
+}
 function stopSnakeAnim(){
-  snakeAnimating=false;
+  snakeAnimating=false; snakeAnimPaused=false; snakeAnimMs=0; snakeAnimLastT=null;
   if(snakeAnimRaf){ cancelAnimationFrame(snakeAnimRaf); snakeAnimRaf=null; }
-  const b=document.getElementById('snake-anim');
-  if(b){ b.textContent='▶ animate'; b.classList.remove('active'); }
+  const ab=document.getElementById('snake-anim'); if(ab){ ab.textContent='▶'; ab.classList.remove('active'); }
+  const pb=document.getElementById('snake-pause'); if(pb) pb.textContent='⏸';
+  const td=document.getElementById('snake-time-disp'); if(td) td.textContent='—';
+  renderSnake();
+}
+function updateSpeedFromSlider(){
+  const sl=document.getElementById('snake-speed-sl');
+  const lbl=document.getElementById('snake-speed-lbl');
+  if(!sl) return;
+  snakeAnimSpeed=Math.pow(10,(parseFloat(sl.value)-100)/100);
+  if(lbl) lbl.textContent='×'+snakeAnimSpeed.toFixed(snakeAnimSpeed<0.1?3:2);
 }
 
 /* ─── wiring ────────────────────────────────────────────────────────────── */
@@ -2269,12 +2860,320 @@ document.getElementById('snake-mp').onchange=function(){
 document.getElementById('snake-anim').onclick=function(){
   if(snakeAnimating) stopSnakeAnim(); else startSnakeAnim();
 };
+(function(){
+  const pb=document.getElementById('snake-pause');
+  if(pb) pb.onclick=pauseSnakeAnim;
+  const sl=document.getElementById('snake-speed-sl');
+  if(sl){ sl.oninput=updateSpeedFromSlider; updateSpeedFromSlider(); }
+}());
 
 // Close probe popup on outside click
 document.addEventListener('click',function(e){
   const pop=document.getElementById('probepopup');
   if(pop&&pop.style.display!=='none'&&!pop.contains(e.target)) pop.style.display='none';
 });
+
+/* ── Perf Leaderboard ──────────────────────────────────────────────────── */
+const PERF_LOG = [
+  {id:'tone_simd',         who:'David', date:'2026-06-14',
+   desc:'AVX2 SIMD tone/LUT apply, wasm128 fallback',
+   ratio:33, hrs:8,  msSaved:513, memMB:0,   fileSizePct:null},
+  {id:'jxl_o2',            who:'David', date:'2026-06-15',
+   desc:'Fix libjxl build: missing /O2 → 30× enc/dec regression reversed',
+   ratio:9.5, hrs:3, msSaved:6222, memMB:0,  fileSizePct:null},
+  {id:'lut_split',         who:'David', date:'2026-06-19',
+   desc:'Split ensure_lut pre/post: tone-drag −65%, WB-drag −35%',
+   ratio:2.8, hrs:4,  msSaved:5,   memMB:0,  fileSizePct:null},
+  {id:'srgb_eotf',         who:'David', date:'2026-06-19',
+   desc:'sRGB EOTF: per-entry powf → OnceLock lerp (91% faster build)',
+   ratio:10.7, hrs:2, msSaved:14,  memMB:0,  fileSizePct:null},
+  {id:'framestats_fusion', who:'David', date:'2026-06-19',
+   desc:'Fused frame-stats + RGB histogram (single RGBA8 pass, −26% BW)',
+   ratio:1.36, hrs:4, msSaved:14,  memMB:-6, fileSizePct:null},
+  {id:'downscale_recip',   who:'David', date:'2026-06-19',
+   desc:'Integer downscale: divide → precomputed reciprocal multiply',
+   ratio:1.13, hrs:2, msSaved:6,   memMB:0,  fileSizePct:null},
+  {id:'dc_progressive',    who:'Jon',   date:'2026-06-10',
+   desc:'DC-first progressive decode: visible frame in first ~2% of bytes',
+   ratio:2.5, hrs:20, msSaved:1560, memMB:0, fileSizePct:-58},
+  {id:'decoder_pool',      who:'David', date:'2026-06-19',
+   desc:'4-decoder LRU pool: skip ~40ms init on rapid multi-image loads',
+   ratio:1.0, hrs:5,  msSaved:90,  memMB:+8, fileSizePct:null},
+  {id:'tone_matrix_fusion',who:'David', date:'2026-06-19',
+   desc:'Fused colour matrix × saturation (M\'=S·M) in scalar + SIMD paths',
+   ratio:1.5, hrs:3,  msSaved:12,  memMB:0,  fileSizePct:null},
+];
+
+function renderPerfLb(){
+  const body=document.getElementById('plb-body');
+  const sumEl=document.getElementById('plb-summary');
+  if(!body) return;
+
+  const byPerson={};
+  for(const e of PERF_LOG){
+    if(!byPerson[e.who]) byPerson[e.who]=[];
+    byPerson[e.who].push(e);
+  }
+
+  let totalMs=0, totalHrs=0;
+  PERF_LOG.forEach(e=>{ totalMs+=e.msSaved||0; totalHrs+=e.hrs||0; });
+  if(sumEl) sumEl.textContent=
+    `−${(totalMs/1000).toFixed(1)}s pipeline · ⏱ ${totalHrs}h total`;
+
+  let html2='';
+  for(const [who, entries] of Object.entries(byPerson)){
+    entries.sort((a,b)=>a.date.localeCompare(b.date));
+    const pMs=entries.reduce((s,e)=>s+(e.msSaved||0),0);
+    const pHrs=entries.reduce((s,e)=>s+(e.hrs||0),0);
+    const dates=entries.map(e=>e.date);
+    const dStart=dates[0], dEnd=dates[dates.length-1];
+    const daySpan=Math.max(1,(new Date(dEnd)-new Date(dStart))/(1000*86400)+1);
+    const hpd=(pHrs/daySpan).toFixed(1);
+    const cph=(pHrs>0?(entries.length/pHrs).toFixed(2):'—');
+
+    // Sparkline (ratio values)
+    const ratios=entries.map(e=>e.ratio||1);
+    const rMax=Math.max(...ratios, 1.5);
+    const SW=80, SH=24;
+    const pts=ratios.map((r,i)=>{
+      const x=Math.round(i*(SW-4)/(Math.max(ratios.length-1,1)))+2;
+      const y=Math.round(SH-4-(r-1)/(rMax-1+.001)*(SH-8))+2;
+      return x+','+y;
+    }).join(' ');
+    const sparkline=`<svg width="${SW}" height="${SH}" style="overflow:visible">
+      <polyline points="${pts}" fill="none" stroke="#89b040" stroke-width="1.5" stroke-linejoin="round"/>
+      ${ratios.map((r,i)=>{
+        const x=Math.round(i*(SW-4)/(Math.max(ratios.length-1,1)))+2;
+        const y=Math.round(SH-4-(r-1)/(rMax-1+.001)*(SH-8))+2;
+        return `<circle cx="${x}" cy="${y}" r="2.5" fill="#89b040"/>`;
+      }).join('')}
+    </svg>`;
+
+    html2+=`<div class="plb-person">
+      <div class="plb-person-hdr">
+        <span class="plb-avatar">${who[0]}</span>
+        <span class="plb-pname">${who}</span>
+        <span class="plb-pstats">
+          −${(pMs/1000).toFixed(2)}s saved · ${pHrs}h · ${hpd}h/day · ${cph} wins/hr
+        </span>
+        <span class="plb-sparkline">${sparkline}</span>
+      </div>
+      <div class="plb-entries">`;
+
+    for(const e of entries){
+      const msTag=e.msSaved?`<span class="plb-entry-ms">−${e.msSaved}ms</span>`:'<span class="plb-entry-ms" style="color:var(--dim)">—</span>';
+      const memTag=e.memMB!==0&&e.memMB!=null
+        ?`<span class="plb-entry-mem ${e.memMB>0?'mem-pos':'mem-neg'}">${e.memMB>0?'+':''}${e.memMB}MB</span>`
+        :'<span class="plb-entry-mem" style="color:var(--dim)">—</span>';
+      const fsTag=e.fileSizePct!=null
+        ?`<span class="plb-entry-fs fs-neg">${e.fileSizePct}%</span>`
+        :'<span class="plb-entry-fs" style="color:var(--dim)">—</span>';
+      html2+=`<div class="plb-entry">
+          <span class="plb-entry-id">${e.id}</span>
+          <span class="plb-entry-desc">${e.desc}</span>
+          ${msTag}${memTag}${fsTag}
+          <span class="plb-entry-date">${e.date.slice(5)}</span>
+        </div>`;
+    }
+    html2+='</div></div>';
+  }
+  body.innerHTML=html2;
+}
+
+(function(){
+  document.addEventListener('DOMContentLoaded',function(){
+    const btn=document.getElementById('perflbbtn');
+    const panel=document.getElementById('perflb');
+    const cls=document.getElementById('perflb-close');
+    if(!btn||!panel) return;
+    btn.onclick=function(){
+      const open=panel.classList.toggle('open');
+      if(open) renderPerfLb();
+    };
+    if(cls) cls.onclick=function(){ panel.classList.remove('open'); };
+    panel.addEventListener('click',function(e){ if(e.target===panel) panel.classList.remove('open'); });
+  });
+}());
+/* ── end Perf Leaderboard ──────────────────────────────────────────────── */
+
+/* ── Intro Overlay ─────────────────────────────────────────────────────── */
+(function(){
+  const PAGES = ['ip0','ip1','ip2'];
+  let curPage = 0;
+
+  function showPage(n){
+    n = Math.max(0, Math.min(PAGES.length-1, n));
+    curPage = n;
+    PAGES.forEach((id,i)=>{
+      const el=document.getElementById(id);
+      if(el) el.classList.toggle('active', i===n);
+    });
+    const dots=document.querySelectorAll('.intro-dot');
+    dots.forEach((d,i)=>d.classList.toggle('active', i===n));
+    const prev=document.getElementById('intro-prev');
+    const next=document.getElementById('intro-next');
+    if(prev) prev.style.opacity = n===0?'.3':'1';
+    if(next) next.textContent = n===PAGES.length-1 ? 'Explore map →' : 'Next →';
+  }
+
+  function openIntro(){
+    const ov=document.getElementById('intro-overlay');
+    if(ov){ ov.classList.add('open'); showPage(0); startIntroParticles(); }
+  }
+  function closeIntro(){
+    const ov=document.getElementById('intro-overlay');
+    if(ov){ ov.classList.remove('open'); stopIntroParticles(); }
+    localStorage.setItem('intro_seen','1');
+  }
+
+  function introNavigate(mapId){
+    closeIntro();
+    setTimeout(function(){
+      var n=typeof N!=='undefined'?N.get(mapId):null;
+      if(n&&n.rect){ animTo(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2,Math.min(8,(W*0.5)/n.rect.w),{slow:true}); selectNode(n); }
+    }, 720);
+  }
+  window.introNavigate = introNavigate;
+
+  /* ── mandala ring labels ──────────────────────────────────────────── */
+  const RING_MSG = [
+    'Outer ring: RAW decode pipeline — ORF, CR2, DNG sensor data',
+    'Middle ring: Tone & colour — white balance, LUT, saturation, SIMD',
+    'Inner ring: JXL encode / decode — rANS entropy, progressive DC/AC',
+  ];
+
+  document.addEventListener('DOMContentLoaded', function(){
+    /* build dots */
+    const dotsEl=document.getElementById('intro-dots');
+    if(dotsEl){
+      dotsEl.innerHTML='';
+      PAGES.forEach((_,i)=>{
+        const d=document.createElement('span');
+        d.className='intro-dot'+(i===0?' active':'');
+        d.onclick=()=>showPage(i);
+        dotsEl.appendChild(d);
+      });
+    }
+
+    /* nav buttons */
+    const prevBtn=document.getElementById('intro-prev');
+    const nextBtn=document.getElementById('intro-next');
+    const skipBtn=document.getElementById('intro-skip');
+    if(prevBtn) prevBtn.onclick=()=>showPage(curPage-1);
+    if(nextBtn) nextBtn.onclick=function(){
+      if(curPage===PAGES.length-1) closeIntro();
+      else showPage(curPage+1);
+    };
+    if(skipBtn) skipBtn.onclick=closeIntro;
+
+    /* close on bg click */
+    const ov=document.getElementById('intro-overlay');
+    if(ov) ov.onclick=function(e){ if(e.target===ov) closeIntro(); };
+
+    /* mandala ring click */
+    ['im-ring0','im-ring1','im-ring2'].forEach(function(id,i){
+      const ring=document.getElementById(id);
+      if(!ring) return;
+      ring.style.cursor='pointer';
+      ring.addEventListener('click',function(e){
+        e.stopPropagation();
+        const desc=document.getElementById('intro-mandala-desc');
+        if(desc){ desc.textContent=RING_MSG[i]; desc.style.opacity='1'; }
+      });
+    });
+
+    /* card expand toggle (pages 1 & 2) */
+    document.querySelectorAll('.intro-feat,.intro-rel-card').forEach(function(card){
+      card.addEventListener('click',function(e){
+        if(e.target.closest('.ifd-explore')) return; // let nav link pass
+        const wasExpanded=this.classList.contains('expanded');
+        // close siblings
+        this.closest('.intro-cards').querySelectorAll('.intro-feat,.intro-rel-card').forEach(function(c){
+          c.classList.remove('expanded');
+        });
+        if(!wasExpanded) this.classList.add('expanded');
+      });
+    });
+
+    /* share / info button */
+    const sbtn=document.getElementById('sharebtn');
+    if(sbtn) sbtn.onclick=openIntro;
+
+    /* auto-show on first visit */
+    if(!localStorage.getItem('intro_seen')){
+      setTimeout(openIntro, 600);
+    }
+
+    showPage(0);
+  });
+
+  /* ── particle system ──────────────────────────────────────────────── */
+  let ptRaf=null, particles=[];
+  const N_PARTICLES=90;
+
+  function startIntroParticles(){
+    const cv=document.getElementById('intro-particles');
+    if(!cv) return;
+    const bk=document.getElementById('intro-book');
+    cv.width=bk?bk.offsetWidth:640;
+    cv.height=bk?bk.offsetHeight:700;
+    particles=[];
+    for(let i=0;i<N_PARTICLES;i++) particles.push(makeParticle(cv,true));
+    function tick(){
+      ptRaf=requestAnimationFrame(tick);
+      const ctx=cv.getContext('2d');
+      ctx.clearRect(0,0,cv.width,cv.height);
+      for(let i=0;i<particles.length;i++){
+        const p=particles[i];
+        p.y-=p.vy;
+        p.x+=p.vx;
+        p.life--;
+        if(p.life<=0) { particles[i]=makeParticle(cv,false); continue; }
+        const a=Math.min(1,p.life/40)*p.alpha;
+        ctx.beginPath();
+        ctx.arc(p.x,p.y,p.r,0,6.283);
+        ctx.fillStyle=`rgba(${p.r2},${p.g2},${p.b2},${a})`;
+        ctx.fill();
+      }
+    }
+    ptRaf=requestAnimationFrame(tick);
+  }
+  function stopIntroParticles(){
+    if(ptRaf){ cancelAnimationFrame(ptRaf); ptRaf=null; }
+  }
+  function makeParticle(cv,init){
+    const cols=[[214,122,58],[78,161,211],[140,176,64],[196,107,214]];
+    const c=cols[(Math.random()*cols.length)|0];
+    return {
+      x:Math.random()*cv.width,
+      y:init?Math.random()*cv.height:cv.height+4,
+      vy:0.3+Math.random()*0.5,
+      vx:(Math.random()-.5)*0.4,
+      r:1+Math.random()*2,
+      r2:c[0],g2:c[1],b2:c[2],
+      alpha:0.15+Math.random()*0.35,
+      life:60+Math.random()*120,
+    };
+  }
+
+  /* ── mandala animation ──────────────────────────────────────────── */
+  let mandalaRaf=null, mandalaAngle=0;
+  function animateMandala(){
+    mandalaAngle+=0.3;
+    const r0=document.getElementById('im-ring0');
+    const r1=document.getElementById('im-ring1');
+    const r2=document.getElementById('im-ring2');
+    if(r0) r0.setAttribute('transform',`rotate(${mandalaAngle})`);
+    if(r1) r1.setAttribute('transform',`rotate(${-mandalaAngle*1.4})`);
+    if(r2) r2.setAttribute('transform',`rotate(${mandalaAngle*2.1})`);
+    mandalaRaf=requestAnimationFrame(animateMandala);
+  }
+  document.addEventListener('DOMContentLoaded',function(){
+    mandalaRaf=requestAnimationFrame(animateMandala);
+  });
+
+}());
+/* ── end Intro Overlay ──────────────────────────────────────────────────── */
 
 // Shift bottom HUD items when snake is open
 (function(){
@@ -2425,7 +3324,758 @@ With gratitude...`;
   };
 }());
 
+/* ── WALKTHROUGH ─────────────────────────────────────────── */
+(function(){
+  const STEPS=[
+    {icon:'🌍',title:'Welcome to the ecosystem map',body:'Scroll or pinch-zoom to explore. Drag to pan. Click any node for details.',target:null,pos:'center'},
+    {icon:'🔍',title:'Find anything instantly',body:'Type a module name, algorithm, or keyword — the map flies to it.',target:'#search',pos:'below'},
+    {icon:'🖱️',title:'Inspect any node',body:'Click a node to open the details panel. See connections, payloads, and file paths.',target:'#panel',pos:'left'},
+    {icon:'▶',title:'Trace data flow',body:'Click "Trace data flow" in the panel to follow data through the pipeline.',target:'#ptrace',pos:'left'},
+    {icon:'🔥',title:'Git heat map',body:'Watch 36 days of commit activity play back across the graph.',target:'#heatplayer',pos:'above'},
+    {icon:'◆',title:'Architectural seams',body:'Highlight the layer boundaries where data crosses system borders.',target:'#seamtoggle',pos:'below'},
+    {icon:'🐍',title:'Pipeline timing snake',body:'See real decode/encode stage timings scaled to your chosen megapixel count.',target:'#snakebtn',pos:'below'},
+    {icon:'📖',title:'Glossary & equations',body:'Browse the mathematical formulae that power this codec pipeline — with copy buttons.',target:'#dictbtn',pos:'below'},
+    {icon:'🎮',title:'Test your knowledge',body:'Play Pixel Surgeon and more games to learn the system through play.',target:'#gamebtn',pos:'below'},
+  ];
+  let cur=0;
+  const overlay=document.getElementById('wt-overlay');
+  const spot=document.getElementById('wt-spotlight');
+  const card=document.getElementById('wt-card');
+  function show(i){
+    cur=i; if(cur<0)cur=0; if(cur>=STEPS.length){ close(); return; }
+    const s=STEPS[cur];
+    document.getElementById('wt-icon').textContent=s.icon;
+    document.getElementById('wt-title').textContent=s.title;
+    document.getElementById('wt-body').textContent=s.body;
+    document.getElementById('wt-prev').style.display=cur===0?'none':'';
+    document.getElementById('wt-next').textContent=cur===STEPS.length-1?'Done ✓':'Next →';
+    const dots=document.getElementById('wt-step-indicator');
+    dots.innerHTML=STEPS.map((_,j)=>'<div class="wt-dot'+(j===cur?' active':'')+'"></div>').join('');
+    if(s.target){
+      const el=document.querySelector(s.target);
+      if(el){
+        const r=el.getBoundingClientRect();
+        const pad=8;
+        spot.style.cssText=`left:${r.left-pad}px;top:${r.top-pad}px;width:${r.width+pad*2}px;height:${r.height+pad*2}px`;
+        const cw=320, ch=200, margin=14;
+        let cx, cy;
+        if(s.pos==='below'){ cx=r.left+r.width/2-cw/2; cy=r.bottom+margin; }
+        else if(s.pos==='above'){ cx=r.left+r.width/2-cw/2; cy=r.top-ch-margin; }
+        else if(s.pos==='left'){ cx=r.left-cw-margin; cy=r.top+r.height/2-ch/2; }
+        else { cx=r.right+margin; cy=r.top+r.height/2-ch/2; }
+        cx=Math.max(10,Math.min(cx,window.innerWidth-cw-10));
+        cy=Math.max(10,Math.min(cy,window.innerHeight-ch-10));
+        card.style.cssText=`left:${cx}px;top:${cy}px`;
+      } else {
+        center();
+      }
+    } else { center(); spot.style.cssText='display:none'; }
+    overlay.classList.add('show');
+  }
+  function center(){ spot.style.cssText='display:none'; card.style.cssText='left:50%;top:50%;transform:translate(-50%,-50%)'; }
+  function close(){ overlay.classList.remove('show'); localStorage.setItem('wt_seen','1'); }
+  document.addEventListener('DOMContentLoaded',function(){
+    document.getElementById('wt-next').onclick=()=>show(cur+1);
+    document.getElementById('wt-prev').onclick=()=>show(cur-1);
+    document.getElementById('wt-skip').onclick=close;
+    document.getElementById('wt-bg').onclick=close;
+    document.getElementById('wt-reopen').onclick=()=>show(0);
+    setTimeout(()=>{ if(!localStorage.getItem('wt_seen')) show(0); }, 900);
+  });
+}());
+
+/* ═══════════════════════════════════════════════════════════
+   GAME HUB
+   ═══════════════════════════════════════════════════════════ */
+(function(){
+  document.addEventListener('DOMContentLoaded',function(){
+    const hub=document.getElementById('gamehub');
+    const gamebtn=document.getElementById('gamebtn');
+    if(gamebtn&&hub) gamebtn.onclick=()=>{ hub.classList.add('open'); ghShowSelect(); };
+    const ghc=document.getElementById('gh-close');
+    if(ghc&&hub){ ghc.onclick=()=>hub.classList.remove('open'); }
+    if(hub) hub.addEventListener('click',e=>{ if(e.target===hub) hub.classList.remove('open'); });
+  });
+}());
+
+function ghShowSelect(){
+  document.getElementById('gh-select').style.display='';
+  document.getElementById('gh-ps').classList.remove('active');
+  document.getElementById('gh-lb').classList.remove('active');
+}
+function ghStartGame(id, shh){
+  document.getElementById('gh-select').style.display='none';
+  document.getElementById('gh-lb').classList.remove('active');
+  if(id==='pixel-surgeon'){
+    document.getElementById('gh-ps').classList.add('active');
+    psInit(shh);
+  }
+}
+function ghPlayAgain(){
+  if(typeof _lastGameId!=='undefined') ghStartGame(_lastGameId, _lastSHH);
+  else ghShowSelect();
+}
+let _lastGameId='pixel-surgeon', _lastSHH=false;
+
+/* ─── Leaderboard helpers ─────────────────────────────────── */
+function ghGetLb(shh){ try{return JSON.parse(localStorage.getItem(shh?'gh_lb_shh':'gh_lb_ps')||'[]');}catch{return[];} }
+function ghAddScore(name,score,shh){
+  const key=shh?'gh_lb_shh':'gh_lb_ps';
+  const lb=ghGetLb(shh);
+  lb.push({name,score,date:new Date().toLocaleDateString()});
+  lb.sort((a,b)=>b.score-a.score);
+  lb.splice(20);
+  localStorage.setItem(key,JSON.stringify(lb));
+  return lb.findIndex(e=>e.name===name&&e.score===score);
+}
+let _ghLbMode='normal';
+function ghShowLb(score, shh, rounds){
+  _lastSHH=shh;
+  const name=localStorage.getItem('gh_player_name')||'You';
+  const rank=ghAddScore(name,score,shh);
+  document.getElementById('gh-select').style.display='none';
+  document.getElementById('gh-ps').classList.remove('active');
+  const lb=document.getElementById('gh-lb');
+  lb.classList.add('active');
+  document.getElementById('gh-lb-title').textContent=shh?'⚡ SHH Round Over':'\U0001f3c6 Game Over';
+  document.getElementById('gh-lb-score').textContent=score;
+  document.getElementById('gh-lb-rank').textContent=rank===0?'\U0001f947 #1 All-time high!':rank<3?'\U0001f948 Top 3!':'Rank #'+(rank+1);
+  _ghLbMode=shh?'shh':'normal';
+  ghRenderLbTable(_ghLbMode==='shh');
+  document.querySelectorAll('.gh-lb-tab').forEach((t,i)=>{
+    t.classList.toggle('active',i===(shh?1:0));
+  });
+}
+function ghShowLbTab(mode){
+  _ghLbMode=mode;
+  ghRenderLbTable(mode==='shh');
+  document.querySelectorAll('.gh-lb-tab').forEach((t,i)=>t.classList.toggle('active',i===(mode==='shh'?1:0)));
+}
+function ghRenderLbTable(shh){
+  const rows=ghGetLb(shh);
+  const myName=localStorage.getItem('gh_player_name')||'You';
+  let h='<div class="lb-row header"><div class="lb-rank-cell">#</div><div class="lb-name-cell">Player</div><div class="lb-pts">Score</div><div class="lb-date">Date</div></div>';
+  rows.slice(0,10).forEach((r,i)=>{
+    const you=r.name===myName;
+    h+=`<div class="lb-row${you?' you':''}"><div class="lb-rank-cell${i<3?' top3':''}">${i+1}</div><div class="lb-name-cell">${r.name}</div><div class="lb-pts">${r.score}</div><div class="lb-date">${r.date}</div></div>`;
+  });
+  if(!rows.length) h+='<div class="lb-row"><div style="grid-column:1/-1;color:#4a6a8a;font-size:11px;padding:8px">No scores yet — be the first!</div></div>';
+  document.getElementById('gh-lb-table').innerHTML=h;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PIXEL SURGEON
+   ═══════════════════════════════════════════════════════════ */
+const PS_CORRUPTIONS=[
+  {id:'tone_blown', label:'Blown highlights', stage:'Tone curve',
+   desc:'Pixel values clamped — sky detail lost, bright areas wash out', sym:'☀️',
+   symptoms:['Bright areas are flat and washed out','Sky/highlight detail is absent','Mid-tones look normal but peaks are cut']},
+  {id:'channel_swap', label:'Magenta cast', stage:'Colour matrix',
+   desc:'R and G channels transposed by faulty colour matrix', sym:'\U0001f7e3',
+   symptoms:['Overall magenta/purple tint across image','Green foliage appears purple','Skin tones are strongly shifted']},
+  {id:'blur_ema', label:'EMA trail blur', stage:'EMA decode',
+   desc:'Exponential moving average bleeds each row into the next', sym:'〰',
+   symptoms:['Horizontal smearing on vertical edges','Top of image cleaner than bottom','Trailing shadow behind shapes']},
+  {id:'dct_block', label:'8\xd78 blocking', stage:'DCT quantise',
+   desc:'Pixel coordinates rounded to 8px blocks — classic codec artifact', sym:'⬛',
+   symptoms:['Visible grid of 8\xd78 pixel blocks','Smooth gradients replaced by stepped rectangles','Block boundaries sharp and regular']},
+  {id:'gamma_skip', label:'Flat / grey-washed', stage:'sRGB EOTF',
+   desc:'Gamma linearisation skipped — image looks crushed and grey', sym:'\U0001f32b️',
+   symptoms:['Entire image appears grey and flat','Colours are correct hue but very desaturated','Blacks are not black — lifted to grey']},
+  {id:'wb_shift', label:'Blue cast', stage:'White balance',
+   desc:'White balance matrix offset — scene shifted toward blue', sym:'\U0001f535',
+   symptoms:['Strong blue tint across entire image','White areas appear light blue','Warm colours such as reds are suppressed']},
+];
+function psOpsForLevel(lvl){
+  if(lvl<=2) return PS_CORRUPTIONS.slice(0,3);
+  if(lvl<=4) return PS_CORRUPTIONS.slice(0,4);
+  if(lvl<=6) return PS_CORRUPTIONS.slice(0,5);
+  return PS_CORRUPTIONS;
+}
+
+let psS=null; // game state
+function psInit(shh){
+  _lastGameId='pixel-surgeon'; _lastSHH=shh;
+  psS={level:shh?10:1, score:0, lives:3, shh, rounds:0,
+       corruption:null, fractal:null, timer:null, timeLeft:0,
+       timeLimit:shh?8:20, ccRaf:null, solved:false};
+  document.getElementById('ps-shh-badge').style.display=shh?'':'none';
+  document.getElementById('ps-shh-info').classList.toggle('show', shh);
+  psUpdateLives();
+  psNextRound();
+}
+function psNextRound(){
+  if(psS.ccRaf){ cancelAnimationFrame(psS.ccRaf); psS.ccRaf=null; }
+  const cv=document.getElementById('ps-canvas');
+  cv.style.filter='';
+  document.getElementById('ps-victory').classList.remove('show');
+  clearInterval(psS.timer);
+  const prevCount=psOpsForLevel(Math.max(1,psS.level-1)).length;
+  const ops=psOpsForLevel(psS.level);
+  const isNew=ops.length>prevCount;
+  psS.corruption=ops[Math.floor(Math.random()*ops.length)];
+  psS.fractal=['mandelbrot','julia','sierpinski','plasma','barnsley'][Math.floor(Math.random()*5)];
+  psS.solved=false; psS.rounds++;
+  // New op banner
+  const banner=document.getElementById('ps-new-op-banner');
+  if(isNew && !psS.shh){
+    const newOp=ops[ops.length-1];
+    document.getElementById('ps-new-op-desc').textContent='New: '+newOp.label+' — '+newOp.stage;
+    banner.classList.add('show');
+    setTimeout(()=>banner.classList.remove('show'),3000);
+  } else { banner.classList.remove('show'); }
+  psDrawFractal(cv, psS.fractal);
+  psApplyCorruption(cv, psS.corruption.id);
+  psRenderOps(ops);
+  psRenderSymptoms(psS.corruption);
+  psUpdateHdr();
+  psStartTimer();
+}
+function psRenderSymptoms(c){
+  document.getElementById('ps-symptom-list').innerHTML=
+    c.symptoms.map(s=>'<div class="ps-symptom">'+s+'</div>').join('');
+}
+function psRenderOps(ops){
+  const prevOps=psOpsForLevel(Math.max(1,psS.level-1));
+  const newId=ops.length>prevOps.length?ops[ops.length-1].id:null;
+  document.getElementById('ps-ops-list').innerHTML=ops.map(op=>
+    '<div class="ps-op" data-id="'+op.id+'" onclick="psGuess(\''+op.id+'\')">'
+    +'<span class="ps-op-sym">'+op.sym+'</span>'
+    +'<div class="ps-op-text">'
+    +'<div class="ps-op-label">'+op.label+(op.id===newId&&!psS.shh?'<span class="ps-new-badge">NEW</span>':'')+'</div>'
+    +'<div class="ps-op-stage">Pipeline stage: '+op.stage+'</div>'
+    +'</div></div>'
+  ).join('');
+}
+function psUpdateHdr(){
+  document.getElementById('ps-level-badge').textContent=psS.shh?'SHH Mode':'Level '+psS.level;
+  document.getElementById('ps-score-val').textContent=psS.score;
+}
+function psUpdateLives(){
+  const hearts=document.querySelectorAll('.ps-heart');
+  hearts.forEach((h,i)=>h.classList.toggle('lost', i>=psS.lives));
+}
+function psStartTimer(){
+  const fill=document.getElementById('ps-timer-fill');
+  psS.timeLeft=psS.timeLimit;
+  fill.style.width='100%';
+  fill.style.backgroundPosition='0%';
+  psS.timer=setInterval(()=>{
+    psS.timeLeft-=0.1;
+    const pct=Math.max(0,psS.timeLeft/psS.timeLimit*100);
+    fill.style.width=pct+'%';
+    fill.style.backgroundPosition=(100-pct)+'%';
+    if(psS.timeLeft<=0){ clearInterval(psS.timer); psTimeout(); }
+  },100);
+}
+function psGuess(id){
+  if(psS.solved) return;
+  clearInterval(psS.timer);
+  const correct=id===psS.corruption.id;
+  const el=document.querySelector('.ps-op[data-id="'+id+'"]');
+  const corrEl=document.querySelector('.ps-op[data-id="'+psS.corruption.id+'"]');
+  if(correct){
+    psS.solved=true;
+    el.classList.add('correct');
+    const pts=Math.max(10, Math.floor(psS.timeLeft/psS.timeLimit*100)+psS.level*5);
+    psS.score+=pts;
+    psShowFeedback('✓ Correct! +'+pts+' pts', true);
+    psShowVictory(pts);
+    psColorCycle();
+    psFireConfetti();
+    setTimeout(()=>{
+      if(!psS.shh) psS.level++;
+      psNextRound();
+    }, 3200);
+  } else {
+    el.classList.add('wrong');
+    setTimeout(()=>el.classList.remove('wrong'),500);
+    corrEl&&corrEl.classList.add('correct');
+    psS.lives--;
+    psUpdateLives();
+    psShowFeedback('✗ That was: '+psS.corruption.stage, false);
+    if(psS.lives<=0){
+      setTimeout(psGameOver, 1200);
+    } else {
+      setTimeout(()=>{corrEl&&corrEl.classList.remove('correct'); psNextRound();},1500);
+    }
+  }
+}
+function psTimeout(){
+  if(psS.solved) return;
+  const corrEl=document.querySelector('.ps-op[data-id="'+psS.corruption.id+'"]');
+  corrEl&&corrEl.classList.add('correct');
+  psS.lives--;
+  psUpdateLives();
+  psShowFeedback('⏱ Time! It was: '+psS.corruption.stage, false);
+  if(psS.lives<=0){ setTimeout(psGameOver,1200); }
+  else { setTimeout(()=>{corrEl&&corrEl.classList.remove('correct'); psNextRound();},1500); }
+}
+function psShowVictory(pts){
+  const v=document.getElementById('ps-victory');
+  document.getElementById('ps-victory-pts').textContent='+'+pts+' pts — '+(psS.shh?'Round '+psS.rounds:'Level '+psS.level);
+  v.classList.add('show');
+}
+function psShowFeedback(msg, ok){
+  const fb=document.getElementById('ps-feedback');
+  fb.textContent=msg; fb.className='show '+(ok?'ok':'err');
+  setTimeout(()=>fb.className='',2500);
+}
+function psColorCycle(){
+  const cv=document.getElementById('ps-canvas');
+  let h=0;
+  function tick(){ cv.style.filter='hue-rotate('+h+'deg) saturate(1.6)'; h=(h+4)%360; psS.ccRaf=requestAnimationFrame(tick); }
+  tick();
+}
+function psFireConfetti(){
+  // Reuse existing confetti system
+  if(typeof confetti!=='undefined' && document.getElementById('egg')){
+    // trigger via the egg mechanism
+    const fakeEgg={classList:{contains:()=>true}};
+    confettiCv.width=window.innerWidth; confettiCv.height=window.innerHeight;
+    confettiCv.style.display='block';
+    confetti=[];
+    for(let i=0;i<120;i++) confetti.push({
+      x:window.innerWidth/2+(Math.random()-.5)*300,
+      y:window.innerHeight*.4,
+      vx:(Math.random()-.5)*8, vy:-(Math.random()*6+3),
+      g:0.18, rot:Math.random()*360, vr:(Math.random()-.5)*4,
+      life:1, w:8+Math.random()*8, h:5+Math.random()*5,
+      col:['#4ea1d3','#60d080','#d4a017','#f07070','#c080f0'][Math.floor(Math.random()*5)]
+    });
+    if(confettiRAF) cancelAnimationFrame(confettiRAF);
+    (function step(){
+      cctx.clearRect(0,0,confettiCv.width,confettiCv.height);
+      let alive=false;
+      for(const p of confetti){
+        p.vy+=p.g; p.x+=p.vx; p.y+=p.vy; p.rot+=p.vr; p.life-=0.008;
+        if(p.life>0&&p.y<confettiCv.height+24){ alive=true;
+          cctx.save(); cctx.globalAlpha=p.life; cctx.fillStyle=p.col;
+          cctx.translate(p.x,p.y); cctx.rotate(p.rot*Math.PI/180);
+          cctx.fillRect(-p.w/2,-p.h/2,p.w,p.h); cctx.restore();
+        }
+      }
+      if(alive) confettiRAF=requestAnimationFrame(step);
+      else{ confettiCv.style.display='none'; cctx.clearRect(0,0,confettiCv.width,confettiCv.height); }
+    }());
+  }
+}
+function psGameOver(){
+  clearInterval(psS.timer);
+  if(psS.ccRaf){ cancelAnimationFrame(psS.ccRaf); psS.ccRaf=null; }
+  ghShowLb(psS.score, psS.shh, psS.rounds);
+}
+function psQuit(){ clearInterval(psS.timer); if(psS.ccRaf) cancelAnimationFrame(psS.ccRaf); ghShowSelect(); }
+
+/* ── Fractal generators ──────────────────────────────────── */
+function psDrawFractal(cv, type){
+  const ctx=cv.getContext('2d'), W=cv.width, H=cv.height;
+  if(type==='barnsley'){
+    ctx.fillStyle='#0a1628'; ctx.fillRect(0,0,W,H);
+    let x=0,y=0; ctx.fillStyle='rgba(50,200,80,0.6)';
+    for(let i=0;i<80000;i++){
+      const r=Math.random(); let nx,ny;
+      if(r<.01){nx=0;ny=.16*y;}
+      else if(r<.86){nx=.85*x+.04*y;ny=-.04*x+.85*y+1.6;}
+      else if(r<.93){nx=.2*x-.26*y;ny=.23*x+.22*y+1.6;}
+      else{nx=-.15*x+.28*y;ny=.26*x+.24*y+.44;}
+      x=nx;y=ny;
+      const px2=Math.floor((x+3)/6*W), py2=Math.floor((10-y)/10*H);
+      if(px2>=0&&px2<W&&py2>=0&&py2<H) ctx.fillRect(px2,py2,1,1);
+    }
+    return;
+  }
+  const img=ctx.createImageData(W,H), d=img.data;
+  if(type==='mandelbrot'){
+    for(let py=0;py<H;py++) for(let px=0;px<W;px++){
+      const cx2=(px/W)*3.5-2.5, cy2=(py/H)*2.0-1.0;
+      let x=0,y=0,n=0; const MAX=64;
+      while(x*x+y*y<=4&&n<MAX){const xt=x*x-y*y+cx2;y=2*x*y+cy2;x=xt;n++;}
+      const t=n/MAX, i=(py*W+px)*4;
+      d[i]=9*(1-t)*t*t*t*255|0; d[i+1]=15*(1-t)*(1-t)*t*t*255|0;
+      d[i+2]=8.5*(1-t)*(1-t)*(1-t)*t*255|0; d[i+3]=255;
+    }
+  } else if(type==='julia'){
+    const JX=-.7,JY=.27;
+    for(let py=0;py<H;py++) for(let px=0;px<W;px++){
+      let x=(px/W)*3.5-1.75,y=(py/H)*3.5-1.75,n=0; const MAX=64;
+      while(x*x+y*y<=4&&n<MAX){const xt=x*x-y*y+JX;y=2*x*y+JY;x=xt;n++;}
+      const t=n/MAX, i=(py*W+px)*4;
+      d[i]=t*255|0; d[i+1]=t*t*255|0; d[i+2]=(1-t)*t*4*255|0; d[i+3]=255;
+    }
+  } else if(type==='sierpinski'){
+    for(let py=0;py<H;py++) for(let px=0;px<W;px++){
+      const v=(px&py)?0:255, i=(py*W+px)*4;
+      d[i]=v; d[i+1]=Math.floor(v*.6); d[i+2]=Math.floor(v*.3); d[i+3]=255;
+    }
+  } else if(type==='plasma'){
+    for(let py=0;py<H;py++) for(let px=0;px<W;px++){
+      const v=(Math.sin(px/18)+Math.sin(py/18)+Math.sin((px+py)/18)+Math.sin(Math.sqrt(px*px+py*py)/18))/4;
+      const t=(v+1)/2, i=(py*W+px)*4, TAU=Math.PI*2;
+      d[i]=Math.sin(t*TAU)*127+128|0; d[i+1]=Math.sin(t*TAU+2.094)*127+128|0;
+      d[i+2]=Math.sin(t*TAU+4.189)*127+128|0; d[i+3]=255;
+    }
+  }
+  ctx.putImageData(img,0,0);
+}
+
+/* ── Corruption applicators ─────────────────────────────── */
+function psApplyCorruption(cv, type){
+  const ctx=cv.getContext('2d'), W=cv.width, H=cv.height;
+  const img=ctx.getImageData(0,0,W,H), d=img.data;
+  if(type==='tone_blown'){
+    for(let i=0;i<d.length;i+=4){d[i]=Math.min(d[i],179);d[i+1]=Math.min(d[i+1],179);d[i+2]=Math.min(d[i+2],179);}
+  } else if(type==='channel_swap'){
+    for(let i=0;i<d.length;i+=4){const r=d[i];d[i]=d[i+1];d[i+1]=r;}
+  } else if(type==='blur_ema'){
+    for(let py=1;py<H;py++) for(let px=0;px<W;px++){
+      const i=(py*W+px)*4, pi=((py-1)*W+px)*4;
+      d[i]=d[i]*.7+d[pi]*.3|0; d[i+1]=d[i+1]*.7+d[pi+1]*.3|0; d[i+2]=d[i+2]*.7+d[pi+2]*.3|0;
+    }
+  } else if(type==='dct_block'){
+    const src=new Uint8ClampedArray(d);
+    for(let py=0;py<H;py++) for(let px=0;px<W;px++){
+      const i=(py*W+px)*4, si=((py&~7)*W+(px&~7))*4;
+      d[i]=src[si];d[i+1]=src[si+1];d[i+2]=src[si+2];
+    }
+  } else if(type==='gamma_skip'){
+    for(let i=0;i<d.length;i+=4){
+      d[i]=Math.pow(d[i]/255,2.2)*255|0;
+      d[i+1]=Math.pow(d[i+1]/255,2.2)*255|0;
+      d[i+2]=Math.pow(d[i+2]/255,2.2)*255|0;
+    }
+  } else if(type==='wb_shift'){
+    for(let i=0;i<d.length;i+=4){
+      d[i]=Math.max(0,d[i]-40); d[i+2]=Math.min(255,d[i+2]+60);
+    }
+  }
+  ctx.putImageData(img,0,0);
+}
+
+
+/* ---- refresh button ---- */
+(function(){
+  const rb=document.getElementById('refreshbtn');
+  if(!rb) return;
+  rb.onclick=function(){rb.textContent='⏳';rb.disabled=true;setTimeout(()=>location.reload(),300);};
+}());
+
 fit(); draw();
 </script>
+<!-- walkthrough overlay -->
+<div id="wt-overlay">
+  <div id="wt-bg"></div>
+  <div id="wt-spotlight"></div>
+  <div id="wt-card">
+    <div id="wt-step-indicator"></div>
+    <div id="wt-icon"></div>
+    <h3 id="wt-title"></h3>
+    <p id="wt-body"></p>
+    <div id="wt-actions">
+      <button id="wt-skip">Skip tour</button>
+      <span style="flex:1"></span>
+      <button id="wt-prev">← Back</button>
+      <button id="wt-next">Next →</button>
+    </div>
+  </div>
+</div>
+<button id="wt-reopen" title="Reopen tour">?</button>
+
+<!-- GAME HUB -->
+<div id="gamehub">
+  <div id="gh-header">
+    <h2>🎮 Knowledge Arena</h2>
+    <button id="gh-close">×</button>
+  </div>
+
+  <!-- Game select grid -->
+  <div id="gh-select">
+    <div class="gh-card" id="ghc-ps">
+      <div class="gh-card-icon">🔬</div>
+      <h3>Pixel Surgeon</h3>
+      <p>Diagnose corrupted pipeline stages from visual symptoms on fractal images</p>
+      <div class="gh-card-btns">
+        <button class="gh-play-btn" onclick="ghStartGame('pixel-surgeon',false)">▶ Play</button>
+        <button class="gh-shh-btn" onclick="ghStartGame('pixel-surgeon',true)">⚡ SHH</button>
+      </div>
+    </div>
+    <div class="gh-card disabled"><div class="gh-card-icon">🧭</div><h3>Dead Reckoning</h3><p>Find the path between two nodes in 6 guesses</p><div class="gh-soon">Coming soon</div></div>
+    <div class="gh-card disabled"><div class="gh-card-icon">🐍</div><h3>Snake Charmer</h3><p>Assemble a pipeline within time &amp; memory budget</p><div class="gh-soon">Coming soon</div></div>
+    <div class="gh-card disabled"><div class="gh-card-icon">🕵️</div><h3>Git Blame Noir</h3><p>Deduce the bug’s origin from git evidence cards</p><div class="gh-soon">Coming soon</div></div>
+    <div class="gh-card disabled"><div class="gh-card-icon">🌊</div><h3>The Flood</h3><p>Place pipeline gates before corrupt data arrives</p><div class="gh-soon">Coming soon</div></div>
+    <div class="gh-card disabled"><div class="gh-card-icon">⛳</div><h3>Codec Golf</h3><p>Write the shortest MA tree program for a target image</p><div class="gh-soon">Coming soon</div></div>
+  </div>
+
+  <!-- Pixel Surgeon game screen -->
+  <div id="gh-ps">
+    <div id="ps-hdr">
+      <span id="ps-level-badge">Level 1</span>
+      <span id="ps-shh-badge">⚡ SHH</span>
+      <span id="ps-score-disp">Score: <b id="ps-score-val">0</b></span>
+      <div class="ps-lives" id="ps-lives-wrap">
+        <span class="ps-heart">♥</span><span class="ps-heart">♥</span><span class="ps-heart">♥</span>
+      </div>
+      <div id="ps-timer-bar"><div id="ps-timer-fill"></div></div>
+      <button class="lb-action-btn" style="margin-left:auto;padding:4px 10px;font-size:11px" onclick="psQuit()">← Exit</button>
+    </div>
+    <div id="ps-shh-info">
+      <h4>⚡ Shit Hot Hacker Mode</h4>
+      <p>All corruptions active. 3 lives. Score as many rounds as you can survive.</p>
+    </div>
+    <div id="ps-new-op-banner">
+      <h4>🔓 New corruption unlocked!</h4>
+      <p id="ps-new-op-desc"></p>
+    </div>
+    <div id="ps-body">
+      <div id="ps-left">
+        <div style="position:relative;width:100%">
+          <canvas id="ps-canvas" width="300" height="300"></canvas>
+          <div id="ps-victory">
+            <h2>🎯 Correct!</h2>
+            <p id="ps-victory-pts"></p>
+          </div>
+        </div>
+        <div id="ps-symptoms"><h4>Observed symptoms</h4><div id="ps-symptom-list"></div></div>
+        <div id="ps-feedback"></div>
+      </div>
+      <div id="ps-right">
+        <div id="ps-ops-label">Diagnose the stage failure:</div>
+        <div id="ps-ops-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaderboard -->
+  <div id="gh-lb">
+    <div id="gh-lb-title">🏆 Game Over</div>
+    <div id="gh-lb-score-wrap">
+      <span id="gh-lb-score">0</span>
+      <span id="gh-lb-rank"></span>
+    </div>
+    <div class="gh-lb-tabs">
+      <button class="gh-lb-tab active" onclick="ghShowLbTab('normal')">Normal</button>
+      <button class="gh-lb-tab" onclick="ghShowLbTab('shh')">⚡ SHH</button>
+    </div>
+    <div id="gh-lb-table"></div>
+    <div id="gh-lb-btns">
+      <button class="lb-action-btn" onclick="ghPlayAgain()">▶ Play Again</button>
+      <button class="lb-action-btn" onclick="ghShowSelect()">← Games</button>
+    </div>
+  </div>
+</div>
+
+
+<div id="perflb">
+  <div class="plb-header">
+    <span class="plb-title">⚡ Performance Leaderboard</span>
+    <span class="plb-summary" id="plb-summary"></span>
+    <button class="plb-close" id="perflb-close">×</button>
+  </div>
+  <div id="plb-body"></div>
+</div>
+
+<div id="intro-overlay">
+  <div id="intro-book">
+    <canvas id="intro-particles"></canvas>
+
+    <div id="intro-pages">
+
+      <!-- Page 0: Lore -->
+      <div class="intro-page active" id="ip0">
+        <div class="intro-lore-title">CasaBio JXL Ecosystem</div>
+        <div class="intro-lore-sub">Interactive Architecture Map</div>
+        <div id="intro-mandala-wrap">
+          <svg id="intro-mandala" width="170" height="170" viewBox="-85 -85 170 170">
+            <!-- ring 0: RAW / decode -->
+            <g id="im-ring0" style="transform-origin:center">
+              <ellipse rx="76" ry="76" fill="none" stroke="#e0a14a" stroke-width="1.5" stroke-dasharray="8 6" opacity=".5"/>
+              <circle cx="76" cy="0" r="5" fill="#e0a14a" opacity=".8"/>
+            </g>
+            <!-- ring 1: pipeline/tone -->
+            <g id="im-ring1" style="transform-origin:center">
+              <ellipse rx="52" ry="52" fill="none" stroke="#c46bd6" stroke-width="1.5" stroke-dasharray="6 5" opacity=".55"/>
+              <circle cx="52" cy="0" r="4" fill="#c46bd6" opacity=".8"/>
+            </g>
+            <!-- ring 2: encode/decode -->
+            <g id="im-ring2" style="transform-origin:center">
+              <ellipse rx="30" ry="30" fill="none" stroke="#4ea1d3" stroke-width="1.5" stroke-dasharray="5 4" opacity=".6"/>
+              <circle cx="30" cy="0" r="3.5" fill="#4ea1d3" opacity=".9"/>
+            </g>
+            <!-- centre -->
+            <circle r="10" fill="#1a2a3a"/>
+            <text text-anchor="middle" y="4" font-size="9" fill="#c6d8f0" font-family="ui-monospace,monospace">JXL</text>
+          </svg>
+        </div>
+        <div id="intro-mandala-desc"></div>
+        <div class="intro-lore-body">
+          A living map of every crate, package, and pipeline stage
+          that converts <strong style="color:#e0a14a">RAW camera files</strong>
+          into <strong style="color:#4ea1d3">streaming JXL images</strong>
+          for the web.<br><br>
+          Click any <em>ring</em> to name it.
+          Navigate with the toolbar, or
+          <span style="color:#89b040;cursor:pointer"
+            onclick="document.getElementById('intro-overlay').classList.remove('open');
+                     document.getElementById('wt-reopen').click()">
+            take the guided tour →
+          </span>
+        </div>
+        <div class="intro-lore-hint">Tap <strong>Next</strong> to see what's inside the pipeline.</div>
+      </div>
+
+      <!-- Page 1: JXL Features -->
+      <div class="intro-page" id="ip1">
+        <div class="intro-page-title">Inside the JXL Pipeline</div>
+        <div class="intro-page-sub">Click a card to see the map symbol + fun fact</div>
+        <div class="intro-cards">
+
+          <div class="intro-feat" data-mapid="enc_rs">
+            <div class="intro-card-icon">📉</div>
+            <div class="intro-card-name">enc_rs</div>
+            <div class="intro-card-tagline">rANS entropy coding + VarDCT</div>
+            <div class="intro-feat-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#4ea1d3"></span>blue · Encoder</div>
+              <div class="ifd-fact">rANS entropy coding, 12 MP ORF → ~4 MB JXL vs ~11 MB JPEG at equivalent quality.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('enc_rs');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-feat" data-mapid="df_prog">
+            <div class="intro-card-icon">⚡</div>
+            <div class="intro-card-name">df_prog</div>
+            <div class="intro-card-tagline">DC-first progressive decode</div>
+            <div class="intro-feat-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#5cc98c"></span>green · Progressive</div>
+              <div class="ifd-fact">DC coefficients arrive in first ~2% of file — visible preview before the full download.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('df_prog');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-feat" data-mapid="enc_rs">
+            <div class="intro-card-icon">🔬</div>
+            <div class="intro-card-name">Butteraugli ΔE</div>
+            <div class="intro-card-tagline">Perceptual quality metric</div>
+            <div class="intro-feat-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#4ea1d3"></span>blue · Encoder</div>
+              <div class="ifd-fact">Butteraugli Δ units not PSNR — models human vision for bit allocation.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('enc_rs');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-feat" data-mapid="web">
+            <div class="intro-card-icon">🌍</div>
+            <div class="intro-card-name">Web-native</div>
+            <div class="intro-card-tagline">ISO/IEC 18181 open standard</div>
+            <div class="intro-feat-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#3fb6a8"></span>teal · Browser</div>
+              <div class="ifd-fact">ISO/IEC 18181, Chrome ≥110, Safari ≥17 — no plugin needed.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('web');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-feat" data-mapid="p_tone">
+            <div class="intro-card-icon">🎨</div>
+            <div class="intro-card-name">XYB colour space</div>
+            <div class="intro-card-tagline">Human LMS cone model</div>
+            <div class="intro-feat-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#c46bd6"></span>purple · Tone</div>
+              <div class="ifd-fact">XYB derived from human LMS cones, optimised by Butteraugli for bit allocation across frequencies.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('p_tone');return false">Explore ↗</a>
+            </div>
+          </div>
+
+        </div>
+        <div class="intro-hint">Click a card to reveal its map symbol + fact</div>
+      </div>
+
+      <!-- Page 2: Casabio Relevance -->
+      <div class="intro-page" id="ip2">
+        <div class="intro-page-title">Why CasaBio uses JXL</div>
+        <div class="intro-page-sub">Biodiversity imagery from field to browser</div>
+        <div class="intro-cards">
+
+          <div class="intro-rel-card" data-mapid="we_process">
+            <div class="intro-card-icon">🌿</div>
+            <div class="intro-card-name">raw</div>
+            <div class="intro-card-tagline">ORF / CR2 / DNG field capture</div>
+            <div class="intro-rel-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#e0a14a"></span>amber · RAW</div>
+              <div class="ifd-fact">ORF/CR2/DNG with EXIF+GPS embedded in JXL container — georeference survives every transcode.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('we_process');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-rel-card" data-mapid="p_tone">
+            <div class="intro-card-icon">🎨</div>
+            <div class="intro-card-name">p_tone</div>
+            <div class="intro-card-tagline">AVX2 SIMD tone pipeline</div>
+            <div class="intro-rel-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#c46bd6"></span>purple · Tone</div>
+              <div class="ifd-fact">AVX2 33× faster kernel. LUT split −65% per slider drag. Accurate colours for species ID.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('p_tone');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-rel-card" data-mapid="jxl_cache">
+            <div class="intro-card-icon">💾</div>
+            <div class="intro-card-name">jxl_cache</div>
+            <div class="intro-card-tagline">OPFS persistent cache</div>
+            <div class="intro-rel-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#3fb6a8"></span>teal · Cache</div>
+              <div class="ifd-fact">OPFS origin-private storage. FNV-1a hash 98.7% faster than SHA-256 — field-ready offline.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('jxl_cache');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-rel-card" data-mapid="jxl_worker">
+            <div class="intro-card-icon">🔌</div>
+            <div class="intro-card-name">jxl_worker</div>
+            <div class="intro-card-tagline">libjxl WASM in Worker</div>
+            <div class="intro-rel-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#3fb6a8"></span>teal · Worker</div>
+              <div class="ifd-fact">libjxl compiled to WASM (~6 MB cached). Decodes in background thread — UI stays smooth.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('jxl_worker');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-rel-card" data-mapid="we_process">
+            <div class="intro-card-icon">🔭</div>
+            <div class="intro-card-name">we_process</div>
+            <div class="intro-card-tagline">24 MP in ~260 ms (AVX2)</div>
+            <div class="intro-rel-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#d3654e"></span>orange · WASM</div>
+              <div class="ifd-fact">Full RAW decode + tone in ~260 ms on AVX2. WASM single-thread ~850 ms — still usable offline.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('we_process');return false">Explore ↗</a>
+            </div>
+          </div>
+
+          <div class="intro-rel-card" data-mapid="exif">
+            <div class="intro-card-icon">🧬</div>
+            <div class="intro-card-name">exif</div>
+            <div class="intro-card-tagline">Darwin Core + GPS metadata</div>
+            <div class="intro-rel-detail">
+              <div class="ifd-sym"><span class="ifd-dot" style="background:#8b94a6"></span>grey · Metadata</div>
+              <div class="ifd-fact">Darwin Core + EXIF survive binary-identical JXL round-trip — species, location, observer intact.</div>
+              <a class="ifd-explore" href="#" onclick="introNavigate('exif');return false">Explore ↗</a>
+            </div>
+          </div>
+
+        </div>
+        <div class="intro-hint">Click a card to reveal its map symbol + fact</div>
+      </div>
+
+    </div><!-- /intro-pages -->
+
+    <!-- footer nav -->
+    <div id="intro-footer">
+      <button class="intro-nav-btn" id="intro-prev">← Prev</button>
+      <span id="intro-dots"></span>
+      <button class="intro-nav-btn" id="intro-next">Next →</button>
+      <button id="intro-skip">Explore map →</button>
+    </div>
+
+  </div><!-- /intro-book -->
+</div><!-- /intro-overlay -->
+
 </body>
 </html>
