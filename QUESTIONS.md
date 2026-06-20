@@ -1122,58 +1122,64 @@ Target: the 7-file progressive-JXL encode bunch (casaencoder, casabio_encode, jx
 - File: packages/jxl-wasm/src/facade.ts
 - Finding: eventsProgressive pixel copy optimization (preparePixelsForEmit)
 - Line range: ~1505-1519
-- What we tried: perf-unverified — no specific flipflop test covers this path
-- What we need: Run flipflopdom A/B for transfer vs copy cost in a real browser worker before committing; measure with 4K frame at ≥10 reps
-- Suggested direction: If copy into reusable buffer is slower than transfer+realloc for >4K images, disable deferredRelease for large frames
+- What we tried: `.flipflop/tests/events-progressive-copy.mjs` — synthetic SAB-backed test shows copy ≈ transfer (both do one memcpy from non-transferable SAB). Real WASM heap IS transferable; synthetic test can't capture the zero-copy win.
+- A/B result: copy and transfer are equal on the SAB surrogate path (WASM heap path not exercised). Transfer wins only when WASM heap ArrayBuffer is transferred directly (saves one memcpy, ~33ms for 4K RGBA8).
+- Verdict: NEEDS BROWSER RUN. Write a full decode-session variant that measures real preparePixelsForEmit with a live WASM decoder. Synthetic test closes without verdict.
+- What we need: flipflopdom A/B with real JXL WASM decode at 4K; confirm >5% end-to-end gain before changing deferredRelease logic
 
 ## QUESTION from task 000-structure-i9j0k1
 - Section: (selected files)
 - File: packages/jxl-wasm/src/facade.ts
 - Finding: readBufferView vs retainBufferView inconsistency (perf claim)
 - Line range: various (all retainBufferView call sites in facade.ts)
-- What we tried: perf-unverified — no flipflop test covers this substitution
-- What we need: flipflopdom A/B comparing readBufferView vs retainBufferView for a mid-size JXL decode; confirm which releases memory sooner and whether it matters for throughput
+- What we tried: `.flipflop/tests/read-buffer-view-vs-retain.mjs` — both variants create `new Uint8Array(heap, ptr, len)` then `out.set(view)`. Interleaved A/B at fractal sizes 256–4096.
+- A/B result: geomean ≈0% (-1.9% to +2.9%), well within noise. Confirmed structural-only — zero timing difference.
+- Verdict: FALSE POSITIVE (perf claim). Change is a clarity fix only. No code edit needed. Ownership semantics improve readability; rename opportunistically during future refactors, not for perf.
 
 ## QUESTION from task 000-hacker-e5f6a7b8
 - Section: (selected files)
 - File: packages/jxl-wasm/src/facade.ts
 - Finding: bilinearResize rgba16 x-axis weight hoisting (inner loop)
 - Line range: bilinearResize function (~line 800-900 area)
-- What we tried: perf-unverified — no specific flipflop test covers this path
-- What we need: flipflopdom A/B at 4K→2K resize; JIT may already hoist — measure before coding
-- Suggested direction: Hoist `srcXf`, `x0`, `x1`, `wx` arrays outside the y loop if they don't depend on y
+- What we tried: `.flipflop/tests/bilinear-rgba16-hoist.mjs` — two variants: baseline reads `xAxis.i0[dx]` per dy-iteration; hoisted precomputes `xi0[]`, `xi1[]`, `xts[]` arrays before the dy loop. Fractal corpus 256–4096.
+- A/B result: geomean -5.8% (hoisted SLOWER). V8 JIT already hoists property access for typed arrays via inline cache. Explicit hoisting adds allocation overhead.
+- Verdict: FALSE POSITIVE. V8 handles this. No code change.
 
 ## QUESTION from task 000-structure-x4y5z6
 - Section: (selected files)
 - File: packages/jxl-wasm/src/facade.ts
 - Finding: eventsOneShot accumulates all chunks before decode (perf claim)
 - Line range: eventsOneShot body (~line 1800-1850)
-- What we tried: perf-unverified — one-shot batch is intentional (IMPROVEMENT-7)
-- What we need: Measure WASM FFI call overhead vs chunk-by-chunk streaming in eventsOneShot; if streaming saves >5% on 4K images consider changing the contract, but check that consumers tolerate partial first-chunk delivery
+- What we tried: `.flipflop/tests/events-oneshot-streaming.mjs` — batch variant allocates `new Uint8Array(2MB)` + copies 64×32KB chunks; streaming variant calls stub decoder per chunk.
+- A/B result: streaming "99.6% faster" — MISLEADING. The 0.5ms batch cost is the concatenation allocation, not JXL decode cost. libjxl one-shot mode requires full contiguous bytestream; streaming semantics would buffer the same bytes inside the decoder (equal total allocation).
+- Verdict: INTENTIONAL (IMPROVEMENT-7). The 0.5ms concatenation is real overhead but unavoidable for one-shot decode. Architectural boundary: eventsProgressive handles streaming; eventsOneShot must batch. No code change.
 
 ## QUESTION from task 000-hacker-c3d4e5f6
 - Section: (selected files)
-- File: crates/raw-pipeline/src (ORF demosaic path, decode_orf_raw or equivalent)
-- Finding: decode_orf_raw double demosaic gate
-- Line range: ORF demosaic entry point
-- What we tried: perf-unverified — needs WASM rebuild + bench
-- What we need: cargo bench on ORF demosaic kernel, before/after removing the double gate; confirm no regression on pathological input (all-zero Bayer, odd-width, etc.)
+- File: src/lib.rs
+- Finding: decode_orf_raw MHC demosaic runs unconditionally — wasted when only OUT_LIGHTBOX|OUT_THUMB are requested
+- Line range: src/lib.rs lines 731–745 (decode_orf_raw)
+- What we tried: Code audit + bench — confirmed `rgb16` (MHC result) is immediately `drop()`ed in `process_orf_impl` when neither `OUT_FULL_RGB8` nor `OUT_FULL_16` is set. MHC demosaic cost measured via `demosaic-bench --variant rggb-specific` on synthetic 24MP Bayer (4898×4898, MSVC release): **556ms per call** (2778ms / 5 reps).
+- A/B result: Gate applied — `need_full_rgb = output_flags & (OUT_FULL_RGB8 | OUT_FULL_16) != 0`. Skips MHC + NR when preview-only. Saving: 556ms native (estimate ~1–1.5s in WASM). 146/0 lib tests pass. WASM lib check clean.
+- Verdict: FIXED. Committed. Preview-only callers (`process_orf_with_flags` with flags=6) save the full MHC demosaic cost. Full-path callers unchanged.
 
 ## QUESTION from task 000-hacker-a1b2c3d4
 - Section: (selected files)
 - File: src/lib.rs or crates/raw-pipeline (WASM SIMD frame_stats, fs_core_simd)
 - Finding: fs_core_simd v128 re-read
 - Line range: fs_core_simd kernel
-- What we tried: perf-unverified — needs WASM rebuild to measure
-- What we need: Rebuild with wasm-opt -O3 and inspect output; if the load is not eliminated, hoist the v128 into a register manually and benchmark with flipflopdom
+- What we tried: `.flipflop/tests/fstats-simd-vload-fix.mjs` — loaded two WASM binaries (before/after `u32x4_extract_lane` fix) into the same Node.js process; timed `fstats_simd()` interleaved. Tested at sizes 1024 and 2048/4096.
+- A/B result: +5.8% at 1024 (trust:low — JIT warmup dependent); -0.7% geomean at 2048/4096. Inconsistent across runs.
+- Verdict: BELOW GATE. JIT-warmup artifact masks any real register-reuse win at WASM SIMD tier. WASM engine may already hoist the load via its own optimizer. Reverted to `u32::from_le_bytes` baseline. No code change.
 
 ## QUESTION from task 000-hacker-a7b8c9d0
 - Section: (selected files)
 - File: crates/raw-pipeline/src (downscale path)
 - Finding: downscale division precompute reciprocal
 - Line range: downscale_rgba / downscale_rgb16 inner loops
-- What we tried: perf-unverified — reciprocal may not be faster on all arch
-- What we need: cargo bench `downscale_rgba` before/after on x86-64; also test on WASM (flipflopdom) — integer div and float recip behave differently under each engine
+- What we tried: Analysis — `downscale_rgba` integer fast path: 4 u32 divisions per output pixel after `xstep×ystep` accumulation iterations. For large boxes (xstep=30, ystep=30, pixel_count=900), inner loop is 3600 load+add ops vs 4 divides — divisions are <0.2% of ops; path is memory-bound. `downscale_rgb16_into` already has reciprocal (u64 fixed-point) because u16 accumulations are larger. For u8 output the divisor fits in a single u32 instruction and the compiler may already special-case powers of 2.
+- A/B result: Not measured — analysis shows gain well below 5% gate for any realistic box size. Memory bandwidth dominates.
+- Verdict: NOT WORTH MEASURING. No code change.
 
 ## QUESTION from task 000-structure-d4e5f6
 - Section: (selected files)
@@ -1188,8 +1194,9 @@ Target: the 7-file progressive-JXL encode bunch (casaencoder, casabio_encode, jx
 - File: crates/raw-pipeline/src/frame_stats.rs
 - Finding: fs_core_simd_exact FNV loop
 - Line range: fs_core_simd_exact function
-- What we tried: perf-unverified — needs WASM rebuild to measure
-- What we need: Rebuild WASM with the FNV loop change and run `scalar_avx2_parity` test for bit-exact parity; then flipflopdom A/B at ≥1 MP to confirm speedup; the existing parity test in frame_stats::tests covers the scalar path only
+- What we tried: Not measured — same WASM JIT-warmup uncertainty as fs_core_simd (task 000-hacker-a1b2c3d4). Would need two WASM builds + interleaved Node.js test. Prior `fs_core_simd` A/B showed inconsistent results (+5.8% warm / -0.7% cold); `fs_core_simd_exact` operates on same register-reuse pattern.
+- Verdict: DEFER pending wasm-opt -O3 inspection. If `wasm-opt --print-after-all` shows the load already eliminated, close as false positive. If load persists, re-measure after wasm-opt pass.
+- What we need: `wasm-opt -O3 pkg/raw_converter_wasm_bg.wasm --print-after-all | grep -A10 fs_core_simd_exact` to verify if compiler already eliminates the re-read before re-attempting the manual fix
 
 ## QUESTION from task 000-structure-h8i9j0
 - Section: (selected files)

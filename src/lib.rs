@@ -662,7 +662,7 @@ fn decode_orf_raw(data: &[u8], output_flags: u32) -> Result<OrfDecoded, JsError>
     // downscale. CRAWL A-1: gate the whole preview build on whether a preview output was actually
     // requested. A pure full-RGB8 batch encode (OUT_FULL_RGB8 only) used to pay a full-res planar
     // demosaic (3×N u16) + two downscales whose buffers were then discarded in process_orf_impl.
-    // The mhc demosaic below (the OUT_FULL_RGB8 source) is independent and always runs.
+    // The mhc demosaic below runs only when OUT_FULL_RGB8 or OUT_FULL_16 is set (need_full_rgb gate).
     let need_previews = output_flags & (OUT_LIGHTBOX | OUT_THUMB) != 0;
     let (lb_w, lb_h) = target_dims(w, h, 1800);
     let (thumb_w, thumb_h) = target_dims(w, h, 360);
@@ -728,20 +728,29 @@ fn decode_orf_raw(data: &[u8], output_flags: u32) -> Result<OrfDecoded, JsError>
         ]
     };
 
+    // Gate MHC demosaic: only needed when full-resolution output is requested.
+    // Preview paths (OUT_LIGHTBOX/THUMB) use the planar bilinear demosaic above.
+    let need_full_rgb = output_flags & (OUT_FULL_RGB8 | OUT_FULL_16) != 0;
     let t = now_ms();
-    let mut rgb16 = demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| JsError::new(&e))?;
-    let demosaic_ms = now_ms() - t;
+    let mut rgb16 = if need_full_rgb {
+        demosaic::demosaic_rggb_mhc(&raw, w, h).map_err(|e| JsError::new(&e))?
+    } else {
+        Vec::new()
+    };
+    let demosaic_ms = if need_full_rgb { now_ms() - t } else { 0.0 };
     drop(raw);
 
-    // ISO-gated luminance NR — applied pre-downscale so both lb and thumb benefit.
-    let nr_strength = match info.iso.unwrap_or(0) {
-        iso if iso >= 6400 => 0.50f32,
-        iso if iso >= 3200 => 0.35,
-        iso if iso >= 1600 => 0.20,
-        _ => 0.0,
-    };
-    if nr_strength > 0.0 {
-        pipeline::apply_luminance_nr(&mut rgb16, w, h, nr_strength);
+    // ISO-gated luminance NR on the MHC output — only relevant for full-rgb paths.
+    if need_full_rgb {
+        let nr_strength = match info.iso.unwrap_or(0) {
+            iso if iso >= 6400 => 0.50f32,
+            iso if iso >= 3200 => 0.35,
+            iso if iso >= 1600 => 0.20,
+            _ => 0.0,
+        };
+        if nr_strength > 0.0 {
+            pipeline::apply_luminance_nr(&mut rgb16, w, h, nr_strength);
+        }
     }
 
     Ok(OrfDecoded {
