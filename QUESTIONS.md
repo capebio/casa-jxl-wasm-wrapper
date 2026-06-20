@@ -1267,18 +1267,27 @@ Both items are ADR-level opportunities.
 
 ---
 
-## SpeedCodeReview deferral — jxl_casadecoder.rs (2026-06-20, opus-4.8[1m])
+## SpeedCodeReview deferral — jxl_casadecoder.rs (2026-06-20, opus-4.8[1m]) — RESOLVED
 
-**[DEFERRED · Alg · perf_sensitive] JXTC 16-bit tile decode double-copies.**
-In `decode_jxtc_region`, the 16-bit path does:
-`u16_samples_to_ne_bytes(&img.data)` (allocates + copies a full-tile byte Vec) → later
-row-copied again into `dest`. The intermediate byte Vec could be eliminated by
-reinterpret-viewing the decoded `Vec<u16>` as `&[u8]` (native-endian, sound as a *view*;
-the unsound part is only an in-place `Vec` ownership transmute) and row-copying straight
-from that view into `dest`.
+All three deferrals from this file's review were closed (peer-review follow-up).
 
-Why deferred (not implemented): perf_sensitive edit; the saved copy (tile_size²·8 bytes,
-e.g. ~2 MB at 512²) is dwarfed by the libjxl tile-decode cost, so the end-to-end win is
-expected to fall below the ≥5% SpeedCodeReview gate. Needs a flipflop measurement over a
-real JXTC-16 container (`.flipflop/tests/jxtc-vs-full-decode.mjs` exists) + a libjxl build to
-confirm before touching the hot path. Implement only if a measurement clears the gate.
+**[RESOLVED → GREEN] JXTC 16-bit tile decode double-copy.**
+~~`u16_samples_to_ne_bytes(&img.data)` allocated + copied a full-tile byte Vec, then
+row-copied again into `dest`.~~ Reframed from a perf gamble to a *correct-by-construction*
+copy-elimination: tiles are now held in native width (`TilePixels::U16(Vec<u16>)`) and the
+compositor takes a sound byte **view** (`as_bytes`, native-endian, align 2≥1) at copy time.
+No intermediate alloc/copy on the 16-bit path; provably identical bytes (covered by
+`decode_jxtc_region_16bit_byteview_matches_ground_truth`). Did not need the ≥5% perf gate
+because it's a structural simplification, not a measured speedup claim.
+
+**[RESOLVED → RED] decode_region true ROI decode.** Impossible: libjxl 0.11 stable
+`JxlDecoder` exposes no spatial crop/region setter (verified the full `JxlDecoderSet*`
+surface — only whole-frame `SetImageOutBuffer`, embedded `SetPreviewOutBuffer`, and
+*temporal* `SkipFrames`). JXTC is the sanctioned ROI path. Documented on `decode_region`.
+
+**[RESOLVED → RED] Parallel JXTC composite / "memory cliff".** The composite is row
+`memcpy` into disjoint dest rects — bandwidth-bound, so threads add no throughput (same
+memory bus). The `decoded_tiles` transient only holds the *overlapping* tiles (a handful for
+a normal viewport); its peak matters only when the viewport ≈ whole image, the anti-pattern
+this API avoids. Decode-into-dest would drop the transient but needs unsafe disjoint-rect
+writes — unjustified for the small-viewport norm. Documented on `decode_jxtc_region`.

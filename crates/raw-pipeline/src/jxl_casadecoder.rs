@@ -31,7 +31,7 @@
 //! Native only (the WASM JXL path stays on `web/pkg` + `bridge.cpp`).
 
 #![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
-// SpeedCodeReview ✓ 2026-06-20 · opus-4.8[1m] · sweeps=2 +peer-review · Arch 1/0/1 Alg 2/0/1 Code 6/6/0 (x/y/z=found/green/red, +1 deferred)
+// SpeedCodeReview ✓ 2026-06-20 · opus-4.8[1m] · sweeps=2 +peer-review · Arch 1/0/1 Alg 2/0/1 Code 7/7/0 (x/y/z=found/green/red; all deferrals resolved: JXTC-16 copy→green, ROI-crop/parallel-composite→red w/ evidence)
 
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -387,9 +387,18 @@ impl Decoder {
         out
     }
 
-    /// Region decode (AR / digital-twin / tile seam). v1: decode-full-then-crop
-    /// to the clamped rect, so call sites bind to the durable shape now; a
-    /// future `JxlDecoderSetCropEnabled` v2 lands here without touching callers.
+    /// Region decode (AR / digital-twin / tile seam) of a **monolithic** codestream.
+    /// Decodes the full image then crops to the clamped rect.
+    ///
+    /// This is not a partial-work decode and cannot become one: libjxl 0.11's stable
+    /// `JxlDecoder` API exposes **no** spatial ROI/crop setter (only
+    /// `SetImageOutBuffer` for the whole frame, `SetPreviewOutBuffer` for an embedded
+    /// thumbnail, and `SkipFrames`/`SkipCurrentFrame` for *temporal* selection). A
+    /// monolithic JXL frame is group-coded with no public per-rectangle entry point,
+    /// so "decode only the viewport" is impossible here. Callers needing true
+    /// decode-only-the-region work must encode as a JXTC tile container and use
+    /// [`decode_jxtc_region`], which decodes only the overlapping tiles. The durable
+    /// shape lives here so call sites are stable; the efficiency lives in JXTC.
     pub fn decode_region<S: Sample>(
         &mut self,
         jxl: &[u8],
@@ -1231,9 +1240,46 @@ fn compute_tile_copy_rects(
     Some((src_x, src_y, dst_x, dst_y, ow, oh))
 }
 
+/// Owned decoded tile pixels, kept in their native sample width so the 16-bit
+/// path needs no intermediate `Vec<u8>` copy: the compositor reads a byte *view*
+/// at copy time. A `u16` plane is native-endian and contiguous, so viewing it as
+/// `&[u8]` is sound (align 2 ≥ 1, no padding); a true `Vec<u16> → Vec<u8>`
+/// ownership transmute would be UB (the allocator frees the wrong layout), which
+/// is exactly why `u16_samples_to_ne_bytes` copies — here we never need to own bytes.
+enum TilePixels {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+}
+
+impl TilePixels {
+    #[inline]
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            TilePixels::U8(v) => v,
+            // SAFETY: u16 has no padding/uninit bytes and is native-endian in
+            // memory; reinterpreting the live buffer as bytes (not transferring
+            // ownership) is sound. Lifetime is tied to &self.
+            TilePixels::U16(v) => unsafe {
+                std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(&v[..]))
+            },
+        }
+    }
+}
+
 /// Decode a rectangular viewport from a JXTC tile container. Each rayon worker
 /// holds **one** [`Decoder`] reused across the tiles it handles (`map_init`) —
 /// no per-tile create/destroy on the fan-out (spec §8 criterion 4).
+///
+/// Tiles are decoded in parallel, then composited serially into `dest`. The
+/// composite is **not** parallelised on purpose: it is row `memcpy` into disjoint
+/// destination rectangles — bandwidth-bound, not CPU-bound, so adding threads
+/// would contend on the same memory bus for no gain. The transient `decoded_tiles`
+/// vector only holds the *overlapping* tiles (a handful for a normal viewport);
+/// its peak is meaningful only when the viewport approaches the whole image, which
+/// is the anti-pattern this region API exists to avoid. Decoding straight into
+/// `dest` would drop that transient but requires unsafe disjoint-sub-rectangle
+/// writes (tile rects are strided, not contiguous slices) — not justified for the
+/// small-viewport norm.
 pub fn decode_jxtc_region(
     container: &[u8],
     region_x: u32,
@@ -1274,7 +1320,7 @@ pub fn decode_jxtc_region(
     let overlapping = overlapping_tile_indices(&header, ImageRegion { x: rx, y: ry, w: rw, h: rh });
 
     let is16 = header.bits_per_sample == 16;
-    let decoded_tiles: Vec<((u32, u32), Vec<u8>, u32, u32)> = overlapping
+    let decoded_tiles: Vec<((u32, u32), TilePixels, u32, u32)> = overlapping
         .par_iter()
         .map_init(
             || Decoder::new(DecodeOptions::default()),
@@ -1309,12 +1355,15 @@ pub fn decode_jxtc_region(
                 }
                 let tile_jxl = &container[start..end];
 
+                // Keep tiles in their native sample width — the 16-bit branch no
+                // longer copies into an intermediate Vec<u8>; the compositor takes a
+                // byte view (TilePixels::as_bytes) at copy time instead.
                 let (pixels, tw, th) = if is16 {
                     let img = dec.decode::<u16>(tile_jxl, Channels::Rgba).ok()?;
-                    (u16_samples_to_ne_bytes(&img.data), img.width, img.height)
+                    (TilePixels::U16(img.data), img.width, img.height)
                 } else {
                     let img = dec.decode::<u8>(tile_jxl, Channels::Rgba).ok()?;
-                    (img.data, img.width, img.height)
+                    (TilePixels::U8(img.data), img.width, img.height)
                 };
 
                 // saturating_sub: malformed headers can have tiles_x > ceil(image_w/tile_size);
@@ -1339,6 +1388,8 @@ pub fn decode_jxtc_region(
     let mut dest = vec![0u8; dest_len];
 
     for ((tx, ty), tile_pixels, tw, th) in decoded_tiles {
+        // Byte view of the native-width tile (zero-copy for both 8- and 16-bit).
+        let tile_pixels = tile_pixels.as_bytes();
         // Trust-boundary guard: `tw`/`th` are decoder-reported dims; verify the
         // buffer actually holds tw*th*bpp bytes so a mismatch skips the tile
         // instead of OOB-panicking copy_from_slice.
@@ -1617,6 +1668,116 @@ mod tests {
         // The fixed-RGBA variant inflates the same stream 4×.
         let full = dec.time_full_decode(&jxl).unwrap();
         assert_eq!(full.output_bytes, (w * h * 4) as u64);
+    }
+
+    /// Assemble a minimal JXTC container: 32-byte header + (off,len) index table +
+    /// concatenated per-tile codestreams (row-major ty*tiles_x+tx).
+    fn build_jxtc(
+        tiles: &[Vec<u8>],
+        tiles_x: u32,
+        tiles_y: u32,
+        tile_size: u32,
+        image_w: u32,
+        image_h: u32,
+        is16: bool,
+    ) -> Vec<u8> {
+        let num_tiles = (tiles_x * tiles_y) as usize;
+        assert_eq!(tiles.len(), num_tiles);
+        let mut out = Vec::new();
+        out.extend_from_slice(&JXTC_MAGIC.to_le_bytes());
+        out.extend_from_slice(&JXTC_VERSION.to_le_bytes());
+        out.extend_from_slice(&image_w.to_le_bytes());
+        out.extend_from_slice(&image_h.to_le_bytes());
+        out.extend_from_slice(&tile_size.to_le_bytes());
+        out.extend_from_slice(&tiles_x.to_le_bytes());
+        out.extend_from_slice(&tiles_y.to_le_bytes());
+        let flags: u32 = 1 | if is16 { 2 } else { 0 }; // has_alpha + 16-bit
+        out.extend_from_slice(&flags.to_le_bytes());
+        // Index table — payloads start right after header + table (fixed size).
+        let payload_start = JXTC_HEADER_BYTES + num_tiles * JXTC_INDEX_ENTRY_BYTES;
+        let mut cur = payload_start;
+        for t in tiles {
+            out.extend_from_slice(&(cur as u32).to_le_bytes());
+            out.extend_from_slice(&(t.len() as u32).to_le_bytes());
+            cur += t.len();
+        }
+        for t in tiles {
+            out.extend_from_slice(t);
+        }
+        out
+    }
+
+    #[test]
+    fn decode_jxtc_region_8bit_subregion_matches_ground_truth() {
+        let tile = 16u32;
+        let (txn, tyn) = (2u32, 2u32);
+        let (iw, ih) = (tile * txn, tile * tyn); // 32×32
+        let full = gradient_rgba8(iw, ih);
+        let mut tiles = Vec::new();
+        for ty in 0..tyn {
+            for tx in 0..txn {
+                let mut t = vec![0u8; (tile * tile * 4) as usize];
+                for ly in 0..tile {
+                    for lx in 0..tile {
+                        let (gx, gy) = (tx * tile + lx, ty * tile + ly);
+                        let s = (((gy * iw + gx) * 4) as usize, 4);
+                        let d = ((ly * tile + lx) * 4) as usize;
+                        t[d..d + 4].copy_from_slice(&full[s.0..s.0 + s.1]);
+                    }
+                }
+                tiles.push(enc_lossless(&Frame::rgba8(&t, tile, tile)));
+            }
+        }
+        let container = build_jxtc(&tiles, txn, tyn, tile, iw, ih, false);
+        // Crop a rect spanning all four tiles.
+        let (rx, ry, rw, rh) = (8u32, 8u32, 16u32, 16u32);
+        let out = decode_jxtc_region(&container, rx, ry, rw, rh).expect("jxtc decode");
+        assert_eq!(out.len(), (rw * rh * 4) as usize);
+        for y in 0..rh {
+            for x in 0..rw {
+                let s = (((ry + y) * iw + (rx + x)) * 4) as usize;
+                let d = ((y * rw + x) * 4) as usize;
+                assert_eq!(&out[d..d + 4], &full[s..s + 4], "px ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn decode_jxtc_region_16bit_byteview_matches_ground_truth() {
+        // Exercises the TilePixels::U16 byte-view composite (no intermediate copy).
+        let tile = 16u32;
+        let (txn, tyn) = (2u32, 2u32);
+        let (iw, ih) = (tile * txn, tile * tyn);
+        let mut full: Vec<u16> = vec![0; (iw * ih * 4) as usize];
+        for y in 0..ih {
+            for x in 0..iw {
+                let i = ((y * iw + x) * 4) as usize;
+                full[i] = (x as u16).wrapping_mul(257);
+                full[i + 1] = (y as u16).wrapping_mul(257);
+                full[i + 2] = ((x + y) as u16).wrapping_mul(131);
+                full[i + 3] = 65535;
+            }
+        }
+        let mut tiles = Vec::new();
+        for ty in 0..tyn {
+            for tx in 0..txn {
+                let mut t: Vec<u16> = vec![0; (tile * tile * 4) as usize];
+                for ly in 0..tile {
+                    for lx in 0..tile {
+                        let (gx, gy) = (tx * tile + lx, ty * tile + ly);
+                        let s = ((gy * iw + gx) * 4) as usize;
+                        let d = ((ly * tile + lx) * 4) as usize;
+                        t[d..d + 4].copy_from_slice(&full[s..s + 4]);
+                    }
+                }
+                tiles.push(enc_lossless(&Frame::rgba(&t, tile, tile)));
+            }
+        }
+        let container = build_jxtc(&tiles, txn, tyn, tile, iw, ih, true);
+        let out = decode_jxtc_region(&container, 0, 0, iw, ih).expect("jxtc decode");
+        let expected = u16_samples_to_ne_bytes(&full);
+        assert_eq!(out.len(), expected.len(), "16-bit JXTC = 8 bytes/px");
+        assert_eq!(out, expected, "byte-view composite must match ground truth");
     }
 
     #[test]
