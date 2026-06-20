@@ -20,6 +20,7 @@
 
 #![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
 
+use std::cell::Cell;
 use std::os::raw::{c_int, c_void};
 use std::ptr;
 
@@ -326,7 +327,17 @@ pub struct Encoder {
     /// Optional thread-parallel runner, owned; null when single-threaded.
     runner: *mut c_void,
     opts: EncodeOptions,
+    /// EMA of compressed-bytes-per-pixel for the *lossy* paths. Seeds the output
+    /// buffer hint on the next encode so the drain loop almost never grows after
+    /// the first frame. Interior-mutable (`Cell`) so the hot `&self` encode path
+    /// can update it; sound because `Encoder` is `!Sync`. Lossless ignores this
+    /// (its hint is the exact uncompressed footprint).
+    bpp_ema: Cell<f32>,
 }
+
+/// Initial lossy bytes/pixel guess before the EMA warms. JXL q90 photos land
+/// ~0.1–0.4 bpp; 0.5 is conservative without zeroing many× the real output.
+const BPP_SEED: f32 = 0.5;
 
 // libjxl looks up its LCMS context per-use (not stored), same justification as
 // upstream: safe to move across threads, not to share.
@@ -343,6 +354,7 @@ impl Encoder {
             enc,
             runner: ptr::null_mut(),
             opts,
+            bpp_ema: Cell::new(BPP_SEED),
         })
     }
 
@@ -631,35 +643,50 @@ impl Encoder {
 
         ffi::JxlEncoderCloseInput(enc);
 
-        // ── drain output (grow loop, double on NeedMoreOutput) ─────────────
-        // Rate-aware hint: lossless budgets the full uncompressed pixel footprint
-        // (worst case); lossy uses 0.5 bytes/pixel (JXL q90 is typically
-        // 0.1–0.4 bytes/pixel, so this is still conservative without zeroing
-        // 4–8× the actual output). Clamped to [64 KiB, 256 MiB].
+        // ── drain output (write into uninitialized spare capacity) ─────────
+        // No zero-fill: we `reserve` raw capacity and hand libjxl a pointer into
+        // the uninitialized tail, then `set_len` only over the bytes it actually
+        // wrote. `out`'s len stays at `base` for the whole loop, so the existing
+        // append-and-truncate semantics of `encode_into` are preserved exactly.
+        //
+        // Rate-aware hint: lossless budgets the exact uncompressed pixel footprint
+        // (worst case). Lossy seeds from the per-encoder EMA of compressed
+        // bytes/pixel (warms to the real ratio after the first frame → the grow
+        // branch below almost never fires). Clamped to [64 KiB, 256 MiB].
         let px_count = (frame.width as usize).saturating_mul(frame.height as usize);
-        let hint_bytes = if matches!(self.opts.rate, Rate::Lossless) {
+        let lossy = !matches!(self.opts.rate, Rate::Lossless);
+        let hint_bytes = if lossy {
+            ((px_count as f32) * self.bpp_ema.get()) as usize
+        } else {
             px_count
                 .saturating_mul(std::mem::size_of::<S>())
                 .saturating_mul(frame.interleaved_channels() as usize)
-        } else {
-            px_count / 2
         }
         .clamp(1 << 16, 256 << 20);
-        out.resize(out.len() + hint_bytes, 0);
-        let base = out.len() - hint_bytes;
+
+        let base = out.len();
+        out.reserve(hint_bytes); // raw capacity; not zeroed
         let mut pos = base;
         loop {
+            // `len` is pinned at `base`; the writable window is the spare capacity.
+            let cap = out.capacity();
             let mut next = out.as_mut_ptr().add(pos);
-            let mut avail = out.len() - pos;
+            let mut avail = cap - pos;
             let st = ffi::JxlEncoderProcessOutput(enc, &mut next, &mut avail);
-            let written = (out.len() - pos) - avail;
+            let written = (cap - pos) - avail;
             pos += written;
             if st == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
-                out.truncate(pos);
+                out.set_len(pos); // commit only the bytes libjxl wrote
+                if lossy && px_count > 0 {
+                    let bpp = (pos - base) as f32 / px_count as f32;
+                    // 50/50 EMA: tracks content drift without overreacting.
+                    self.bpp_ema.set(0.5 * self.bpp_ema.get() + 0.5 * bpp);
+                }
                 break;
             } else if st == ffi::JxlEncoderStatus::JXL_ENC_NEED_MORE_OUTPUT {
-                let grow = (out.len() - base).max(1 << 16);
-                out.resize(out.len() + grow, 0);
+                // Amortized doubling of the spare region (min 64 KiB step).
+                let grow = (pos - base).max(1 << 16);
+                out.reserve((pos - base) + grow);
             } else {
                 return Err(EncodeError::Jxl(format!(
                     "JxlEncoderProcessOutput error (code {})",
