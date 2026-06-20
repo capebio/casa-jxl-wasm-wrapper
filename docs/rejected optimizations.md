@@ -721,3 +721,15 @@ peaked at cat 5 (avg 4.22), so per-category special-casing of 0/1/2 is also out.
 **Permanently rejected — do not re-attempt bit-decode fusion or magnitude
 special-casing for LJPEG.** The only remaining decode-time lever is parallelism
 (tiles already decode per-tile in parallel via rayon in `dng::decode_tiles`).
+
+### 2026-06-20 follow-up 2 — LJPEG parallelism candidates (A/B/C), measured
+
+Machine: i7-10850H, **6 physical cores / 12 logical (HT)**. Probe `examples/dng_decode_scaling.rs`.
+
+**A — tile parallelism (already shipped via `dng::decode_tiles` rayon par_iter): SATURATED.** Serial tile decode ≈156 ms → parallel ≈25 ms = **6.16× on 12 "threads" = ~100% of the 6 physical cores.** HT adds essentially nothing because the per-symbol critical path is L1-resident (`fast8`) + a short serial predictor dependency — too short for HT to fill. Nothing to fix.
+
+**B — within-tile row parallelism: REJECTED (no headroom).** Would require a two-pass residual-decode + parallel-prefix reconstruct (predictor-1 row starts depend on the previous row). But the cores are already saturated by 165 independent tiles ≫ 6 cores at good granularity; intra-tile parallelism would only contend for the same cores. No wall-clock win, large complexity. Not built.
+
+**C — predictor-chain ILP restructuring: REJECTED (neutral).** Built `decode_c2_ilp` (capture both predictors, decode both residuals, then two independent reconstruct adds back-to-back — vs the shipped interleaved `decode0→recon0→decode1→recon1`). Parity EXACT, run parallel (real path). **Measured -0.5% / -1.0% vs `decode_c2` — neutral.** The out-of-order core already overlaps the two independent predictor chains (`left0`/`left1` were already separate accumulators); the serial, latency-bound bitstream decode is the bottleneck and reordering the cheap reconstruct adds cannot shorten it. Reverted.
+
+**Conclusion:** every LJPEG *decode-kernel* lever is now exhausted (fast12, DHT cache, bit fusion ×2, predictor ILP, row parallelism all dead; cps=2 monomorphization is the one win). Decode is at its floor: per-core latency-bound, cores saturated. The only remaining headroom is *outside* the kernel — `dng::decode_bytes` spends ~36% (≈14 ms) in per-tile buffer alloc + blit-into-frame + IFD parse (the decoder→output seam), and downstream demosaic re-reads the u16 frame. That is the next investigation (decoder→pipeline fusion), not the decoder itself.
