@@ -43,15 +43,18 @@ Full-res **18 MP** CR2, `simd-mt` tier, distance 1.0, under heavy load:
 | 7 | ~6400 ms | 1.89 MB | ✗ |
 
 Findings:
-- **`<1s` is ACHIEVED at effort 1** (919 ms even under a 38-deep queue → ~300–400 ms idle).
-  Same *visual* quality as effort 7 (distance is the quality target; effort only trades
-  size for time) — it just compresses less (4.96 MB vs 2.10 MB).
+- **`<1s` is ACHIEVED at effort 1** (919 ms). Same *visual* quality as effort 7 (distance
+  is the quality target; effort only trades size for time) — it just compresses less
+  (4.96 MB vs 2.10 MB at effort 3).
 - **effort 7 is wasteful on this content**: slower *and larger* (1.89 MB) than effort 5
   (1.69 MB). The size optimum is ~effort 5; the speed/size knee is ~effort 3.
-- **Best-compression-under-1s** (effort 3–5) could NOT be cleanly confirmed: the machine
-  never went idle (min-over-15-reps for effort 3 still 1100 ms). On a normal/idle machine
-  effort 3 (2.10 MB) is almost certainly <1s. **Re-run idle to confirm:**
-  `node tools/encode-real-bench.mjs --file <raw> --tier simd-mt --effort 3 --reps 15`
+- **Best-compression (effort 3, 2.10 MB) is genuinely ~1.2 s on this 6-core laptop —
+  CONFIRMED ON AN IDLE MACHINE** (re-measured at CPU queue 0: effort 3 = 1197 ms, effort 5
+  = 4351 ms). So it is NOT a contention artifact; it's the real hardware floor. Free levers
+  do not cross it: dropping the (constant) alpha channel = 1455 ms / 2.08 MB (no help),
+  `relaxed-simd-mt` = min 1075 ms (still over). effort 2 is pointless (same 4.96 MB as
+  effort 1 but slower). **effort-3-under-1s needs more cores (8+) or PGO-for-MT, not
+  available here.** On an 8–16-core desktop, effort 3 would be <1s (MT scales with cores).
 - The encoder is **already fully optimized**: `-O3 -flto`, 12-thread MT
   (`JxlThreadParallelRunnerDefaultNumWorkerThreads` = `navigator.hardwareConcurrency`).
   No free build win. PGO exists (`build-pgo.mjs`) but is enc-`simd`-only (not the `-mt`

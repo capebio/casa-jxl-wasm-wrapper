@@ -76,6 +76,7 @@ function startServer() {
   return new Promise((r) => server.listen(0, "127.0.0.1", () => r({ server, port: server.address().port })));
 }
 
+const ALPHA = !args.includes("--no-alpha");
 async function run(tier, effort, dist, lossless) {
   const { server, port } = await startServer();
   const browser = await chromium.launch({ headless: true, args: ["--enable-features=SharedArrayBuffer"] });
@@ -85,7 +86,7 @@ async function run(tier, effort, dist, lossless) {
     page.on("console", (m) => { logs += "[page] " + m.text() + "\n"; });
     page.on("pageerror", (e) => { logs += "[pageerror] " + (e.stack || e.message) + "\n"; });
     const ll = lossless ? "1" : "0";
-    await page.goto(`http://127.0.0.1:${port}/?tier=${tier}&effort=${effort}&dist=${dist}&lossless=${ll}`, { waitUntil: "load" });
+    await page.goto(`http://127.0.0.1:${port}/?tier=${tier}&effort=${effort}&dist=${dist}&lossless=${ll}&alpha=${ALPHA ? "1" : "0"}`, { waitUntil: "load" });
     let result;
     try { await page.waitForFunction(() => window.__result !== undefined, { timeout: 300000 }); result = await page.evaluate(() => window.__result); }
     catch (e) { result = { ok: false, error: "timeout: " + e.message }; }
