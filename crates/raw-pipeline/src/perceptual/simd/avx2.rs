@@ -173,6 +173,82 @@ unsafe fn hsum256i_u64(acc: __m256i) -> u64 {
     tmp.iter().map(|&v| v as u32 as u64).sum()
 }
 
+/// Drain lanes {0,4}/{1,5}/{2,6} (R/G/B of 2 pixel-slots; lanes 3,7 = alpha) of an
+/// i32x8 partial into a per-channel u64[3]. Unsigned widen, as in `hsum256i_u64`.
+#[inline]
+unsafe fn drain8_rgb(v: __m256i, acc: &mut [u64; 3]) {
+    let mut t = [0i32; 8];
+    _mm256_storeu_si256(t.as_mut_ptr() as *mut __m256i, v);
+    for k in 0..2 {
+        acc[0] += t[k * 4] as u32 as u64;
+        acc[1] += t[k * 4 + 1] as u32 as u64;
+        acc[2] += t[k * 4 + 2] as u32 as u64;
+    }
+}
+
+/// EXPERIMENTAL AVX2 channel-as-lane SSIM moments (8-wide, 2 px/iter). Same contract
+/// as `ssim_moments_avx2`, but packs 2 RGBA pixels into the 8 i32 lanes and fuses the
+/// three products — the layout the wasm v128 bench proved wins 3.73× (vs the old AVX2
+/// *deinterleave* wash). Not yet wired into dispatch: flip-flop it vs the scalar
+/// `ssim_moments_avx2` (examples/ssim_moments_avx2_flip.rs) before promoting.
+#[target_feature(enable = "avx2")]
+pub unsafe fn ssim_moments_avx2_cal(a: &[u8], b: &[u8], np: usize) -> ([u64; 3], [u64; 3], [u64; 3]) {
+    assert!(
+        a.len() >= np * 4 && b.len() >= np * 4,
+        "ssim_moments_avx2_cal: a.len() and b.len() must be >= np*4"
+    );
+    let mut sa = [0u64; 3];
+    let mut saa = [0u64; 3];
+    let mut sab = [0u64; 3];
+    let mut va = _mm256_setzero_si256();
+    let mut vaa = _mm256_setzero_si256();
+    let mut vab = _mm256_setzero_si256();
+    // Each i32 lane gains ≤255² per iter; drain at 32000 (< 33025 i32 ceiling).
+    const FLUSH: usize = 32000;
+    let mut fc = 0usize;
+    let groups = np / 2;
+    let mut p = 0usize;
+    let mut g = 0usize;
+    while g < groups {
+        let off = p * 4;
+        // Load 8 bytes (2 RGBA px) into the low 64 bits, widen u8→i32 → 8 lanes
+        // [R0,G0,B0,A0, R1,G1,B1,A1].
+        let av = _mm256_cvtepu8_epi32(_mm_loadl_epi64(a.as_ptr().add(off) as *const __m128i));
+        let bv = _mm256_cvtepu8_epi32(_mm_loadl_epi64(b.as_ptr().add(off) as *const __m128i));
+        va = _mm256_add_epi32(va, av);
+        vaa = _mm256_add_epi32(vaa, _mm256_mullo_epi32(av, av));
+        vab = _mm256_add_epi32(vab, _mm256_mullo_epi32(av, bv));
+        p += 2;
+        g += 1;
+        fc += 1;
+        if fc == FLUSH {
+            drain8_rgb(va, &mut sa);
+            drain8_rgb(vaa, &mut saa);
+            drain8_rgb(vab, &mut sab);
+            va = _mm256_setzero_si256();
+            vaa = _mm256_setzero_si256();
+            vab = _mm256_setzero_si256();
+            fc = 0;
+        }
+    }
+    drain8_rgb(va, &mut sa);
+    drain8_rgb(vaa, &mut saa);
+    drain8_rgb(vab, &mut sab);
+    let mut j = p * 4;
+    while p < np {
+        for c in 0..3 {
+            let x = a[j + c] as u64;
+            let y = b[j + c] as u64;
+            sa[c] += x;
+            saa[c] += x * x;
+            sab[c] += x * y;
+        }
+        j += 4;
+        p += 1;
+    }
+    (sa, saa, sab)
+}
+
 /// SSIM moment accumulation over RGBA test+ref. Produces three per-channel sums
 /// (sa, saa, sab) for c in 0..3; sb/sbb are precomputed on the reference.
 ///
@@ -475,5 +551,16 @@ mod reduction_tests {
         let (sa, saa, sab) = unsafe { ssim_moments_avx2(&a, &b, np) };
         let got = ssim::finalize_ssim(&sa, &sb, &saa, &sbb, &sab, np, 3);
         assert!((want - got).abs() < 1e-6, "want={want} got={got}");
+    }
+
+    #[test]
+    fn ssim_moments_cal_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") { return; }
+        let np = 1000usize + 1; // odd → exercise the 2-px-group scalar tail
+        let a: Vec<u8> = (0..np * 4).map(|i| (i * 13 % 255) as u8).collect();
+        let b: Vec<u8> = (0..np * 4).map(|i| (i * 29 % 255) as u8).collect();
+        let want = unsafe { ssim_moments_avx2(&a, &b, np) };
+        let got = unsafe { ssim_moments_avx2_cal(&a, &b, np) };
+        assert_eq!(want, got);
     }
 }
