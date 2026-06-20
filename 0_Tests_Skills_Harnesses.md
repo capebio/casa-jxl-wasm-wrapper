@@ -59,6 +59,17 @@ corpus at 5 sizes (256/512/1024/2048/4096) or real files via `--inputs`.
 **Utility:** the default oracle for any "did this optimization actually help" question.
 Determinism of the fractal corpus means results compare across machines.
 
+### flip_native — in-process native A/B/N timer (Rust)
+**File:** `crates/raw-pipeline/examples/flip_native.rs`
+
+flipflop's discipline for **pure-native Rust kernels**. flipflop runs JS variants or shells
+out per measurement (process startup swamps a 50ms demosaic); for a native function the
+right vehicle is an in-process interleaved timer. flip_native keeps the core ideas: N
+variants of one op, interleaved with per-round start-rotation (thermal/turbo drift hits
+every arm equally), round 0 warmup excluded from the warm median. Use it instead of
+flipflop when the thing under test is a Rust function and you don't want wasm/browser
+overhead. The `*_flip.rs` examples in §2 follow this same shape.
+
 ### flipflopdom — flipflop inside a real headless Chrome
 **Skill:** `flipflopdom` · **Engine:** `flipflopdom.mjs`, `.flipflop/dom-runner.mjs`,
 `.flipflop/dom-worker.mjs`
@@ -124,6 +135,7 @@ Native-level A/B benches. Run with `cargo run --release --example <name>` (raw-p
 | `casabio_encode_flip.rs` | Casa-bio encode path |
 | `cr2_fulldecode_flip.rs` / `cr2_reassembly_flip.rs` / `cr2_demosaic_realfile_flip.rs` | CR2 decode/reassembly/demosaic |
 | `dng_mhc_interior_flip.rs` / `dng_unpack_flip.rs` | DNG MHC demosaic / unpack |
+| `dng_tiles_direct_flip.rs` | Compressed DNG tile path: blit (compact Vec + serial) vs direct band-parallel strided decode; byte-identical parity gate |
 | `demosaic_bilinear_flip.rs` | Bilinear demosaic |
 | `rgb16_pack_flip.rs` / `rgb_to_rgba_flip.rs` | Pixel pack / channel expansion |
 | `downscale_general_flip.rs` / `_reciprocal_flip.rs` / `_snap_flip.rs` | Downscale variants (results: `downscale_reciprocal_flip_RESULTS.md`) |
@@ -136,6 +148,7 @@ Native-level A/B benches. Run with `cargo run --release --example <name>` (raw-p
 | `comparer-bench.rs` | PSNR+moments 2-pass vs fused 1-pass (memory-bound) |
 | `demosaic-bench.rs` | Generic Bayer MHC vs RGGB-specific |
 | `tile-decode-bench.rs` | Tile decoding |
+| `dng_decode_scaling.rs` | Does per-tile LJPEG decode saturate cores? Serial sum vs rayon-parallel + full `decode_bytes` wall time → speedup + efficiency |
 | `jxl_encode_cpp_bench.rs` | JXL C++ bridge encode |
 
 ### Memory-bandwidth benches
@@ -146,7 +159,9 @@ memory-bound (→ SIMD/cores won't help) before chasing it.
 ### Profiling / diagnostic examples
 `pipeline_profile.rs` (full pipeline CPU profile), `wasm_memory_audit.rs` (heap alloc
 audit), `tonemap_subspans.rs`, plus per-format probes (`cr2_render_probe`, `cr2_slice_scan`,
-`orf_black_sweep`, `orf_wb_probe`, `synthetic_calib`).
+`orf_black_sweep`, `orf_wb_probe`, `synthetic_calib`). Visual: `demosaic_preview_demo.rs`
+emits full vs half-res superpixel ORF preview + amplified diff PNGs under
+`docs/outputs/demosaic-preview-demo/` (demosaic-only pixel attribution).
 
 **WASM bench crate:** `crates/raw-pipeline/bench-wasm/` (perceptual-bench-wasm, wasm target).
 
@@ -198,6 +213,12 @@ healthy. Not timing tests — but the plumbing the timing/quality tools depend o
 | `tools/colour-baseline.mjs` | Establishes a colour-parity baseline (mean RGB + luma variance) for demosaic-refactor validation; serves `pkg/` to Chromium. `node tools/colour-baseline.mjs --raw <path>`. Pairs with `tools/colour-verify.mjs` (§3) |
 | `tools/predator-paint-visual-smoke.mjs` | Playwright visual smoke for progressive paint (`jxl-progressive-paint.html`) — screenshots paint evidence (baseline + Sneyers) for regression eyeballing |
 | `tools/ecosystem-map-gen.mjs` | Regenerates the graph in `docs/ecosystem-map.html` from `docs/ecosystem-map.model.json` reconciled vs live Rust; `--check` exits 1 on STALE/UNMAPPED/ORPHAN drift (CI) |
+| `tools/serve-docs.py` | Python static server for `docs/` with COOP/COEP (SAB) — the docs-side sibling of `dev-server.mjs`, used to view `ecosystem-map.html`. `python tools/serve-docs.py [port=8080]` |
+
+**Ecosystem-map HTML injectors** (`tools/inject-*.py`, `tools/round12_all_patches_plus_games.py`)
+— one-off Python patch scripts that splice UI features into `docs/ecosystem-map.html`
+(snake v2, perf leaderboard, intro overlay, Pixel Surgeon game, DOM-defer fix). Not
+reusable harnesses; kept for provenance/replay of the map build.
 
 ---
 
