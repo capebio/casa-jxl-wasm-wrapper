@@ -636,7 +636,7 @@ struct OrfDecoded {
 
 /// Shared ORF decode path: parse → validate → decompress → demosaic → NR → WB/matrix setup.
 /// Returns pre-tonemapped RGB16 and all metadata.  Called by process_orf_impl.
-fn decode_orf_raw(data: &[u8]) -> Result<OrfDecoded, JsError> {
+fn decode_orf_raw(data: &[u8], output_flags: u32) -> Result<OrfDecoded, JsError> {
     let info = tiff::parse(data).map_err(|e| JsError::new(&e.to_string()))?;
 
     if info.compression != 1 {
@@ -658,18 +658,28 @@ fn decode_orf_raw(data: &[u8]) -> Result<OrfDecoded, JsError> {
     let raw = decompress::decompress(strip, w, h).map_err(|e| JsError::new(&e))?;
     let decompress_ms = now_ms() - t;
 
-    // Hypercar fast path for previews (OUT_LIGHTBOX/THUMB): always use planar bilinear SIMD demosaic + planar downscale.
-    // Cheap (SIMD planar store win), no mhc cost for common gallery/lb paths. mhc only for full quality tone when OUT_FULL_RGB8.
+    // Hypercar fast path for previews (OUT_LIGHTBOX/THUMB): planar bilinear SIMD demosaic + planar
+    // downscale. CRAWL A-1: gate the whole preview build on whether a preview output was actually
+    // requested. A pure full-RGB8 batch encode (OUT_FULL_RGB8 only) used to pay a full-res planar
+    // demosaic (3×N u16) + two downscales whose buffers were then discarded in process_orf_impl.
+    // The mhc demosaic below (the OUT_FULL_RGB8 source) is independent and always runs.
+    let need_previews = output_flags & (OUT_LIGHTBOX | OUT_THUMB) != 0;
     let (lb_w, lb_h) = target_dims(w, h, 1800);
     let (thumb_w, thumb_h) = target_dims(w, h, 360);
-    let t_dem = now_ms();
-    let (pr, pg, pb) = demosaic::demosaic_rggb_planar(&raw, w, h).map_err(|e| JsError::new(&e))?;
-    let preview_demosaic_ms = now_ms() - t_dem;  // just the fast planar bilinear demosaic
-    let t_down = now_ms();
-    let lb_packed = downscale_rgb16_planar(&pr, &pg, &pb, w, h, lb_w, lb_h);
-    let thumb_packed = downscale_rgb16_planar(&pr, &pg, &pb, w, h, thumb_w, thumb_h);
-    let preview_downscale_ms = now_ms() - t_down;  // the two planar downs for previews (lb + thumb)
-    let fast_preview = true;  // we always compute and use the fast planar path for previews now
+    let (lb_packed, thumb_packed, preview_demosaic_ms, preview_downscale_ms, fast_preview) =
+        if need_previews {
+            let t_dem = now_ms();
+            let (pr, pg, pb) =
+                demosaic::demosaic_rggb_planar(&raw, w, h).map_err(|e| JsError::new(&e))?;
+            let preview_demosaic_ms = now_ms() - t_dem; // just the fast planar bilinear demosaic
+            let t_down = now_ms();
+            let lb_packed = downscale_rgb16_planar(&pr, &pg, &pb, w, h, lb_w, lb_h);
+            let thumb_packed = downscale_rgb16_planar(&pr, &pg, &pb, w, h, thumb_w, thumb_h);
+            let preview_downscale_ms = now_ms() - t_down; // two planar downs (lb + thumb)
+            (lb_packed, thumb_packed, preview_demosaic_ms, preview_downscale_ms, true)
+        } else {
+            (Vec::new(), Vec::new(), 0.0, 0.0, false)
+        };
 
     let mut params = pipeline::PipelineParams::default_olympus();
     // Olympus 12-bit sensors sit on a ~256-count black pedestal that `default_olympus`
@@ -987,7 +997,7 @@ pub fn process_orf(
         clarity,
     };
     process_orf_impl(
-        decode_orf_raw(data)?,
+        decode_orf_raw(data, OUT_FULL_RGB8 | OUT_LIGHTBOX | OUT_THUMB)?,
         OUT_FULL_RGB8 | OUT_LIGHTBOX | OUT_THUMB,
         &look,
     )
@@ -1044,7 +1054,7 @@ pub fn process_orf_with_flags(
         texture,
         clarity,
     };
-    process_orf_impl(decode_orf_raw(data)?, output_flags, &look)
+    process_orf_impl(decode_orf_raw(data, output_flags)?, output_flags, &look)
 }
 
 /// Rotated RGB8 buffer with updated dimensions.

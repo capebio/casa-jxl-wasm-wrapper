@@ -114,19 +114,22 @@ impl Comparer {
             let blur_r = ((w >> 6).max(1)).min(8);
             let mask = blur::box_blur(&cy, w, h, blur_r);
             if s < 2 && w > 1 && h > 1 {
-                // Not the last level: clone cx/cy/cb so we can keep using them for dn2.
-                levels.push(Level { x: cx.clone(), y: cy.clone(), b: cb.clone(), mask, w, h });
                 let dw = (w >> 1).max(1);
                 let dh = (h >> 1).max(1);
                 let dn = dw * dh;
-                // Pre-allocate output buffers and use dn2_into to avoid the hidden
-                // allocation inside dn2 (PERC-09: makes allocation explicit at the call site).
+                // Pre-allocate the downsample targets (PERC-09: explicit alloc at call site).
                 let mut nx = vec![0f32; dn];
                 let mut ny = vec![0f32; dn];
                 let mut nb = vec![0f32; dn];
-                butteraugli::dn2_into(&cx, &mut nx, w, h, dw, dh);
-                butteraugli::dn2_into(&cy, &mut ny, w, h, dw, dh);
-                butteraugli::dn2_into(&cb, &mut nb, w, h, dw, dh);
+                // PERC-12: move cx/cy/cb into the Level, then borrow them back to feed the
+                // downsample. dn2_into only READS its source and writes the separate nx/ny/nb,
+                // so the planes need not be cloned to stay alive for the next level. Eliminates
+                // 3× full-res clones at s=0 (~288 MB transient @24MP) + 3× half-res at s=1.
+                levels.push(Level { x: cx, y: cy, b: cb, mask, w, h });
+                let lvl = levels.last().expect("level just pushed");
+                butteraugli::dn2_into(&lvl.x, &mut nx, w, h, dw, dh);
+                butteraugli::dn2_into(&lvl.y, &mut ny, w, h, dw, dh);
+                butteraugli::dn2_into(&lvl.b, &mut nb, w, h, dw, dh);
                 cx = nx; cy = ny; cb = nb; w = dw; h = dh;
             } else {
                 // Last level (s==2, or image too small to downsample): move cx/cy/cb
@@ -196,30 +199,33 @@ impl Comparer {
     }
 
     fn downsample_dispatch(&mut self, w: usize, h: usize, dw: usize, dh: usize) {
-        match self.backend {
-            #[cfg(target_arch = "x86_64")]
-            Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe {
-                simd::avx2::downsample_avx2(&self.tx, &mut self.dx, w, h, dw, dh);
-                simd::avx2::downsample_avx2(&self.ty, &mut self.dy, w, h, dw, dh);
-                simd::avx2::downsample_avx2(&self.tb, &mut self.db, w, h, dw, dh);
-            },
-            #[cfg(target_arch = "x86_64")]
-            Backend::Avx512Strict | Backend::Avx512Rsqrt => unsafe {
-                simd::avx512::downsample_avx512(&self.tx, &mut self.dx, w, h, dw, dh);
-                simd::avx512::downsample_avx512(&self.ty, &mut self.dy, w, h, dw, dh);
-                simd::avx512::downsample_avx512(&self.tb, &mut self.db, w, h, dw, dh);
-            },
-            #[cfg(target_arch = "wasm32")]
-            Backend::WasmSimd => {
-                simd::wasm::downsample_wasm(&self.tx, &mut self.dx, w, h, dw, dh);
-                simd::wasm::downsample_wasm(&self.ty, &mut self.dy, w, h, dw, dh);
-                simd::wasm::downsample_wasm(&self.tb, &mut self.db, w, h, dw, dh);
-            },
-            _ => {
-                downsample_inplace(&self.tx, &mut self.dx, w, h, dw, dh);
-                downsample_inplace(&self.ty, &mut self.dy, w, h, dw, dh);
-                downsample_inplace(&self.tb, &mut self.db, w, h, dw, dh);
-            }
+        // CRAWL C-3: the three X/Y/B planes are disjoint (separate src/dst Vecs, no
+        // cross-dependency), so split the borrows and run them concurrently under the
+        // `parallel` feature. The SoA layout (PERC-04) means no per-thread allocation —
+        // each task writes its own output plane. Measured native AVX2: −12.6% @2048² /
+        // −6.6% @4096² butteraugli end-to-end (shrinks with size as the bandwidth-bound
+        // downsample saturates). WASM (serial, no `parallel`) is unaffected. rayon::join
+        // is nesting-safe (degrades to inline under a saturated outer pool).
+        let backend = self.backend;
+        let (tx, ty, tb) = (&self.tx, &self.ty, &self.tb);
+        let (dx, dy, db) = (&mut self.dx, &mut self.dy, &mut self.db);
+        #[cfg(feature = "parallel")]
+        {
+            rayon::join(
+                || downsample_one(backend, tx, dx, w, h, dw, dh),
+                || {
+                    rayon::join(
+                        || downsample_one(backend, ty, dy, w, h, dw, dh),
+                        || downsample_one(backend, tb, db, w, h, dw, dh),
+                    );
+                },
+            );
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            downsample_one(backend, tx, dx, w, h, dw, dh);
+            downsample_one(backend, ty, dy, w, h, dw, dh);
+            downsample_one(backend, tb, db, w, h, dw, dh);
         }
         // Swap tx↔dx (and ty↔dy, tb↔db) so the downsampled output is now in
         // tx/ty/tb — ready for the next scale's scale_err_dispatch — while dx/dy/db
@@ -418,6 +424,25 @@ fn resolve_forced_backend(id: u8) -> Backend {
     {
         let _ = id;
         Backend::Scalar
+    }
+}
+
+/// CRAWL C-3: single-plane backend dispatch for the downsample, factored out so the
+/// three X/Y/B planes can run concurrently (see `downsample_dispatch`).
+#[inline]
+fn downsample_one(backend: Backend, src: &[f32], dst: &mut [f32], w: usize, h: usize, dw: usize, dh: usize) {
+    match backend {
+        #[cfg(target_arch = "x86_64")]
+        Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe {
+            simd::avx2::downsample_avx2(src, dst, w, h, dw, dh);
+        },
+        #[cfg(target_arch = "x86_64")]
+        Backend::Avx512Strict | Backend::Avx512Rsqrt => unsafe {
+            simd::avx512::downsample_avx512(src, dst, w, h, dw, dh);
+        },
+        #[cfg(target_arch = "wasm32")]
+        Backend::WasmSimd => simd::wasm::downsample_wasm(src, dst, w, h, dw, dh),
+        _ => downsample_inplace(src, dst, w, h, dw, dh),
     }
 }
 

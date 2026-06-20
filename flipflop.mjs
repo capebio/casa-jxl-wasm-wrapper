@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir, cpus, hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { resolveInputs, loadItem, materializeTiff } from './flipflop-corpus.mjs';
-import { memSnapshot, startSampler, nearestSample, throttleVerdict } from './flipflop-metrics.mjs';
+import { memSnapshot, memDelta, startSampler, nearestSample, throttleVerdict } from './flipflop-metrics.mjs';
 import { buildRecord, appendRecord, firstPaintOfDay } from './flipflop-journal.mjs';
 
 const DEFAULT_JOURNAL = 'docs/outputs/timing tests/flipflop/flipflopjournal.toon';
@@ -201,13 +201,18 @@ export async function runTest(test, opts) {
       for (const v of rotate(variants, r)) {
         const ctx = { name: desc.name, type: desc.type, size: desc.size, round: r, width: desc.width, height: desc.height, variantName: v.name, inputPath, mark() {} };
         let res;
-        try { res = await runFlip(v, baseInput, ctx, innerReps, mode); }
-        catch (e) { flips.push({ input: desc.name, round: r, variant: v.name, ms: NaN, rss_mb: 'n/a', temp_c: 'n/a', freq_ratio: 'n/a', first_paint: r === 0, failed: true }); continue; }
-        const mem = memSnapshot();
-        const samp = nearestSample(sampler.samples, performance.now());
-        flips.push({ input: desc.name, round: r, variant: v.name, ms: +res.ms.toFixed(3), rss_mb: mem.rss_mb, temp_c: samp.temp, freq_ratio: samp.freq, first_paint: r === 0, marks: res.marks });
-        if (r === 0) round0Out[v.name] = res.out;
         if (globalThis.gc) globalThis.gc();
+        const memBefore = memSnapshot();
+        const wasmBefore = test.wasmMemory ? test.wasmMemory() : null;
+        try { res = await runFlip(v, baseInput, ctx, innerReps, mode); }
+        catch (e) { flips.push({ input: desc.name, round: r, variant: v.name, ms: NaN, rss_mb: 'n/a', delta_rss_mb: 'n/a', delta_heap_mb: 'n/a', delta_wasm_mb: 'n/a', temp_c: 'n/a', freq_ratio: 'n/a', first_paint: r === 0, failed: true }); continue; }
+        const memAfter = memSnapshot();
+        const wasmAfter = test.wasmMemory ? test.wasmMemory() : null;
+        const samp = nearestSample(sampler.samples, performance.now());
+        const deltas = memDelta(memBefore, memAfter);
+        const delta_wasm_mb = (wasmBefore != null && wasmAfter != null) ? +((wasmAfter - wasmBefore) / 1048576).toFixed(1) : 'n/a';
+        flips.push({ input: desc.name, round: r, variant: v.name, ms: +res.ms.toFixed(3), rss_mb: memAfter.rss_mb, delta_rss_mb: deltas.delta_rss_mb, delta_heap_mb: deltas.delta_heap_mb, delta_wasm_mb, temp_c: samp.temp, freq_ratio: samp.freq, first_paint: r === 0, marks: res.marks });
+        if (r === 0) round0Out[v.name] = res.out;
       }
     }
 
@@ -251,8 +256,8 @@ export async function runTest(test, opts) {
     summaryCols: ['input', 'variant', 'role', 'median_warm_ms', 'median_all_ms', 'min_ms', 'stdev_ms', 'saved_pct', 'quality', 'quality_ok', 'trust'],
     summary,
     marksCols: ['input', 'variant', 'label', 'median_ms'], marks: marksAgg,
-    flipsCols: ['input', 'round', 'variant', 'ms', 'rss_mb', 'temp_c', 'freq_ratio', 'first_paint'],
-    flips: flips.map((f) => ({ input: f.input, round: f.round, variant: f.variant, ms: f.ms, rss_mb: f.rss_mb, temp_c: f.temp_c, freq_ratio: f.freq_ratio, first_paint: f.first_paint })),
+    flipsCols: ['input', 'round', 'variant', 'ms', 'rss_mb', 'delta_rss_mb', 'delta_heap_mb', 'delta_wasm_mb', 'temp_c', 'freq_ratio', 'first_paint'],
+    flips: flips.map((f) => ({ input: f.input, round: f.round, variant: f.variant, ms: f.ms, rss_mb: f.rss_mb, delta_rss_mb: f.delta_rss_mb, delta_heap_mb: f.delta_heap_mb, delta_wasm_mb: f.delta_wasm_mb, temp_c: f.temp_c, freq_ratio: f.freq_ratio, first_paint: f.first_paint })),
     thermal, verdict,
   };
   if (opts.journal && !opts.dry) appendRecord(opts.journal, buildRecord(rec));

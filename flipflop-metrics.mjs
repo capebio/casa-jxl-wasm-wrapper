@@ -7,6 +7,14 @@ export function memSnapshot() {
   return { rss_mb: +(m.rss / 1048576).toFixed(1), heap_mb: +(m.heapUsed / 1048576).toFixed(1) };
 }
 
+export function memDelta(before, after) {
+  if (before === null || after === null) return { delta_rss_mb: 'n/a', delta_heap_mb: 'n/a' };
+  return {
+    delta_rss_mb: +(after.rss_mb - before.rss_mb).toFixed(1),
+    delta_heap_mb: +(after.heap_mb - before.heap_mb).toFixed(1),
+  };
+}
+
 export function nearestSample(samples, tMs) {
   if (!samples.length) return { cpu: 'n/a', freq: 'n/a', temp: 'n/a' };
   let best = samples[0], bestD = Math.abs(samples[0].t - tMs);
