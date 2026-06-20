@@ -31,7 +31,7 @@
 //! Native only (the WASM JXL path stays on `web/pkg` + `bridge.cpp`).
 
 #![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
-// SpeedCodeReview ✓ 2026-06-20 · opus-4.8[1m] · sweeps=2 +peer-review · Arch 1/0/1 Alg 2/0/1 Code 4/4/0 (x/y/z=found/green/red, +1 deferred)
+// SpeedCodeReview ✓ 2026-06-20 · opus-4.8[1m] · sweeps=2 +peer-review · Arch 1/0/1 Alg 2/0/1 Code 6/6/0 (x/y/z=found/green/red, +1 deferred)
 
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -457,16 +457,83 @@ impl Decoder {
         r
     }
 
-    /// Timing-only full decode (measurement path; pixels written to scratch and
-    /// dropped). Returns movement counters.
+    /// Timing-only full decode at a fixed **RGBA8** output (measurement path;
+    /// pixels written to scratch and dropped). Returns movement counters.
+    ///
+    /// Always requests 4-channel output regardless of the stream's native channel
+    /// count. For gray/RGB inputs this inflates `output_bytes` and folds in
+    /// channel-upsample work not present in a native decode — a valid upper bound
+    /// for photo (RGBA) decodes, but a *poisoned* number for decoder-throughput
+    /// experiments. Use [`Decoder::time_native_decode`] for the honest figure.
     pub fn time_full_decode(&mut self, jxl: &[u8]) -> Result<DecodeMetrics, DecodeError> {
         let mut scratch: Vec<u8> = Vec::new();
         let t0 = Instant::now();
-        // Always requests 4-channel (RGBA8) output regardless of actual channel count.
-        // For grayscale JXL inputs this inflates measured output_bytes by 4× and
-        // includes a channel-upsample overhead not present in real usage. The timing
-        // is still a valid upper bound for photo (RGBA) decodes.
         let r = unsafe { self.run_full_into::<u8>(jxl, 4, &mut scratch, false) };
+        let elapsed = t0.elapsed();
+        unsafe { ffi::JxlDecoderReset(self.handle) };
+        r?;
+        Ok(DecodeMetrics {
+            input_bytes: jxl.len() as u64,
+            output_bytes: scratch.len() as u64, // u8 elems == bytes
+            allocations: 1,
+            decode_ms: ms(elapsed),
+        })
+    }
+
+    /// Header-only peek: process just far enough to read `JxlBasicInfo`, returning
+    /// the discovered geometry/precision. Subscribes `BASIC_INFO` only — no output
+    /// buffer is bound and no pixels are produced. Caller resets the handle after.
+    unsafe fn peek_meta(&self, jxl: &[u8]) -> Result<DecodedMeta, DecodeError> {
+        let dec = self.handle;
+        if ffi::JxlDecoderSubscribeEvents(dec, S_BASIC.0) != S_SUCCESS {
+            return Err(DecodeError::Process);
+        }
+        if ffi::JxlDecoderSetInput(dec, jxl.as_ptr(), jxl.len()) != S_SUCCESS {
+            return Err(DecodeError::Process);
+        }
+        ffi::JxlDecoderCloseInput(dec);
+        let mut info = std::mem::MaybeUninit::<ffi::JxlBasicInfo>::uninit();
+        loop {
+            let status = ffi::JxlDecoderProcessInput(dec);
+            if status == S_BASIC {
+                if ffi::JxlDecoderGetBasicInfo(dec, info.as_mut_ptr()) != S_SUCCESS {
+                    return Err(DecodeError::BasicInfo);
+                }
+                let bi = info.assume_init_ref();
+                return Ok(DecodedMeta {
+                    num_color_channels: bi.num_color_channels,
+                    has_alpha: bi.alpha_bits > 0,
+                    bits_per_sample: bi.bits_per_sample,
+                    num_extra_channels: bi.num_extra_channels,
+                });
+            } else if status == S_SUCCESS {
+                // Stream ended before basic info surfaced — malformed header.
+                return Err(DecodeError::BasicInfo);
+            } else {
+                // S_NEEDIN (truncated before header) | ERROR | unexpected.
+                return Err(DecodeError::Process);
+            }
+        }
+    }
+
+    /// Timing-only full decode at the stream's **native** channel count (no RGBA
+    /// expansion). Peeks `JxlBasicInfo` to learn the channel count, then times only
+    /// the full decode. Unlike [`Decoder::time_full_decode`] this neither inflates
+    /// `output_bytes` nor folds channel-upsample work into the measurement for
+    /// gray/RGB inputs — the honest figure for decoder-throughput experiments.
+    pub fn time_native_decode(&mut self, jxl: &[u8]) -> Result<DecodeMetrics, DecodeError> {
+        let meta = unsafe { self.peek_meta(jxl) };
+        unsafe { ffi::JxlDecoderReset(self.handle) };
+        let meta = meta?;
+        let nch = meta.num_color_channels + if meta.has_alpha { 1 } else { 0 };
+        // num_color_channels is 1 or 3 for valid streams; alpha adds at most 1.
+        // Refuse a degenerate/over-wide count rather than mis-size the decode.
+        if nch == 0 || nch > 4 {
+            return Err(DecodeError::BasicInfo);
+        }
+        let mut scratch: Vec<u8> = Vec::new();
+        let t0 = Instant::now();
+        let r = unsafe { self.run_full_into::<u8>(jxl, nch, &mut scratch, false) };
         let elapsed = t0.elapsed();
         unsafe { ffi::JxlDecoderReset(self.handle) };
         r?;
@@ -603,7 +670,13 @@ impl Decoder {
                         let n = ebytes / esz;
                         let mut plane: Vec<S> = Vec::with_capacity(n);
                         plane.set_len(n);
-                        std::ptr::write_bytes(plane.as_mut_ptr(), 0, n);
+                        // Mirror the main-buffer policy above: only zero when a
+                        // partial flush could expose uninitialised samples. On the
+                        // normal path libjxl fills every extra-channel sample before
+                        // returning S_FULL, so the memset is pure waste otherwise.
+                        if self.opts.allow_partial {
+                            std::ptr::write_bytes(plane.as_mut_ptr(), 0, n);
+                        }
                         if ffi::JxlDecoderSetExtraChannelBuffer(
                             dec,
                             &epf,
@@ -1529,6 +1602,21 @@ mod tests {
         assert!(m.input_bytes > 0);
         assert_eq!(m.output_bytes, (w * h * 4) as u64);
         assert!(m.decode_ms >= 0.0);
+    }
+
+    #[test]
+    fn time_native_decode_uses_native_channel_count() {
+        // Gray stream: native decode must NOT inflate to RGBA. output_bytes should
+        // equal w*h (1 channel), proving the measurement isn't poisoned by upsample.
+        let (w, h) = (48u32, 36u32);
+        let g: Vec<u8> = (0..(w * h)).map(|i| (i % 256) as u8).collect();
+        let jxl = enc_lossless(&Frame::gray(&g, w, h));
+        let mut dec = Decoder::new(DecodeOptions::default()).unwrap();
+        let native = dec.time_native_decode(&jxl).unwrap();
+        assert_eq!(native.output_bytes, (w * h) as u64, "gray native = 1 channel");
+        // The fixed-RGBA variant inflates the same stream 4×.
+        let full = dec.time_full_decode(&jxl).unwrap();
+        assert_eq!(full.output_bytes, (w * h * 4) as u64);
     }
 
     #[test]
