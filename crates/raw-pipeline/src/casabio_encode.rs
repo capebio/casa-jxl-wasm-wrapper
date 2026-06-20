@@ -131,13 +131,10 @@ pub fn encode_variants_cancellable(
 
     // Detect alpha once from the full-res input; all variant encode calls use this result.
     // RAW images always have alpha=255 → false → 3ch RGB encode path (fast, no extra-channel issues).
-    // alpha_strip fuses the alpha scan + RGB-strip into one pass (bandwidth win for RAW).
-    // The rgb strip for the full-res image is NOT used here (variants encode at 3 sizes),
-    // but we get has_alpha from the single pass.
-    // Capture the full-res RGB strip alongside has_alpha; stored as _full_rgb to
-    // document that the buffer is available for future use (e.g. passing directly
-    // to the full-res encode variant to avoid a second strip inside encode_into).
-    let (has_alpha, _full_rgb) = alpha_strip(rgba);
+    // CRAWL F1: the full-res RGB strip that alpha_strip also produced was dropped here (the
+    // variants re-strip at their own 3 sizes), so we paid a full-frame n*3 alloc+write for
+    // nothing. has_meaningful_alpha does the same early-out alpha scan with zero allocation.
+    let has_alpha = has_meaningful_alpha(rgba);
 
     let full_quality: u8 = if hq_override {
         95
@@ -415,6 +412,11 @@ fn strip_rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 /// in `examples/traversal_fusion_flipflop.rs`.
 ///
 /// For RAW images (always alpha=255) this saves an entire second traversal.
+///
+/// CRAWL F1: superseded at both call sites by `has_meaningful_alpha` — the fused strip
+/// was always discarded (variants re-strip at their own sizes). Retained (allow dead) as
+/// the documented fused scan+strip helper in case a future caller needs the RGB buffer.
+#[allow(dead_code)]
 fn alpha_strip(rgba: &[u8]) -> (bool, Option<Vec<u8>>) {
     let n = rgba.len() / 4;
     let mut rgb = Vec::with_capacity(n * 3);
@@ -430,7 +432,6 @@ fn alpha_strip(rgba: &[u8]) -> (bool, Option<Vec<u8>>) {
 
 /// Returns true if any pixel has alpha < 255.
 /// Use `alpha_strip` instead when you also need the RGB buffer (avoids double pass).
-#[allow(dead_code)]
 fn has_meaningful_alpha(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).any(|px| px[3] < 255)
 }
@@ -606,7 +607,9 @@ pub fn encode_rgba8_pyramid(
     // blurry/tiled artefacts from upscaling smaller intermediate buffers.
     scs.sort_unstable_by(|a, b| b.tw.cmp(&a.tw));
 
-    let (has_alpha, _) = alpha_strip(rgba);
+    // CRAWL F1: only has_alpha is needed here (the strip was discarded); use the
+    // zero-allocation scan instead of alpha_strip's full-frame n*3 strip build.
+    let has_alpha = has_meaningful_alpha(rgba);
 
     // Phase 1: cascade all scales sequentially (each level reads from previous).
     // Produces (pixels, w, h, distance) tuples for parallel encoding.
