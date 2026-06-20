@@ -571,6 +571,18 @@ fn target_dims(w: usize, h: usize, long_edge: usize) -> (usize, usize) {
     }
 }
 
+/// May the ORF preview use the ¼-res 2×2 superpixel demosaic instead of full-res
+/// bilinear? Only when the half-resolution plane (w/2 × h/2) still *supersamples* the
+/// largest preview (the 1800 px lightbox `lb_w`×`lb_h`) — so demosaicing at ¼ res then
+/// downscaling never upsamples. ~4× faster preview demosaic + ¼ the peak heap, and
+/// perceptually equivalent at preview size (Butteraugli 0.063, PSNR 40 dB on a real
+/// 20 MP ORF; see examples/demosaic_preview_demo). Smaller sensors / larger preview
+/// targets fall through to the full-res bilinear path.
+#[inline(always)]
+fn preview_can_halve(w: usize, h: usize, lb_w: usize, lb_h: usize) -> bool {
+    w / 2 >= lb_w && h / 2 >= lb_h
+}
+
 // Output flag bits for process_orf_with_flags.
 const OUT_FULL_RGB8: u32 = 1; // full-resolution RGB8 for JXL encoding
 const OUT_LIGHTBOX: u32 = 2; // 1800 px RGB16 for LookRenderer
@@ -658,27 +670,45 @@ fn decode_orf_raw(data: &[u8], output_flags: u32) -> Result<OrfDecoded, JsError>
     let raw = decompress::decompress(strip, w, h).map_err(|e| JsError::new(&e))?;
     let decompress_ms = now_ms() - t;
 
-    // Hypercar fast path for previews (OUT_LIGHTBOX/THUMB): planar bilinear SIMD demosaic + planar
-    // downscale. CRAWL A-1: gate the whole preview build on whether a preview output was actually
-    // requested. A pure full-RGB8 batch encode (OUT_FULL_RGB8 only) used to pay a full-res planar
-    // demosaic (3×N u16) + two downscales whose buffers were then discarded in process_orf_impl.
-    // The mhc demosaic below runs only when OUT_FULL_RGB8 or OUT_FULL_16 is set (need_full_rgb gate).
+    // Hypercar fast path for previews (OUT_LIGHTBOX/THUMB). CRAWL A-1: gate the whole
+    // preview build on whether a preview output was actually requested — a pure full-RGB8
+    // batch encode (OUT_FULL_RGB8 only) must not pay a preview demosaic + downscales whose
+    // buffers are discarded. The mhc demosaic below runs only when OUT_FULL_RGB8/OUT_FULL_16
+    // is set (need_full_rgb gate).
+    //
+    // P2: when the half-resolution plane still supersamples the lightbox (preview_can_halve),
+    // build previews from the 2×2 superpixel demosaic (¼ res) instead of full-res bilinear —
+    // ~4× faster demosaic + ¼ the peak heap, perceptually equivalent at preview size
+    // (Butteraugli 0.063 @20 MP; examples/demosaic_preview_demo). The superpixel output is
+    // interleaved, so it downscales via downscale_rgb16_impl (byte-identical packed LE format
+    // to the planar downscale). Small frames fall back to the full-res planar bilinear path.
     let need_previews = output_flags & (OUT_LIGHTBOX | OUT_THUMB) != 0;
     let (lb_w, lb_h) = target_dims(w, h, 1800);
     let (thumb_w, thumb_h) = target_dims(w, h, 360);
     let (lb_packed, thumb_packed, preview_demosaic_ms, preview_downscale_ms, fast_preview) =
-        if need_previews {
+        if !need_previews {
+            (Vec::new(), Vec::new(), 0.0, 0.0, false)
+        } else if preview_can_halve(w, h, lb_w, lb_h) {
+            let (hw, hh) = (w / 2, h / 2);
+            let t_dem = now_ms();
+            let half = demosaic::demosaic_rggb_half(&raw, w, h).map_err(|e| JsError::new(&e))?;
+            let preview_demosaic_ms = now_ms() - t_dem; // ¼-res 2×2 superpixel demosaic
+            let t_down = now_ms();
+            let lb_packed = downscale_rgb16_impl(&half, hw, hh, lb_w, lb_h);
+            let thumb_packed = downscale_rgb16_impl(&half, hw, hh, thumb_w, thumb_h);
+            let preview_downscale_ms = now_ms() - t_down; // two downs (lb + thumb) over ¼ pixels
+            (lb_packed, thumb_packed, preview_demosaic_ms, preview_downscale_ms, true)
+        } else {
+            // Full-res bilinear fallback: frame too small to halve without upsampling the lightbox.
             let t_dem = now_ms();
             let (pr, pg, pb) =
                 demosaic::demosaic_rggb_planar(&raw, w, h).map_err(|e| JsError::new(&e))?;
-            let preview_demosaic_ms = now_ms() - t_dem; // just the fast planar bilinear demosaic
+            let preview_demosaic_ms = now_ms() - t_dem; // fast planar bilinear demosaic
             let t_down = now_ms();
             let lb_packed = downscale_rgb16_planar(&pr, &pg, &pb, w, h, lb_w, lb_h);
             let thumb_packed = downscale_rgb16_planar(&pr, &pg, &pb, w, h, thumb_w, thumb_h);
             let preview_downscale_ms = now_ms() - t_down; // two planar downs (lb + thumb)
             (lb_packed, thumb_packed, preview_demosaic_ms, preview_downscale_ms, true)
-        } else {
-            (Vec::new(), Vec::new(), 0.0, 0.0, false)
         };
 
     let mut params = pipeline::PipelineParams::default_olympus();
@@ -1568,6 +1598,60 @@ mod tests {
         let unpacked = unpack_rgb16_le(&packed);
         assert_eq!(unpacked, unpack_scalar(&packed), "unpack != scalar reference");
         assert_eq!(unpacked, src, "pack→unpack round-trip lost data");
+    }
+
+    #[test]
+    fn preview_can_halve_guards_lightbox_supersample() {
+        // 20 MP-ish: w/2 = 2620 ≥ lb 1800 → halve.
+        let (lb_w, lb_h) = target_dims(5240, 3912, 1800);
+        assert!(preview_can_halve(5240, 3912, lb_w, lb_h));
+        // 12 MP: w/2 = 2016 ≥ 1800 → halve.
+        let (lb_w, lb_h) = target_dims(4032, 3024, 1800);
+        assert!(preview_can_halve(4032, 3024, lb_w, lb_h));
+        // Small frame: w/2 = 1000 < 1800 → must NOT halve (¼-res would upsample the lightbox).
+        let (lb_w, lb_h) = target_dims(2000, 1500, 1800);
+        assert!(!preview_can_halve(2000, 1500, lb_w, lb_h));
+    }
+
+    #[test]
+    fn half_res_preview_matches_full_res_within_tolerance() {
+        // P2 quality contract: the ¼-res superpixel preview must stay close to the full-res
+        // bilinear preview at lightbox size (proven Butteraugli 0.063 @20 MP visually in
+        // examples/demosaic_preview_demo). This locks it as a native regression guard — a
+        // wiring fault (wrong stride/plane/dims/CFA phase) blows the delta up 10–100×.
+        // Spatially-coherent synthetic RGGB field (smooth gradient + mid-frequency texture),
+        // representative of real scene content where the two converge after downscaling.
+        let (w, h) = (3600usize, 2400);
+        let mut raw = vec![0u16; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let g = 300.0 + 1600.0 * (x as f32 / w as f32) + 800.0 * (y as f32 / h as f32);
+                let tex = 220.0 * ((x as f32 / 11.0).sin() + (y as f32 / 13.0).cos());
+                raw[y * w + x] = (g + tex).clamp(0.0, 4095.0) as u16;
+            }
+        }
+        let (lb_w, lb_h) = target_dims(w, h, 1800);
+        assert!(preview_can_halve(w, h, lb_w, lb_h));
+
+        // Production full-res path (fallback arm).
+        let (pr, pg, pb) = demosaic::demosaic_rggb_planar(&raw, w, h).unwrap();
+        let full = unpack_rgb16_le(&downscale_rgb16_planar(&pr, &pg, &pb, w, h, lb_w, lb_h));
+        // Production half-res path (fast arm).
+        let (hw, hh) = (w / 2, h / 2);
+        let half_rgb = demosaic::demosaic_rggb_half(&raw, w, h).unwrap();
+        let half = unpack_rgb16_le(&downscale_rgb16_impl(&half_rgb, hw, hh, lb_w, lb_h));
+
+        assert_eq!(full.len(), half.len(), "preview lengths differ");
+        let (mut sum, mut maxd) = (0u64, 0u16);
+        for (&a, &b) in full.iter().zip(&half) {
+            let d = a.abs_diff(b);
+            sum += d as u64;
+            maxd = maxd.max(d);
+        }
+        let mean = sum as f64 / full.len() as f64;
+        // 12-bit scale (0..4095). Correct wiring keeps the mean delta tiny on coherent content;
+        // the generous bound exists to catch a gross regression, not to assert bit-equality.
+        assert!(mean < 40.0, "half preview mean delta {mean:.1} too high (12-bit 0..4095)");
     }
 
     #[test]
