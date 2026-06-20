@@ -2,26 +2,29 @@
 scannerbot: 1
 run_id: 20-06-26-1125
 start: 2026-06-20T11:25Z
-stop: 2026-06-20T11:42Z
+stop: 2026-06-20T12:22Z
 mode: inline
 sweep_categories: [A, B, C, D, E, F]
 target_root: crates/raw-pipeline/src/decompress.rs
 branch: ScannerBotDecompressDotRs
 worktree: ../rcw-wt-scannerbot-decompress
-tally: {arch: 0, perf: 0, mem: 0, bug: 0, correctness: 0, maint: 0, seam: 0, misc: 0}
-disposition: {direct_fix: 0, adr_draft: 0, defer: 1, dropped_X: 0}
+tally: {arch: 0, perf: 0, mem: 0, bug: 0, correctness: 0, maint: 1, seam: 0, misc: 0}
+disposition: {direct_fix: 1, adr_draft: 0, defer: 1, dropped_X: 0}
 files_swept: 1
-findings_total: 1
+findings_total: 2
 pipeline_estimate_pct: 0.0
 ---
 
 # Scannerbot Run 20-06-26-1125
 
+Two sweeps on the same target: **(1) micro-opt (C/D/E)** 11:25–11:42 and **(2) user-directed
+structural (A/B/C)** 11:50–12:22.
+
 | Run | Start | Stop | Duration | Files | Findings | direct_fix / adr / defer / dropped_X |
 |-----|-------|------|----------|-------|----------|--------------------------------------|
-| 20-06-26-1125 | 11:25 | 11:42 | 17m | 1 | 1 | 0 / 0 / 1 / 0 |
+| 20-06-26-1125 | 11:25 | 12:22 | 57m | 1 | 2 | 1 / 0 / 1 / 0 |
 
-**Run tally:** arch 0 · perf 0 · mem 0 · bug 0 · correctness 0 · maint 0 · seam 0 · misc 0  (banked-to-production: **0**)
+**Run tally:** arch 0 · perf 0 · mem 0 · bug 0 · correctness 0 · **maint 1** · seam 0 · misc 0  (banked-to-production: **1**)
 **Sweep:** Category A–F on `crates/raw-pipeline/src/decompress.rs` (single named file) · overlays V, X always on · mode=inline
 
 **Branch-safety note:** base = `main` (216257ac). Verified `decompress.rs` blob `69850ff9` is **byte-identical** on `main` and every active branch (crawlbot/*, perf/mhc-demosaic, ProgressiveJXLEncodeBunch); the only branches ahead of main do not touch this file → no stale-base hazard for this target.
@@ -123,6 +126,79 @@ ADR this run surfaced as ready.
 
 ---
 
+## Structural sweep (sweep 2 — user-directed A/B/C altitude)
+
+User: *"examine it structurally, different levels and perspectives, find opportunities,
+plan, build testing apparatus, measure, execute, measure."* Inline.
+
+**Multi-level read:**
+- **A (whole-system):** the Olympus bitstream is **continuous** (no per-row byte
+  alignment) → cannot seek to row R's bits without decoding 0..R-1. The entropy stage is
+  irreducibly serial; per-strip threading is blocked at the *format* level. Confirms
+  ea3fca93's "not SIMD-able." No A-change.
+- **B (stage coupling):** entropy-decode + predict + store are fused per pixel. Splitting
+  into a residual pass + reconstruct pass would materialize a 24M-elem i32 buffer (extra
+  DRAM round-trip) and unlock **no** parallelism (stride-2 `west` recurrence within rows +
+  row R←R-2 coupling). **Fused single-pass is correct — don't split** (same lesson as
+  tone/traversal fusion). No B-change.
+- **C (subsystem):** **found it.** `read_huff` did an 8 KB `huff[idx]` table load per
+  pixel on the inter-pixel critical path (`high0`→`nbits`→next pixel). From `build_huff`
+  the table is a pure closed form (unary prefix code): `value = leading_zeros_12(idx)`
+  (cap 12 = escape), `len = value+1` (cap 12). **C4 domain-shrink — the table was never
+  needed.**
+
+#### 001b-C4-huff-tablefree · maint (perf-neutral) · C4 domain-shrink · **DIRECT_FIX (banked)**
+- **where:** `BitReader::read_huff` + `decompress_rows_into` call site (`decompress.rs`)
+- **lens:** C4 (oversized table the output doesn't need) · matched_lens: C4
+- **disposition:** **direct_fix** (adopted; user sign-off via AskUserQuestion — perf-neutral
+  structural change to a battle-tested hot path is a judgment call, not unilateral)
+- **change_class:** structural / maint (NOT claimed as a perf win)
+- **what:** Replace the per-pixel 8 KB `huff[idx]` lookup with the closed form
+  `value = idx.leading_zeros() - 20; len = (value+1).min(12)`. **Delete** `build_huff`,
+  `huff_table`, the 8 KB `OnceLock` static, and the `&huff` parameter. Production decode
+  is now table-free; frees 8 KB of L1 data-cache footprint for neighbouring pipeline stages.
+- **prior_art_checked:** R0 `no match`. Distinct from the in-file D3/D6 BitReader rejections.
+- **verification:** R0 ✔ · R1 build ✔ (release) · R2 `cargo test --no-default-features --lib`
+  **147 passed / 0 failed** (decompress suite 8/8: golden, truncation, prefix, d2-sweep) ✔ ·
+  R3 parity **airtight** — `huff_lz_equiv_sweep` proves the formula == dcraw's canonical
+  4096-entry table for **every** index (reference table kept in-test as the oracle); plus
+  full-decode random parity (even/odd/width-1) held during measurement ✔ ·
+  **R4 flipflop: perf-NEUTRAL** (see speed block) — adopted on structural merit, not speed.
+- **measurement note:** the value here is structural (−8 KB static, −3 fns, −1 per-pixel
+  load), not a banked speedup. Isolated A/B was within noise; a full-pipeline cache-footprint
+  benefit is plausible but **unmeasured** (not claimed).
+
+<finding-speed id="001b-C4-huff-tablefree">
+n: 19
+metric: total_ms
+A_median_ms: ~40            # table form (ref)
+B_median_ms: ~40           # lz form
+delta_pct: ~+1             # batch1 mean +2.3% (6/7 faster); batch2 mean +0.34% (median +0.10)
+A_iqr_ms: large            # table-ref swung 36-114 ms run-to-run (thermal)
+B_iqr_ms: large
+trust: low                 # V1 thermal; ±4-10% noise band drowns a sub-5% effect
+corpus: synthetic-Olympus-bitstream (deterministic LCG bytes)
+size: 5239x600 (3.1 MP)
+parity: bit-exact
+max_abs_diff: 0
+lut_index_diff: 0
+px_differ_count: 0
+pipeline_share_pct: n/a
+pipeline_estimate_pct: 0.0   # perf-neutral; banked as structural/maint, not a speedup
+journal: inline (harness not retained; proof = huff_lz_equiv_sweep, exhaustive 4096-idx)
+</finding-speed>
+
+- **D/E (re-confirmed from sweep 1):** the BitReader single-fill / parity-unroll micro-opts
+  remain below the noise floor on this box; not re-chased.
+
+**Section summary (sweep 2):** one structural opportunity found and **banked** — the huff
+table was a needless closed form (C4). Removed 8 KB static + `build_huff`/`huff_table`/
+`OnceLock` + a per-pixel data-cache load; parity airtight; perf-neutral (honest). A/B is
+irreducibly serial (continuous bitstream) and the fused single-pass is the right structure —
+no further structural change.
+
+---
+
 ## Penultimate sweep (gap-in-lenses)
 No cluster of ≥2 unmatched (`matched_lens==none`) findings — the single candidate matched
 D/E4 cleanly. No candidate new lens proposed.
@@ -144,16 +220,19 @@ future architectural pass if RAW decode batch latency becomes a cost centre.)
 
 ---
 ## Run conclusion
-- **Swept:** 1 file · 401 LOC · Category A–F · mode=inline
-- **Findings:** 1 (perf 1 — measured-reject)
-- **Disposition:** direct_fix 0 · adr_draft 0 · defer 1 · dropped_X 0
-- **Banked to production:** 0 perf / 0 bugfix. Production decode code **byte-for-byte unchanged**
-  (diff = +17/−0: a `#[ignore]` `parity_unroll_reject` rejection-note test, in the file's own
-  `d3`/`d6` idiom).
-- **Also written:** `docs/rejected optimizations.md` 2026-06-20 section (repo-wide immune
-  memory; `prior-art.mjs` greps it so a future R0 catches the parity-unroll).
-- **Realized pipeline estimate:** 0.0% (nothing banked — the file was already at its
-  single-thread floor on entry).
-- **Termination state:** **code-saturated · 0 adr_drafts pending.** A re-run banks nothing
-  (idempotent): the one perf candidate is measured-rejected, all other levels are clean.
-- **Run-Stop:** 2026-06-20T11:42Z · **Duration:** 17m
+- **Swept:** 1 file · 437 LOC (post-edit) · Category A–F · mode=inline · **2 sweeps**
+- **Findings:** 2 — (1) parity-unroll (perf, measured-reject); (2) huff table-free (maint/
+  structural, **banked**).
+- **Disposition:** direct_fix 1 · adr_draft 0 · defer 1 · dropped_X 0
+- **Banked to production:** 1 structural (huff table-free, C4). Removed the 8 KB huff static +
+  `build_huff`/`huff_table`/`OnceLock` + a per-pixel data-cache load; production decode is now
+  table-free. Parity airtight (`huff_lz_equiv_sweep`, all 4096 idx). Perf-neutral (honest — not
+  a speed claim). Sweep 1's parity-unroll stays rejected (in-file `parity_unroll_reject` note +
+  `rejected optimizations.md` 2026-06-20 entry; `prior-art.mjs` greps it).
+- **Realized pipeline estimate:** 0.0% (the structural change is perf-neutral by measurement;
+  banked for simplicity + L1 footprint, not speed — the file was already at its single-thread
+  floor on entry).
+- **Termination state:** **code-saturated · 0 adr_drafts pending.** Structurally: A/B is
+  irreducibly serial (continuous bitstream), the fused single-pass is correct, the one
+  needless table is now gone. A re-run banks nothing (idempotent).
+- **Run-Stop:** 2026-06-20T12:22Z · **Duration:** 57m
