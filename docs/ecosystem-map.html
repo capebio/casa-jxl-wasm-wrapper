@@ -2406,6 +2406,40 @@ const SNAKE_PROBES = [
    b_label:'DC first frame (B)', b_ms:320,
    speedup:'3.4×', gate:'≥2×', status:'PASS (perceived)',
    source:'packages/jxl-worker-browser/src/decode-handler.ts'},
+
+  // ── casabio_encode.rs low-level flipflop sweep (2026-06-20) ───────────────
+  {id:'p_strip', stage:'jxl_setup',
+   label:'strip_rgba_to_rgb 1-pass',
+   icon:'⚡',
+   date:'2026-06-20', branch:'perf/half-res-preview',
+   desc:'RGBA8 to RGB8 strip before libjxl, run for every variant size and every pyramid level on the no-alpha RAW path. Per-chunk extend_from_slice replaced by reserve-exact + flat_map byte iterator (1 write pass, no memset). Beat the handoff vec![0]+zip variant (72.1ms) too.',
+   a_label:'extend_from_slice (A)', a_ms:92.6,
+   b_label:'flat_map 1-pass (B)', b_ms:69.6,
+   speedup:'1.33x', gate:'>=5%', status:'PASS',
+   note:'24 MP opaque; byte-exact parity.',
+   source:'crates/raw-pipeline/examples/strip_rgba_to_rgb_flip.rs'},
+
+  {id:'p_alpha_scan', stage:'jxl_setup',
+   label:'has_meaningful_alpha a-only',
+   icon:'⚡',
+   date:'2026-06-20', branch:'perf/half-res-preview',
+   desc:'Full-res RGB-vs-RGBA decision scan. chunks_exact(4).any (4-byte windows) replaced by rgba[3..].step_by(4) which reads only the alpha byte of each pixel. The dominant RAW case is fully opaque, so there is no early exit and the whole frame is scanned.',
+   a_label:'chunks_exact.any (A)', a_ms:33.6,
+   b_label:'step_by(4) a-only (B)', b_ms:30.6,
+   speedup:'1.10x', gate:'>=5%', status:'PASS',
+   note:'24 MP opaque; identical result.',
+   source:'crates/raw-pipeline/examples/alpha_stepby_flip.rs'},
+
+  {id:'p_box_hoist', stage:'downscale',
+   label:'box_downscale stride hoist',
+   icon:'⚡',
+   date:'2026-06-20', branch:'perf/half-res-preview',
+   desc:'Manual hoist of per-row sw*4 / per-pixel dw*4 plus x_ranges.iter().enumerate() (handoff items 2+7). Mixed: +12.3% on one exact ratio but -2.8% to -5.8% on the other three cases. LLVM already hoists the invariants, so the manual version is net noise/regression. Kept the current code unchanged.',
+   a_label:'current (A)', a_ms:171.3,
+   b_label:'manual hoist (B)', b_ms:180.7,
+   speedup:'1.05x SLOWER', gate:'>=5%', status:'REJECT (compiler already hoists)',
+   note:'6000x4000 to 1620x1080 shown; 3 of 4 cases negative.',
+   source:'crates/raw-pipeline/examples/box_downscale_hoist_flip.rs'},
 ];
 
 /* ─── state ─────────────────────────────────────────────────────────────── */
@@ -2609,7 +2643,11 @@ function renderSnake(){
     s+=`<polygon points="${x1+6},${y2-3} ${x1-2},${y2} ${x1+6},${y2+3}" fill="#4a6080" opacity=".5"/>`;
   }
 
-  // Probe needles
+  // Probe needles. Multiple probes can share a stage (successive flipflop sweeps of
+  // the same kernel) — fan them out vertically so needles/circles never overlap and
+  // each stays independently clickable.
+  const probesByStage={};
+  for(const p of SNAKE_PROBES){ (probesByStage[p.stage]=probesByStage[p.stage]||[]).push(p.id); }
   for(const probe of SNAKE_PROBES){
     const stage=SNAKE_STAGES.find(s=>s.id===probe.stage);
     if(!stage) continue;
@@ -2618,11 +2656,15 @@ function renderSnake(){
     const item=rowData.find(r=>r.st.id===stage.id);
     if(!item) continue;
 
+    const sibs=probesByStage[probe.stage];
+    const k=sibs.indexOf(probe.id);   // index within this stage's probe stack
+    const cnt=sibs.length;
+
     let rx=PAD_L+(ri===1?(avail-item.x-item.w):item.x);
-    // Probe at right edge of stage (boundary)
-    const probeX=rx+item.w-item.w*0.3;
+    // Probe at right edge of stage (boundary); nudge X a touch per stack member.
+    const probeX=rx+item.w-item.w*0.3+(k-(cnt-1)/2)*12;
     const probeTopY=rowY[ri]+ROW_H;
-    const probeBotY=probeTopY+22;
+    const probeBotY=probeTopY+22+k*19;   // stack downward
 
     // Needle line
     s+=`<line x1="${probeX}" y1="${probeTopY}" x2="${probeX}" y2="${probeBotY}"
@@ -2633,9 +2675,12 @@ function renderSnake(){
     // Lightning bolt in circle
     s+=`<text x="${probeX}" y="${probeBotY+4}" text-anchor="middle" font-size="12"
           fill="#f5c518" style="pointer-events:none">⚡</text>`;
-    // Small label above needle
-    if(item.w>60){
-      const shortLbl=probe.label.replace(/\.rs$/,'').slice(-18);
+    // Label: single probe → centered above needle; stacked → to the right of each circle.
+    const shortLbl=probe.label.replace(/\.rs$/,'').slice(-18);
+    if(cnt>1){
+      s+=`<text x="${probeX+11}" y="${probeBotY+4}" text-anchor="start"
+            font-size="10" fill="#f5c518" opacity=".7" font-family="ui-monospace,monospace">${shortLbl}</text>`;
+    } else if(item.w>60){
       s+=`<text x="${probeX}" y="${probeTopY-3}" text-anchor="middle"
             font-size="11" fill="#f5c518" opacity=".7" font-family="ui-monospace,monospace">${shortLbl}</text>`;
     }

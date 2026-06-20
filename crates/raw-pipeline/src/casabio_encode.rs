@@ -161,8 +161,9 @@ pub fn encode_variants_cancellable(
 
     let preview_src: &[u8] = preview_rgba.as_deref().unwrap_or(rgba);
 
-    let (thumb_rgba, tw, th) = if pw.max(ph) > 300 {
-        let scale = 300.0 / pw.max(ph) as f32;
+    let preview_long = pw.max(ph); // handoff item 5: compute the long edge once
+    let (thumb_rgba, tw, th) = if preview_long > 300 {
+        let scale = 300.0 / preview_long as f32;
         let dw = (pw as f32 * scale).round().max(1.0) as u32;
         let dh = (ph as f32 * scale).round().max(1.0) as u32;
         // Thumbnail (≤300px): Triangle filter is ~3× faster than Lanczos3 and
@@ -262,9 +263,11 @@ fn build_opts(
     }
     if prog.group_order > 0 {
         let center = prog.center.map(|(cx, cy)| {
-            let sx = if orig_w > 0 { w as f32 / orig_w as f32 } else { 1.0 };
-            let sy = if orig_h > 0 { h as f32 / orig_h as f32 } else { 1.0 };
-            ((cx as f32 * sx) as i64, (cy as f32 * sy) as i64)
+            // Integer coordinate scaling (handoff item 4): deterministic, no f32
+            // precision edge cases. u32×u32 widened to u64 cannot overflow.
+            let mx = if orig_w > 0 { (cx as u64 * w as u64 / orig_w as u64) as i64 } else { cx as i64 };
+            let my = if orig_h > 0 { (cy as u64 * h as u64 / orig_h as u64) as i64 } else { cy as i64 };
+            (mx, my)
         });
         o.group_order = Some(GroupOrder { center });
     }
@@ -391,11 +394,14 @@ pub struct PyramidLevel {
 /// Strip RGBA8 to RGB8 without scanning for alpha (caller already knows has_alpha=false).
 /// Avoids the redundant per-pixel alpha check that `alpha_strip` performs.
 fn strip_rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    // Single bandwidth pass: reserve exact, then extend from a flat [r,g,b] byte
+    // iterator. Beats both the old per-chunk `extend_from_slice` (drops the per-chunk
+    // len-update + 3-byte memcpy call) and a zero-init `vec![0; n*3]` variant (no memset
+    // before overwrite). flipflop: −24.9% @24MP, byte-exact — see
+    // examples/strip_rgba_to_rgb_flip.rs.
     let n = rgba.len() / 4;
     let mut rgb = Vec::with_capacity(n * 3);
-    for px in rgba.chunks_exact(4) {
-        rgb.extend_from_slice(&px[0..3]);
-    }
+    rgb.extend(rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]));
     rgb
 }
 
@@ -432,8 +438,15 @@ fn alpha_strip(rgba: &[u8]) -> (bool, Option<Vec<u8>>) {
 
 /// Returns true if any pixel has alpha < 255.
 /// Use `alpha_strip` instead when you also need the RGB buffer (avoids double pass).
+///
+/// Alpha-only strided scan: reads just the α byte (index 3, 7, 11, …) of each pixel,
+/// skipping the RGB triples the chunks-window form materialised. flipflop: −9.1% on the
+/// dominant opaque 24MP scan, identical result — see examples/alpha_stepby_flip.rs.
 fn has_meaningful_alpha(rgba: &[u8]) -> bool {
-    rgba.chunks_exact(4).any(|px| px[3] < 255)
+    if rgba.len() < 4 {
+        return false;
+    }
+    rgba[3..].iter().step_by(4).any(|&a| a < 255)
 }
 
 fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) -> bool {
