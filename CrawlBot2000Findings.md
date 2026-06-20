@@ -213,3 +213,52 @@ thrown away — pure waste.)
 
 F1 is a large, byte-exact win (**4.1× + −68.7 MB** per encode on the RAW path) shipped at two sites.
 Remaining casabio levers (F2/F7) are incremental and need scratch threading; deferred. Bases covered.
+
+---
+
+# `crates/raw-pipeline/src/pipeline.rs` (tone cost-center)
+
+**Branch:** `crawlbot/pipeline-rs-mt-20260620T2210` · **Status:** ❌ A-4 measured NON-WIN (reverted); A-3 deferred
+
+## A-4 — parallel tone scratch hoist (for_each_init) — MEASURED NON-WIN, NOT SHIPPED
+
+The parallel SIMD tone path (`process_into_simd` / `process_16bit_simd`) re-declares `[0f32; BLK]×3`
+(BLK=2048, 24 KB) SoA scratch *inside* each per-block Rayon closure. The serial path hoists it
+(PIPE-005); the parallel path could not. I replaced the `for_each` with `for_each_init`, which
+allocates+zeros the scratch **once per Rayon job** and reuses it across blocks (safe; no unsafe
+MaybeUninit). Compiles; parity preserved (max diff 1 u8 / 6 u16 — the documented SIMD tolerance).
+
+**Measured (cross-build A/B, `process_simd_flip`, 24 MP, `--features parallel`, back-to-back):**
+
+| build | process_simd (8-bit) | process_16bit_simd |
+|-------|---------------------|--------------------|
+| base (per-block scratch) | 73.4 ms | 77.4 ms |
+| A-4 (for_each_init) | 76.1 ms | 79.6 ms |
+
+A-4 is **within thermal noise and slightly *worse*** — **not shipped.** The discovery's "−288 MB
+memset traffic @24MP" is a *static traffic* estimate that does not translate to wall-clock: the
+24 KB stack scratch is L1-resident and zeroed-then-immediately-overwritten, so the store buffer + L1
+absorb it entirely, overlapped with the per-block LUT-gather + SIMD-tone compute. for_each_init's
+per-job closure capture adds marginal overhead with no compute benefit. **Lesson: byte-traffic
+estimates are not latency; measure before believing a memset "win" on small, hot, overwritten
+scratch.** Reverted clean.
+
+## Other pipeline.rs bases (analyzed)
+
+- **A-3 (process_rgba / process_16bit_scalar still scalar per-pixel tone) — DEFERRED (secondary
+  path).** The plain RGB8 path was migrated to SoA `apply_tone_bulk` (3.71× measured), but the
+  **RGBA8** and 16-bit-scalar entries still call per-pixel `apply_tone_fused`. Routing them through
+  a 4-stride / u16 scatter variant of `simd_block_kernel` would give ~3.6× on those paths — real,
+  but the consumers are secondary (Tauri direct-RGBA, 16-bit TIFF), not the RAW→JXL primary path,
+  and it needs new kernel scatter variants + parity tests. Higher-effort, lower-priority; deferred.
+- **A-8 (interleave pre_r/g/b into one pre_rgb LUT) — likely a loss.** The three channels gather by
+  *different* per-channel codes, so a single `code*3` gather doesn't serve all three; the in-code
+  PIPE-002 note already gates it behind a flip. Triples the table footprint. Skip.
+- **A-7 (auto_wb_rggb serial) — rare fallback, already 64× strided.** Not on the hot path.
+
+## Conclusion
+
+pipeline.rs (the tone cost-center) is at its memory/compute floor for the **primary** RGB8 path. The
+one MT-memory idea here (A-4) is a **measured non-win** — the per-block stack zeroing is free in
+practice. The only remaining real lever (A-3, SoA SIMD for RGBA/16-bit) is a secondary-path speed win
+deferred on effort/priority. No code shipped from this file; the negative result is the finding.
