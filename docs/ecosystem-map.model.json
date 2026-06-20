@@ -282,8 +282,8 @@
         "rust",
         "wasm"
       ],
-      "gc": 41,
-      "lines": 3439
+      "gc": 43,
+      "lines": 3500
     },
     {
       "id": "p_params",
@@ -295,7 +295,7 @@
         "rust",
         "wasm"
       ],
-      "line": 125
+      "line": 159
     },
     {
       "id": "p_lut",
@@ -362,7 +362,7 @@
         "rust",
         "wasm"
       ],
-      "line": 2135
+      "line": 2172
     },
     {
       "id": "p_pc",
@@ -374,7 +374,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1089
+      "line": 1123
     },
     {
       "id": "p_wb",
@@ -397,7 +397,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1452
+      "line": 1486
     },
     {
       "id": "f_apply_tone",
@@ -409,7 +409,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1161
+      "line": 1195
     },
     {
       "id": "f_apply_tone4",
@@ -421,7 +421,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1287
+      "line": 1321
     },
     {
       "id": "f_tone_curve",
@@ -433,7 +433,7 @@
         "rust",
         "wasm"
       ],
-      "line": 241
+      "line": 275
     },
     {
       "id": "f_process_rgba",
@@ -445,7 +445,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1864
+      "line": 1900
     },
     {
       "id": "f_process16",
@@ -457,7 +457,7 @@
         "rust",
         "wasm"
       ],
-      "line": 2005
+      "line": 2041
     },
     {
       "id": "f_build_pre",
@@ -469,7 +469,7 @@
         "rust",
         "wasm"
       ],
-      "line": 506
+      "line": 540
     },
     {
       "id": "f_build_post",
@@ -481,7 +481,7 @@
         "rust",
         "wasm"
       ],
-      "line": 628
+      "line": 662
     },
     {
       "id": "c_pre_lut",
@@ -515,7 +515,7 @@
         "rust",
         "wasm"
       ],
-      "line": 345
+      "line": 379
     },
     {
       "id": "f_molchanov",
@@ -527,7 +527,7 @@
         "rust",
         "wasm"
       ],
-      "line": 357
+      "line": 391
     },
     {
       "id": "f_spring",
@@ -539,7 +539,7 @@
         "rust",
         "wasm"
       ],
-      "line": 380
+      "line": 414
     },
     {
       "id": "c_grid",
@@ -551,7 +551,7 @@
         "rust",
         "wasm"
       ],
-      "line": 419
+      "line": 453
     },
     {
       "id": "c_ffi_perc",
@@ -563,7 +563,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1089
+      "line": 1123
     },
     {
       "id": "d_mhc",
@@ -906,6 +906,17 @@
       "lines": 1989
     },
     {
+      "id": "de_event",
+      "k": "module",
+      "p": "dec_rs",
+      "l": "DecodeEvent / progressive",
+      "desc": "DecodeEvent and the progressive machinery are how the decoder delivers an image *in stages* rather than all at once. JPEG XL supports 'progressive' decoding: a rough version of the whole picture appears almost immediately, then successive passes sharpen it. DecodeEvent (lines 202-214) is the message the decoder hands your callback at each stage. It has two shapes: Progress { pass, width, height, pixels: &'a [S] } — a *borrowed* view of the current partial image, where pass counts the refinement step and pixels points at the live output buffer; and Final { width, height, pixels: Vec<S> } — the *owned*, finished image. ProgressControl (lines 194-198) is what your callback returns: Continue to keep refining, or Stop to bail out early and take the best version decoded so far.\n\nWhy it exists: for a digital-twin or gallery viewer, time-to-first-pixel matters more than perfect fidelity. A user scrolling a huge biodiversity image library wants *something* on screen instantly; they will tolerate it sharpening over the next moment. Progressive decode delivers exactly that. The Stop control is the other half: if the rough version is already good enough (or the user scrolled away), you stop wasting CPU on passes nobody will see. The doc comment notes 'quality is front-loaded so pass matters' — the early passes carry most of the visible improvement.\n\nHow it works under the hood (in run_progressive_into, lines 600-721): the decoder subscribes to three libjxl events — BASIC_INFO, FRAME_PROGRESSION, and FULL_IMAGE — and calls JxlDecoderSetProgressiveDetail(kPasses) so libjxl reports pass-by-pass. The processing loop watches for S_PROG (a progression event); when one arrives it calls JxlDecoderFlushImage to materialise the current partial pixels into the output buffer, then fires on_event with a borrowed Progress carrying those pixels and the pass counter. If your callback returns Stop, the loop breaks and returns the best-so-far image; otherwise it runs to S_FULL/S_SUCCESS and returns the complete image.\n\nThe borrowed-vs-owned split is the key data-representation decision. Progress lends &[S] (a slice into the decoder's own buffer) so no copy is made for the common case where you only want to *paint* the partial frame and discard it. Only Final transfers ownership of a Vec, because that one you keep. There is also a legacy parallel API lower in the file (DecodeProgressiveEvent / ProgressiveFrame, lines 791-921) doing the same thing for RGBA8-only callers, where decode_progressive_frames_borrowed lends bytes and decode_progressive_frames clones them into owned ProgressiveFrame structs for callers that need to retain them.\n\nGotchas: progressive flush buffers are *always* zeroed before use (line 676, std::ptr::write_bytes) — unlike the non-progressive full path which only zeroes when allow_partial is set — because a flush can legitimately expose a buffer that libjxl has only partly filled, and reading uninitialised memory would be undefined behaviour. Also, returning Stop on the very first pass still gives you a full-shaped image (the decode_progressive_stop_returns_best_so_far test confirms width/height and a full-length buffer come back), so consumers never have to special-case a zero-sized result. The pass counter is incremented after each Progress event, so the first event your callback sees is pass 0.",
+      "tech": [
+        "rust"
+      ],
+      "line": 203
+    },
+    {
       "id": "de_decoder",
       "k": "module",
       "p": "dec_rs",
@@ -926,17 +937,6 @@
         "rust"
       ],
       "line": 179
-    },
-    {
-      "id": "de_event",
-      "k": "module",
-      "p": "dec_rs",
-      "l": "DecodeEvent / progressive",
-      "desc": "DecodeEvent and the progressive machinery are how the decoder delivers an image *in stages* rather than all at once. JPEG XL supports 'progressive' decoding: a rough version of the whole picture appears almost immediately, then successive passes sharpen it. DecodeEvent (lines 202-214) is the message the decoder hands your callback at each stage. It has two shapes: Progress { pass, width, height, pixels: &'a [S] } — a *borrowed* view of the current partial image, where pass counts the refinement step and pixels points at the live output buffer; and Final { width, height, pixels: Vec<S> } — the *owned*, finished image. ProgressControl (lines 194-198) is what your callback returns: Continue to keep refining, or Stop to bail out early and take the best version decoded so far.\n\nWhy it exists: for a digital-twin or gallery viewer, time-to-first-pixel matters more than perfect fidelity. A user scrolling a huge biodiversity image library wants *something* on screen instantly; they will tolerate it sharpening over the next moment. Progressive decode delivers exactly that. The Stop control is the other half: if the rough version is already good enough (or the user scrolled away), you stop wasting CPU on passes nobody will see. The doc comment notes 'quality is front-loaded so pass matters' — the early passes carry most of the visible improvement.\n\nHow it works under the hood (in run_progressive_into, lines 600-721): the decoder subscribes to three libjxl events — BASIC_INFO, FRAME_PROGRESSION, and FULL_IMAGE — and calls JxlDecoderSetProgressiveDetail(kPasses) so libjxl reports pass-by-pass. The processing loop watches for S_PROG (a progression event); when one arrives it calls JxlDecoderFlushImage to materialise the current partial pixels into the output buffer, then fires on_event with a borrowed Progress carrying those pixels and the pass counter. If your callback returns Stop, the loop breaks and returns the best-so-far image; otherwise it runs to S_FULL/S_SUCCESS and returns the complete image.\n\nThe borrowed-vs-owned split is the key data-representation decision. Progress lends &[S] (a slice into the decoder's own buffer) so no copy is made for the common case where you only want to *paint* the partial frame and discard it. Only Final transfers ownership of a Vec, because that one you keep. There is also a legacy parallel API lower in the file (DecodeProgressiveEvent / ProgressiveFrame, lines 791-921) doing the same thing for RGBA8-only callers, where decode_progressive_frames_borrowed lends bytes and decode_progressive_frames clones them into owned ProgressiveFrame structs for callers that need to retain them.\n\nGotchas: progressive flush buffers are *always* zeroed before use (line 676, std::ptr::write_bytes) — unlike the non-progressive full path which only zeroes when allow_partial is set — because a flush can legitimately expose a buffer that libjxl has only partly filled, and reading uninitialised memory would be undefined behaviour. Also, returning Stop on the very first pass still gives you a full-shaped image (the decode_progressive_stop_returns_best_so_far test confirms width/height and a full-length buffer come back), so consumers never have to special-case a zero-sized result. The pass counter is incremented after each Progress event, so the first event your callback sees is pass 0.",
-      "tech": [
-        "rust"
-      ],
-      "line": 203
     },
     {
       "id": "de_image",
@@ -1058,7 +1058,7 @@
       "tech": [
         "rust"
       ],
-      "gc": 2,
+      "gc": 3,
       "lines": 236
     },
     {
@@ -1348,8 +1348,8 @@
         "wasm"
       ],
       "desc": "This file (src/lib.rs at the repository root, NOT the one under crates/) is the front door the web browser uses to reach the RAW image pipeline. Everything else in the Rust codebase is a library; this file is the thin \"glue\" layer that takes that library and exposes a handful of functions to JavaScript by tagging them with #[wasm_bindgen]. wasm-bindgen is the tool that compiles Rust to WebAssembly (\"wasm\" — a fast, portable binary that runs inside a web page like a tiny CPU-native module) and auto-generates the JavaScript bindings so the browser can call Rust functions and pass byte arrays back and forth. At the top of the file you can see it pulls in the same four core modules the native build uses — decompress, demosaic, pipeline, tiff (lines 11-14) — so the browser runs byte-for-byte the SAME decoding science as the desktop app, just compiled for a different target.\n\nWhy it exists: a camera RAW file is not a viewable image. It is a sensor dump — millions of single-colour brightness readings behind a coloured grid — wrapped in a manufacturer-specific container. To show it on screen the browser would otherwise need to reimplement all of that parsing and colour maths in slow JavaScript. Instead, this entry point lets the heavy lifting happen in compiled Rust at near-native speed inside the page, while JavaScript stays in charge of the user interface. The module-level doc comment spells out the contract: parse an ORF blob, decompress the 12-bit predictive stream, demosaic (reconstruct full colour from the single-colour-per-pixel mosaic), apply white balance and the sRGB tone curve, fix orientation, and hand back an interleaved pixel buffer plus its dimensions. Notably it deliberately leaves JXL/WebP *encoding* to a separate component to keep this wasm module small.\n\nHow it works: the file is organised around a few exported #[wasm_bindgen] surfaces. The core is the process_orf family (around line 905) which returns a ProcessResult struct — a bundle holding the finished RGB8 pixels plus a large set of read-only fields: timing for each stage (decompress_ms, demosaic_ms, tonemap_ms, orient_ms), the white balance actually used, the colour matrix, and a full set of EXIF facts (lens, ISO, GPS, exposure) for the gallery's info panel. It also carries pre-downscaled \"lightbox\" (1800 px) and \"thumb\" (360 px) buffers so the gallery never has to re-decode. To move large pixel buffers to JavaScript cheaply it uses take_* methods (e.g. take_rgb, take_rgba at lines 264-298) that std::mem::take the Vec out of the struct — transferring ownership rather than copying twice. There is also an OUT_* output-flags bitmask (lines 548-556) so a caller doing batch JXL encoding can ask for only the full-resolution buffer and skip generating previews, and an OUT_NO_ORIENT flag that lets the encoder store rotation as metadata instead of paying a 60-200 MB physical rotate.\n\nConnections: on the JavaScript side this module is invoked from the browser progressive-paint loop (web_paint) which calls process_orf to turn camera bytes into pixels. On the Rust side, every exported function ultimately delegates into the shared raw-pipeline crate — for example process_orf calls decode_orf_raw (line 601), which runs tiff::parse, decompress::decompress, demosaic::demosaic_rggb_mhc / demosaic_rggb_planar, and pipeline::process_into_auto. The data that crosses the wasm boundary is always plain byte arrays (Uint8Array in JS): file bytes in, RGBA8/RGB8 pixels out, plus scalar metadata. Critically, the browser does NOT use this file for JXL compression — that is a separate wasm codec (bridge) — so this entry point is purely the RAW-to-pixels half of the picture.\n\nGotchas a maintainer must know: WebAssembly has no wall clock, so timing here calls into the browser's performance.now() via now_ms() (line 311), which caches the Performance object and even falls back through window → WorkerGlobalScope → Date.now so it works inside web workers, not just the main page. The take_* methods transfer ownership: calling take_rgb twice returns an empty buffer the second time — a deliberate one-shot to avoid double-copies. Multithreading (rayon) only activates if the crate is built with the parallel-wasm feature AND JavaScript first calls init_thread_pool (line 19-20), which in turn requires the page to be served with COOP/COEP security headers so SharedArrayBuffer is allowed. Several large blocks near the top (demosaic_bench_*, fstats_*) are bench-only A/B harnesses driven by tooling scripts, not part of the production path — they exist to time SIMD vs scalar kernels and should not be mistaken for the real pipeline.",
-      "gc": 57,
-      "lines": 3240
+      "gc": 58,
+      "lines": 3248
     },
     {
       "id": "we_process",
@@ -1360,7 +1360,7 @@
         "wasm"
       ],
       "desc": "process_orf (and its siblings for DNG and CR2) is the single most-used wasm function: give it the raw bytes of a camera file and it returns finished, screen-ready pixels. Conceptually it is the whole RAW conveyor belt packed behind one call — parse the container, undo the camera's compression, reconstruct colour, apply the photographic \"look\", and orient the result the right way up. In the model it is labelled process_orf/dng/cr2 because the same shape of function exists for each supported camera format; the ORF (Olympus) path is the reference implementation and sits at line 905 in src/lib.rs. What flows in is a flat byte array (the file on disk) plus a long list of look sliders — exposure, contrast, highlights, shadows, whites, blacks, saturation, vibrance, temperature, tint, texture, clarity, and optional white-balance overrides. What flows out is a ProcessResult whose main payload is an interleaved RGBA8/RGB8 pixel buffer (one byte per channel per pixel), ready to draw on an HTML canvas.\n\nWhy it exists: the browser needs one clean entry that does the full job in compiled code, because doing it piecemeal across the JavaScript/wasm boundary would mean shipping multi-megabyte intermediate buffers back and forth several times per image. By bundling parse→decompress→demosaic→tone→orient into one Rust call, only the original file goes in and only the final pixels come out — the heavy intermediates (the Bayer mosaic, the linear 16-bit RGB) never leave wasm memory. The function also bakes in safety: validate_orf_structure (line 864) rejects zero or absurd dimensions, caps the image at 50 megapixels and 16384 px per side, and uses checked_mul/checked_add so a maliciously crafted header cannot overflow a size calculation and corrupt memory — important because this runs on untrusted files a user dropped into a web page.\n\nHow it works, concretely: process_orf packs its slider arguments into a LookOverrides struct and calls process_orf_impl (line 713), but first decode_orf_raw (line 601) does the format-specific work. It runs tiff::parse to read the IFD metadata (dimensions, strip location, orientation, white balance, colour matrix, ISO, GPS), checks compression==1 (Olympus 12-bit), then slices out the compressed strip and runs decompress::decompress to recover the Bayer mosaic — the grid of single-colour readings, arranged R-G/G-B (\"RGGB\"). It then takes TWO demosaic routes: a fast planar bilinear pass (demosaic_rggb_planar) that is immediately box-downscaled into the 1800 px lightbox and 360 px thumb previews, and the slower high-quality demosaic_rggb_mhc (multiscale homogeneity-directed — better edges, fewer colour fringes) for the full-resolution output. White balance is taken straight from the camera when present (wb_from_camera, line 646) and only falls back to auto_wb_rggb gray-world estimation when the camera stored none — a deliberate fidelity choice noted in the comments. ISO-gated luminance noise reduction (apply_luminance_nr) runs for high-ISO shots. Finally process_orf_impl applies the look sliders via pipeline::apply_look_params, optionally runs unsharp masking for texture/clarity, runs the tone pipeline through pipeline::process_into_auto into a preallocated RGB8 buffer, and applies EXIF orientation via pipeline::apply_orientation unless OUT_NO_ORIENT is set.\n\nConnections: on the JS side, web_paint and the gallery call process_orf / process_orf_with_flags and read pixels back through take_rgb / take_rgba. On the Rust side it is purely a delegating shell over the shared raw-pipeline crate (tiff, decompress, demosaic, pipeline) — the SAME functions the native desktop binary uses, which is the whole point of compiling that library to wasm. The representation crossing the boundary is bytes in (the file) and bytes out (RGBA8 pixels plus scalar metadata fields on ProcessResult). It does not touch the JXL codec at all; encoding to JXL happens elsewhere (bridge in the browser, the native codecs on desktop).\n\nGotchas: the timing fields (decompress_ms etc.) are measured with the browser clock, so they are wall-clock and include any thread contention. The preview buffers (lb/thumb) are produced from the FAST bilinear demosaic, not the high-quality MHC one — a deliberate trade so the gallery is responsive; only the full-resolution output gets MHC quality. The output_flags bitmask matters: passing the wrong flags can leave the lightbox/thumb/full buffers empty (zero-length with zero dims), which is intended, not a bug. And because the look sliders are folded in here, the same RAW decode is re-run from scratch if you only changed a slider — which is exactly the inefficiency LookRenderer (we_look) exists to avoid.",
-      "line": 1005
+      "line": 1007
     },
     {
       "id": "we_look",
@@ -1371,7 +1371,7 @@
         "wasm"
       ],
       "desc": "LookRenderer (src/lib.rs, struct at line 1434) is the interactive-editing optimisation. When a user is dragging exposure, contrast or white-balance sliders in the lightbox, you do NOT want to re-parse the file and re-demosaic on every tiny movement — that work is identical each time and is the expensive part. LookRenderer solves this by holding the already-decoded image (the linear 16-bit RGB, post-demosaic, pre-look) inside wasm memory, so each slider tick only re-runs the cheap final stage: the tone/colour \"look\" pipeline. It is a stateful object the JavaScript side constructs once and then calls render() on many times. What flows in at construction is a packed 16-bit RGB buffer (6 bytes per pixel) plus dimensions, EXIF orientation, and a colour matrix; what flows out of each render() call is a finished RGB8 buffer ready for the canvas.\n\nWhy it exists: it directly attacks the cost of interactivity. The previous pattern was to call the whole process_orf path (we_process) for every edit, paying the parse + decompress + demosaic cost — tens to hundreds of milliseconds — on each frame, which makes sliders feel laggy. By keeping the demosaiced rgb16 resident, only the tone math (a per-pixel matrix multiply, saturation/vibrance, and two lookup-table gathers) runs per tick. Crucially, only the OUTPUT pixels cross the wasm/JS boundary on each render() — the comment at line 1542 states this explicitly — so there is no per-tick re-upload of the large source buffer. It is constructed from the same packed lightbox/thumb buffers that process_orf already produced (via take_rgb16_lb / take_rgb16_thumb), so there is zero extra decode to set it up.\n\nHow it works: the constructor (new / new_with_options, lines 1453-1521) takes the packed little-endian u16 bytes, validates the length is exactly width×height×6 (with checked_mul overflow guards), and unpacks them into a Vec<u16> via unpack_rgb16_le. It stores the colour matrix as a 3×3 (falling back to pipeline::CAM_TO_SRGB if the caller passes a slice that is not exactly 9 floats). render() (line 1544) builds a fresh PipelineParams::default_olympus, overrides white balance if the caller passed finite positive values, folds the slider values in through pipeline::apply_look_params, and then runs pipeline::process. If texture or clarity are non-zero it first clones the rgb16 and runs apply_unsharp_masks (because unsharp mutates the buffer and the source must stay pristine for the next tick); otherwise it processes the stored buffer directly. A neat performance lever is apply_rotation: when false, render() returns sensor-orientation pixels and lets the JS side apply the EXIF rotation as a free GPU/CSS transform at draw time, skipping a full-buffer transpose every single tick for rotated photos.\n\nConnections: JavaScript constructs a LookRenderer from buffers handed out by process_orf and then drives it from the slider UI. Internally it leans entirely on the shared pipeline module — PipelineParams, apply_look_params, process, apply_unsharp_masks, apply_orientation, CAM_TO_SRGB — i.e. exactly the same tone code the full path uses, guaranteeing the live preview matches the final export. The data crossing the boundary is: once, the packed rgb16 + matrix + orientation in; then repeatedly, just RGB8 out. It exposes getters (orientation, native_width, native_height) so the JS display layer knows how to rotate when apply_rotation is off.\n\nGotchas: the source buffer is linear-light 16-bit RGB AFTER demosaic but BEFORE any look — that separation is what makes re-rendering cheap, but it also means the colour matrix and white balance must be supplied/known at construction, because they are part of the look replay. When texture/clarity are active the renderer must clone the buffer each call, which costs an allocation and copy — so heavy clarity edits are noticeably more expensive than plain exposure/contrast edits. And remember it operates on the lightbox-sized (1800 px) buffer for responsiveness, not full resolution; the final full-res render still goes through the process_orf path.",
-      "line": 1742
+      "line": 1745
     },
     {
       "id": "we_cmp",
@@ -1382,7 +1382,7 @@
         "wasm"
       ],
       "desc": "PerceptualComparer (src/lib.rs, line 2256) is the browser-side quality judge. After the page compresses an image to JXL and decodes it back, it needs to ask \"how visually different is this from the original?\" — and answer fast enough to drive an automatic quality gate during progressive loading. This struct is a thin #[wasm_bindgen] wrapper around the shared Rust perceptual engine (PerceptualCore, the same Comparer used natively), exposing three industry-standard image-quality scores to JavaScript: Butteraugli (a perceptual difference metric modelling how the human eye weights colour and detail errors — lower is better, roughly \"how many just-noticeable differences\"), SSIM (structural similarity, 0..1, higher is better), and PSNR (peak signal-to-noise ratio in decibels, higher is better). What flows in is two RGBA8 images — a reference (fixed at construction) and a test image to score; what flows out are floating-point quality numbers.\n\nWhy it exists: the original quality gate ran SSIM/PSNR in JavaScript, which is far slower than compiled SIMD Rust and, per the memory notes, left roughly a 2x speedup on the table. More importantly, the naive way to call a wasm scorer is to hand it a fresh copy of the test pixels on every call — and during progressive paint you score many candidate frames, so that copy cost across the wasm boundary adds up. PerceptualComparer exists both to run the metrics at native SIMD speed and to offer a zero-copy calling convention so JavaScript can write the test pixels directly into wasm memory and avoid the per-call ArrayBuffer duplication. The reference image's expensive precomputation (its XYB colour-opponent pyramid and SSIM moment sums) is done once in the constructor and reused for every comparison.\n\nHow it works: the constructor new(ref_rgba, width, height) builds the inner PerceptualCore::new with the reference and default options, and also allocates a grow-only scratch buffer sized width×height×4 for the zero-copy path. There are two ways to score. The simple copying path — all(test_rgba) (line 2271), plus individual butteraugli/ssim/psnr methods — takes a JS byte array, runs the metric, and returns either a JS object {butteraugli, ssim, psnr} (built by metrics_to_js, line 2307) or a single float. The fast path is a two-step dance: JavaScript calls input_ptr(len) (line 2289), which grows the scratch buffer if needed and returns a raw *mut u8 pointer into the wasm heap; JS then writes the test RGBA bytes straight to that address with no boundary copy, and calls all_at(len) (line 2298) to compute all three metrics over those bytes. all_at uses a borrow-splitting trick — std::mem::take the scratch Vec out, score it, then put it back — because Rust will not let it borrow self.scratch and call self.inner.all at the same time.\n\nConnections: on the JS side, web_paint calls this during progressive paint as the quality gate that decides whether a decoded frame is \"good enough\" to stop downloading more data. On the Rust side it delegates wholly to the perceptual module — PerceptualCore/Comparer, which in turn runs the XYB transform, the Butteraugli p-norm, SSIM moments and PSNR, dispatched to AVX2/AVX-512/wasm128/scalar kernels at runtime (in the browser it lands on the wasm128 SIMD path). The representation crossing the boundary is RGBA8 pixels in (either copied, or written directly via input_ptr), and small floating-point metric scores out.\n\nGotchas: the pointer returned by input_ptr is only valid until the next input_ptr call (a resize can reallocate and move the buffer), so JavaScript must write-then-score immediately and not cache the address. The reference is fixed at construction — to compare against a different reference you build a new comparer, paying the precompute cost again. The metrics are sensitive to exact pixel layout (RGBA8, alpha included for PSNR to match the legacy JS), and the underlying engine returns NaN rather than panicking on a size mismatch, so JS code should treat a NaN score as \"could not compare\" rather than \"perfect/zero.\" In the browser this runs at roughly 2x scalar (bandwidth-bound on wasm128), versus the much larger speedups the AVX paths get natively.",
-      "line": 2645
+      "line": 2653
     },
     {
       "id": "we_fstats",
@@ -1393,7 +1393,7 @@
         "wasm"
       ],
       "desc": "frame_stats (src/lib.rs, line 2818) is a small but important telemetry helper used by the browser's progressive-paint loop. As a JXL image streams in and is repeatedly decoded at improving quality, the paint loop needs a cheap, content-sensitive summary of each decoded frame to answer questions like \"is this frame actually different from the last one (or should I skip re-painting it)?\", \"how much detail/variance does it have?\", and \"what fraction is transparent?\". frame_stats takes an RGBA8 pixel buffer plus its width and height and returns a JavaScript object of per-frame statistics: a content hash, alpha min/max, the percentage of fully-transparent pixels, a count of non-zero RGB channels, the luminance mean, and the luminance variance.\n\nWhy it exists: the original analyzeProgressiveFrame ran entirely in JavaScript and, as the comment block at lines 2315-2325 explains, it is compute-bound, not bandwidth-bound — about a third of its cost is the serial dependency chain of a per-byte FNV hash, and the rest is the per-pixel statistics arithmetic. Moving that into a wasm SIMD kernel gives roughly a 4.7x speedup over the JS version. The function is the PRODUCTION export (the file also contains fstats_* bench probes for A/B timing, but those are not it). It deliberately produces the same numeric fields the JS analyzeProgressiveFrame did so the rest of the paint loop did not have to change; the JS wrapper still tacks on the hex frameHash string, byteLength, truncated and validPixels fields around these numbers.\n\nHow it works: frame_stats computes the expected byte count (width×height×4) and clamps to whatever bytes are actually present, so a partially-decoded/truncated frame is handled gracefully. If the buffer is complete it runs the SIMD kernel fs_core_simd; if truncated it runs fs_core_trunc_word over just the valid prefix. The inner loop (visible around lines 2790-2803) accumulates, per pixel: a hash mixed from all four channels (an FNV-style multiply-by-prime chain using FS_FNV_PRIME/FS_FNV_OFFSET), a count of non-zero R/G/B channels, the alpha min/max and a count of fully-transparent (alpha==0) pixels, and the luminance sum and sum-of-squares using integer luma weights (54·R + 183·G + 18·B, an approximation of BT.601 weighting). fs_to_js (line 2358) then turns those raw accumulators into the final values: mean luma, variance derived as (mean of squares − mean²) normalised, alphaZeroPct as a percentage, and so on, packaged into a JS object via js_sys::Reflect::set.\n\nConnections: on the JS side, web_paint (and the older web/jxl-single-progressive.js / jxl-progressive-paint.js) call frame_stats per decoded frame and use the results for pass-dedup (skip identical frames), unique-frame counting, per-session cache keys, and diagnostics. It does not call anything else in the pipeline — it is a leaf utility operating on an already-decoded pixel buffer that the JXL decode session produced. The data crossing the boundary is RGBA8 bytes in, and a small stats object out.\n\nGotchas a maintainer must know: the production hash here is NOT bit-identical to the old JS FNV hash — the comment at lines 2810-2816 records a deliberate decision after auditing every consumer of frameHash. Because the hash only ever lives within a single decode run (driving within-run dedup, counts and cache keys, always converted to a hex string), it never needs to match the JS value, so the faster 4-lane word-hash kernel was adopted and frameHashInt differs from the JS FNV value by design. Anyone tempted to \"fix\" that discrepancy should re-read that audit first — it is intentional, not a regression. The luma weights are the specific integer triple (54/183/18) and the variance is normalised by 65536, so reproducing these numbers elsewhere requires matching those exact constants.",
-      "line": 3219
+      "line": 3227
     },
     {
       "id": "bridge",
@@ -2898,6 +2898,30 @@
       "f": "t_shared_rawpipe",
       "t": "t_gpl_libjxl",
       "l": "jxl-encode = jpegxl-rs",
+      "pay": "rgba8"
+    },
+    {
+      "f": "orf_file",
+      "t": "t_pipeline",
+      "l": "ORF bytes (native)",
+      "pay": "bytes"
+    },
+    {
+      "f": "dng_file",
+      "t": "t_pipeline",
+      "l": "DNG bytes (native)",
+      "pay": "bytes"
+    },
+    {
+      "f": "cr2_file",
+      "t": "t_pipeline",
+      "l": "CR2 bytes (native)",
+      "pay": "bytes"
+    },
+    {
+      "f": "t_casabio",
+      "t": "casabio",
+      "l": "encode_variants (native)",
       "pay": "rgba8"
     }
   ],
