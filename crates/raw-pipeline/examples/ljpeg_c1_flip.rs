@@ -53,20 +53,32 @@ fn main() {
     // Decides whether a wider fast12 prefix table would pay off.
     {
         let (mut fast8, mut slow, mut gbits) = (0u64, 0u64, 0u64);
+        let mut hist = [0u64; 17];
         for &(src, w, h) in &tiles {
             let mut buf = vec![0u16; w * h];
             let s = ljpeg::decode_tile_stats(src, &mut buf, 0, w, w, h).expect("stats");
             fast8 += s.fast8_hits;
             slow += s.slow_huffman_hits;
             gbits += s.get_bits_total_bits;
+            for (i, c) in s.category_hist.iter().enumerate() {
+                hist[i] += c;
+            }
         }
         let total = (fast8 + slow).max(1);
         println!(
-            "huffman: fast8(<=8b)={:.2}%  slow(>8b)={:.2}%  ({} symbols, {} magnitude bits)",
+            "huffman: fast8(<=8b)={:.2}%  slow(>8b)={:.2}%  ({} symbols, {} magnitude bits, avg cat {:.2})",
             fast8 as f64 / total as f64 * 100.0,
             slow as f64 / total as f64 * 100.0,
             total, gbits,
+            gbits as f64 / total as f64,
         );
+        print!("category histogram: ");
+        for (cat, &n) in hist.iter().enumerate() {
+            if n > 0 {
+                print!("{cat}:{:.1}% ", n as f64 / total as f64 * 100.0);
+            }
+        }
+        println!();
     }
 
     // One full-frame decode pass = decode every tile once.

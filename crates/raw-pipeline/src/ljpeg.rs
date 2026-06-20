@@ -106,6 +106,11 @@ pub struct LjpegStats {
     pub get_bits_calls: u64,
     /// Total magnitude bits read via get_bits().
     pub get_bits_total_bits: u64,
+    /// Histogram of decoded Huffman categories (magnitude bit-counts), indexed
+    /// by category 0..=16. Drives the fusion-vs-special-case decision: a
+    /// distribution concentrated at 0/1/2 favours per-category special paths,
+    /// a spread-out one favours fused receive.
+    pub category_hist: [u64; 17],
 }
 
 struct BitReader<'a> {
@@ -611,6 +616,7 @@ fn next_category<const COLLECT_STATS: bool>(
     fast8_hits: &mut u64,
     slow_huffman_hits: &mut u64,
     total_symbols: &mut u64,
+    category_hist: &mut [u64; 17],
 ) -> Result<u8> {
     // Fast 8-bit prefix lookup: resolves codes ≤ 8 bits without a second peek.
     // Falls back to the full-width table only for long codes.
@@ -628,7 +634,12 @@ fn next_category<const COLLECT_STATS: bool>(
         }
         entry
     };
-    if COLLECT_STATS { *total_symbols += 1; }
+    if COLLECT_STATS {
+        *total_symbols += 1;
+        if (t as usize) < category_hist.len() {
+            category_hist[t as usize] += 1;
+        }
+    }
     br.consume(consume as u32);
     if br.truncated {
         bail!("ljpeg: entropy bitstream exhausted");
@@ -697,6 +708,7 @@ fn decode_c1<const PRECISION: u8, const COLLECT_STATS: bool>(
     let mut slow_huffman_hits = 0u64;
     let mut get_bits_calls = 0u64;
     let mut get_bits_total_bits = 0u64;
+    let mut category_hist = [0u64; 17];
 
     // Predictor-1 state: column-0 value of the previous row (scalar).
     let mut prev_row_first = 0i32;
@@ -714,6 +726,7 @@ fn decode_c1<const PRECISION: u8, const COLLECT_STATS: bool>(
 
             let t = next_category::<COLLECT_STATS>(
                 &mut br, table, &mut fast8_hits, &mut slow_huffman_hits, &mut total_symbols,
+                &mut category_hist,
             )?;
             let diff = decode_diff::<PRECISION, COLLECT_STATS>(
                 &mut br, t, &mut get_bits_calls, &mut get_bits_total_bits,
@@ -744,6 +757,7 @@ fn decode_c1<const PRECISION: u8, const COLLECT_STATS: bool>(
         slow_huffman_hits,
         get_bits_calls,
         get_bits_total_bits,
+        category_hist,
     })
 }
 
@@ -777,6 +791,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
     let mut slow_huffman_hits = 0u64;
     let mut get_bits_calls = 0u64;
     let mut get_bits_total_bits = 0u64;
+    let mut category_hist = [0u64; 17];
 
     // Column-0 value of the previous row, per component (scalars).
     let mut prev0 = 0i32;
@@ -797,6 +812,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
             };
             let t0 = next_category::<COLLECT_STATS>(
                 &mut br, table0, &mut fast8_hits, &mut slow_huffman_hits, &mut total_symbols,
+                &mut category_hist,
             )?;
             let diff0 = decode_diff::<PRECISION, COLLECT_STATS>(
                 &mut br, t0, &mut get_bits_calls, &mut get_bits_total_bits,
@@ -813,6 +829,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
             };
             let t1 = next_category::<COLLECT_STATS>(
                 &mut br, table1, &mut fast8_hits, &mut slow_huffman_hits, &mut total_symbols,
+                &mut category_hist,
             )?;
             let diff1 = decode_diff::<PRECISION, COLLECT_STATS>(
                 &mut br, t1, &mut get_bits_calls, &mut get_bits_total_bits,
@@ -847,6 +864,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
         slow_huffman_hits,
         get_bits_calls,
         get_bits_total_bits,
+        category_hist,
     })
 }
 
@@ -884,6 +902,7 @@ fn decode_generic<const COLLECT_STATS: bool>(
     let mut slow_huffman_hits = 0u64;
     let mut get_bits_calls = 0u64;
     let mut get_bits_total_bits = 0u64;
+    let mut category_hist = [0u64; 17];
 
     for row in 0..sof_h {
         let row_base = base + row * stride_pixels;
@@ -902,6 +921,7 @@ fn decode_generic<const COLLECT_STATS: bool>(
 
                 let t = next_category::<COLLECT_STATS>(
                     &mut br, table, &mut fast8_hits, &mut slow_huffman_hits, &mut total_symbols,
+                    &mut category_hist,
                 )?;
 
                 if t == 16 {
@@ -961,6 +981,7 @@ fn decode_generic<const COLLECT_STATS: bool>(
         slow_huffman_hits,
         get_bits_calls,
         get_bits_total_bits,
+        category_hist,
     })
 }
 
