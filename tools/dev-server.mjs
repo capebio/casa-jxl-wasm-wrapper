@@ -62,9 +62,14 @@ http.createServer((req, res) => {
 
   let filePath = path.join(root, url.pathname);
 
-  // Directory → index.html
+  // Directory → index.html, or the wasm-bindgen module entry when there is none.
+  // wasm-bindgen-rayon's workerHelpers spawns thread workers that do
+  // `import('../../..')`, which resolves to the pkg directory URL (e.g. /web/pkg/);
+  // serve raw_converter_wasm.js so the rayon thread pool can boot.
   if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
-    filePath = path.join(filePath, 'index.html');
+    const idx = path.join(filePath, 'index.html');
+    const wbEntry = path.join(filePath, 'raw_converter_wasm.js');
+    filePath = fs.existsSync(idx) ? idx : (fs.existsSync(wbEntry) ? wbEntry : idx);
   }
 
   // Path traversal guard
