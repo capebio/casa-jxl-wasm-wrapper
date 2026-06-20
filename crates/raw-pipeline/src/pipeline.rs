@@ -15,6 +15,40 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+#[cfg(feature = "parallel")]
+thread_local! {
+    static PARALLEL_PATH_CALLS: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+
+#[cfg(feature = "parallel")]
+/// Query number of times parallel path was taken (this thread).
+/// Returns 0 if parallel feature disabled. Used to verify rayon dispatch is firing.
+/// Example:
+/// ```ignore
+/// parallel_path_reset();
+/// process_into(&rgb16, &params, &mut out);
+/// if parallel_path_call_count() > 0 {
+///     eprintln!("parallel path taken {} times", parallel_path_call_count());
+/// } else {
+///     eprintln!("WARNING: parallel disabled or rayon not dispatching");
+/// }
+/// ```
+pub fn parallel_path_call_count() -> u32 {
+    PARALLEL_PATH_CALLS.with(|c| c.get())
+}
+
+#[cfg(feature = "parallel")]
+/// Reset the parallel call counter (for benchmark/test isolation).
+pub fn parallel_path_reset() {
+    PARALLEL_PATH_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(not(feature = "parallel"))]
+pub fn parallel_path_call_count() -> u32 { 0 }
+
+#[cfg(not(feature = "parallel"))]
+pub fn parallel_path_reset() {}
+
 pub const CAM_TO_SRGB: [[f32; 3]; 3] = [
     [ 1.526, -0.450, -0.077],
     [-0.245,  1.336, -0.091],
@@ -1561,6 +1595,7 @@ pub fn process_into(rgb16: &[u16], params: &PipelineParams, out: &mut [u8]) {
 
     #[cfg(feature = "parallel")]
     {
+        PARALLEL_PATH_CALLS.with(|c| c.set(c.get() + 1));
         let (pre_r, pre_g, pre_b, post, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
             ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
             let c = cache_cell.borrow();
@@ -1667,6 +1702,7 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
     // its own r/g/b scratch on that thread's stack (unavoidable without thread_local overhead).
     #[cfg(feature = "parallel")]
     {
+        PARALLEL_PATH_CALLS.with(|c| c.set(c.get() + 1));
         out.par_chunks_mut(3 * BLK)
             .zip(rgb16.par_chunks(3 * BLK))
             .for_each(|(ob, ib)| {
@@ -2099,6 +2135,7 @@ pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
 
     #[cfg(feature = "parallel")]
     {
+        PARALLEL_PATH_CALLS.with(|c| c.set(c.get() + 1));
         out.par_chunks_mut(3 * BLK)
             .zip(rgb16.par_chunks(3 * BLK))
             .for_each(|(ob, ib)| {

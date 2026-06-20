@@ -16,8 +16,13 @@
 //! The Windows cmake configuration mirrors the known-good recipe for building
 //! BSD libjxl under MSVC/ClangCL: static libs, MultiThreaded runtime, `/Zl` to
 //! avoid baking a CRT choice into the archives (so they link into Rust's CRT),
-//! and `/O2 /Ob2` forced on release because cmake-rs drops MSVC's default `/O2`
-//! under the ClangCL multi-config generator (the libjxl "0.11 ~30x regression").
+//! and `/O2 /Ob2` forced because cmake-rs drops MSVC's default `/O2` under the
+//! ClangCL multi-config generator (the libjxl "0.11 ~30x regression").
+//!
+//! The vendored libjxl is built optimized (RelWithDebInfo) regardless of Cargo's
+//! profile — it is third-party code we never step into, and a Debug build of it
+//! cripples encode/decode for the whole `cargo test` inner loop. Set
+//! `JXL_FFI_DEBUG_LIBJXL=1` to match Cargo's profile (Debug) instead.
 
 use std::env;
 use std::path::PathBuf;
@@ -68,7 +73,18 @@ fn main() {
         cfg.env("CMAKE_BUILD_PARALLEL_LEVEL", jobs);
     }
 
-    let is_release = env::var("PROFILE").as_deref() == Ok("release");
+    // Always build the vendored libjxl optimized, regardless of Cargo's PROFILE.
+    // libjxl is third-party BSD code we never step into; a Debug build of it makes
+    // encode/decode dramatically slower and drags down every `cargo test`.
+    // RelWithDebInfo applies /O2 while keeping symbols for crash backtraces, and
+    // pairs cleanly with the MultiThreaded (release) CRT selected below. Opt back
+    // into a profile-matched (Debug) libjxl with JXL_FFI_DEBUG_LIBJXL=1 when you
+    // need to step into the codec itself.
+    let optimize_libjxl = env::var_os("JXL_FFI_DEBUG_LIBJXL").is_none();
+    if optimize_libjxl {
+        cfg.profile("RelWithDebInfo");
+    }
+
     // Use CARGO_CFG_TARGET_* (target triple) not cfg!(windows) (host) for cross-compilation.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
@@ -84,7 +100,10 @@ fn main() {
             .define("CMAKE_EXE_LINKER_FLAGS", "MSVCRTD.lib")
             .cflag("/Zl")
             .cxxflag("/Zl");
-        if is_release {
+        if optimize_libjxl {
+            // cmake-rs drops MSVC's default /O2 under the ClangCL multi-config
+            // generator (the libjxl "0.11 ~30x regression"); force it back. /Ob2
+            // also upgrades RelWithDebInfo's default /Ob1 to full inlining.
             cfg.cflag("/O2").cflag("/Ob2").cxxflag("/O2").cxxflag("/Ob2");
         }
     }
@@ -144,6 +163,8 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-env-changed=LIBJXL_SOURCE_DIR");
+    // Toggling the codec optimization level must reconfigure + rebuild libjxl.
+    println!("cargo:rerun-if-env-changed=JXL_FFI_DEBUG_LIBJXL");
     // Re-run when the libjxl submodule HEAD changes. In a git submodule the
     // `.git` entry is a plain file (pointing into the superproject gitdir);
     // Cargo tracks it as a file, so `git submodule update` bumps its mtime
@@ -189,6 +210,16 @@ fn main() {
             is_bitfield: false,
             is_global: false,
         })
+        // Build hygiene — trims the generated bindings.rs and bindgen's work with
+        // no change to the FFI surface. Bindings regenerate from the same headers
+        // the static lib is compiled from, so the layout_tests are tautological
+        // here (they'd only catch a bindgen codegen bug) yet compile a pile of
+        // __bindgen_test_layout_* fns on every build. generate_comments(false)
+        // skips clang doc-comment parsing; merge_extern_blocks coalesces the
+        // extern "C" blocks for a slightly cheaper compile of the generated file.
+        .layout_tests(false)
+        .generate_comments(false)
+        .merge_extern_blocks(true)
         .generate()
         .expect(
             "bindgen failed to generate libjxl bindings — \
