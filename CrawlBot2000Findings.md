@@ -81,3 +81,64 @@ on the perceptual quality-gate / Butteraugli-chart path. **Peak RSS is unchanged
 required reusable test scratch), so this is a speed + allocator-pressure win, not a peak-memory win.
 Shipped; low risk; byte-exact. The measurement tool (`perc_construct_membench.rs`) is reusable for
 the rest of the crawl.
+
+---
+
+# `src/lib.rs` (root WASM crate)
+
+**Branch:** `crawlbot/src-lib-rs-20260620T2110` · **Commit:** `<A-1>` · **Status:** ✅ A-1 SHIPPED; A-2/A-5/A-6/A-9 analyzed
+
+> Toolchain note: the root crate does **not** native-check on the GNU toolchain (`dlltool.exe not
+> found` from a libjxl/jpegxl transitive dep). Use **MSVC**: `cargo +stable-x86_64-pc-windows-msvc
+> check/test --no-default-features --lib` (≈3.5 min). End-to-end `process_orf` benching needs a
+> wasm-pack build + flipflopMem; native proxies used here measure the eliminated work directly.
+
+## A-1 — skip preview demosaic + downscales when no preview requested ✅ SHIPPED
+
+`decode_orf_raw` unconditionally ran the full-res planar bilinear demosaic (`demosaic_rggb_planar`)
++ two `downscale_rgb16_planar` calls to build the lightbox/thumb previews — *before* it knew the
+output flags. A pure `OUT_FULL_RGB8` batch-encode (no `OUT_LIGHTBOX`/`OUT_THUMB`) then **discarded**
+those buffers in `process_orf_impl`. Threaded `output_flags` into `decode_orf_raw` and gated the
+whole preview build on `need_previews = flags & (OUT_LIGHTBOX|OUT_THUMB) != 0`. The MHC demosaic
+(the `OUT_FULL_RGB8` source) is independent and always runs.
+
+**Measured skipped cost** (`planar_demosaic_membench`, 5184×3888 = 20.2 MP, the dominant skipped
+piece — the 2 downscales live in the root crate and add more):
+
+| metric | value |
+|--------|-------|
+| transient alloc | **115.3 MB** |
+| alloc count | 3 (already direct-to-planes; the old interleaved-alloc is gone in this tree) |
+| median time | **86.1 ms** |
+
+So **~86 ms + 115 MB saved per `OUT_FULL_RGB8`-only image** (plus the 2 downscales). A 100-image
+batch encode → **~8.6 s** + ~11.5 GB of alloc traffic avoided. Like C-1, the *global* decode peak is
+not reduced (the planar planes are dropped before the MHC `rgb16` alloc, so they don't coexist) — the
+win is wall-clock + allocator pressure. `OUT_FULL_RGB8` output is **byte-identical** (those previews
+were already discarded in that case). MSVC check + 5/5 root lib tests pass.
+
+## Other lib.rs memory bases (analyzed)
+
+- **A-2 (LookRenderer retained output buffer) — NOT A CLEAN WIN, skipped.** `render()` returns
+  `Vec<u8>`; wasm-bindgen copies it to JS and frees it regardless. A retained `RefCell<Vec<u8>>`
+  would still need a `clone()` to produce the return Vec → trades the output zero-init for a copy
+  pass (a wash), unless the return ABI changes to write into a JS-provided buffer (API change,
+  touches JS callers — out of scope, and the concurrent agent owns parts of the JS layer).
+- **A-5 (pack_rgb16_full doubles the full-res buffer) — REAL ~120 MB PEAK WIN, DEFERRED.** The
+  discovery's "transmute `Vec<u16>`→`Vec<u8>` in place" is unsound *as proposed*: `rgb16` is still
+  read by the `OUT_FULL_RGB8` tone path **after** packing (the common flag `15` sets both
+  `OUT_FULL_RGB8|OUT_FULL_16`). A safe version must reorder the output assembly to pack **after**
+  the tone path's last read of `rgb16`, then move-transmute it. This is the rare win that *does*
+  lower peak RSS (the two ~121 MB buffers currently coexist), but the reorder is medium-risk under
+  3.5-min build iteration. Deferred to a focused WASM-batch session; documented for safe pickup.
+- **A-6 (rgb_to_rgba 255-prefill) — micro, skipped.** SIMD path force-sets alpha anyway; only the
+  scalar tail relies on the prefill. Sub-noise; not worth the unsafe set_len.
+- **A-9 (string getters clone) — non-win.** wasm-bindgen getter ABI requires an owned `String`; a
+  borrow can't cross the boundary. Recorded to pre-empt re-flagging.
+
+## Conclusion
+
+A-1 is a solid, byte-exact batch-encode speedup (**~86 ms + 115 MB/image**) — shipped. The remaining
+peak-RSS lever in this file is A-5 (~120 MB on the 16-bit export path), deferred only because a safe
+implementation needs an output-assembly reorder best done in a dedicated WASM-bench session, not
+under slow MSVC iteration. A-2/A-6/A-9 are washes or ABI-bound non-wins. Memory bases covered.
