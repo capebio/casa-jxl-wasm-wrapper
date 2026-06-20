@@ -114,19 +114,22 @@ impl Comparer {
             let blur_r = ((w >> 6).max(1)).min(8);
             let mask = blur::box_blur(&cy, w, h, blur_r);
             if s < 2 && w > 1 && h > 1 {
-                // Not the last level: clone cx/cy/cb so we can keep using them for dn2.
-                levels.push(Level { x: cx.clone(), y: cy.clone(), b: cb.clone(), mask, w, h });
                 let dw = (w >> 1).max(1);
                 let dh = (h >> 1).max(1);
                 let dn = dw * dh;
-                // Pre-allocate output buffers and use dn2_into to avoid the hidden
-                // allocation inside dn2 (PERC-09: makes allocation explicit at the call site).
+                // Pre-allocate the downsample targets (PERC-09: explicit alloc at call site).
                 let mut nx = vec![0f32; dn];
                 let mut ny = vec![0f32; dn];
                 let mut nb = vec![0f32; dn];
-                butteraugli::dn2_into(&cx, &mut nx, w, h, dw, dh);
-                butteraugli::dn2_into(&cy, &mut ny, w, h, dw, dh);
-                butteraugli::dn2_into(&cb, &mut nb, w, h, dw, dh);
+                // PERC-12: move cx/cy/cb into the Level, then borrow them back to feed the
+                // downsample. dn2_into only READS its source and writes the separate nx/ny/nb,
+                // so the planes need not be cloned to stay alive for the next level. Eliminates
+                // 3× full-res clones at s=0 (~288 MB transient @24MP) + 3× half-res at s=1.
+                levels.push(Level { x: cx, y: cy, b: cb, mask, w, h });
+                let lvl = levels.last().expect("level just pushed");
+                butteraugli::dn2_into(&lvl.x, &mut nx, w, h, dw, dh);
+                butteraugli::dn2_into(&lvl.y, &mut ny, w, h, dw, dh);
+                butteraugli::dn2_into(&lvl.b, &mut nb, w, h, dw, dh);
                 cx = nx; cy = ny; cb = nb; w = dw; h = dh;
             } else {
                 // Last level (s==2, or image too small to downsample): move cx/cy/cb
