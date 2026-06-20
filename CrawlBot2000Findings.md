@@ -38,6 +38,39 @@
 
 **Net shipped:** 5 measured wins (4 native-benched byte-exact + 1 native-MT), 1 honest measured rejection, the rest analyzed with rationale. Recurring lesson: **byte-traffic ≠ latency** — transient clone/memset "wins" rarely move peak RSS or wall-clock once L1/store-buffer and required resident scratch are accounted for; the wins that landed are **work-elimination** (skip/again-never-build) and **move-not-copy**, not micro-trimming.
 
+## Remaining backlog & stopping rationale (as of this session)
+
+The high-gain, low-risk, natively-benchable wins are shipped. What remains needs a *focused* session
+(a build mode or harness I deliberately didn't spin up unattended), is in a previously-rejected class,
+or is lower-value. Grouped so the next run can pick up cleanly:
+
+- **jxl-codec build session** (F3 ✓trivial / F5 / F6 in `jxl_casadecoder.rs`, plus any `jxl_casaencoder.rs`
+  findings): the BSD codec is behind `feature jxl-codec` (libjxl FFI). Needs a libjxl cmake build
+  (GNU `dlltool` blocks it; use MSVC or the emsdk path). **F3 is a 1:1 mirror of a proven gate —
+  ship first.**
+- **WASM-batch session** (`src/lib.rs` A-5 ~120 MB peak on OUT_FULL_16; facade.ts G-1/G-2/G-4): A-5
+  needs an output-assembly reorder + LE `Vec<u16>→Vec<u8>` transmute, best verified with a wasm-pack
+  build + `flipflopMem` end-to-end (the only way to bench root-crate peak honestly). G-* facade items
+  are Node-benchable via `flipflopMem` once the TS package is built.
+- **Pure-TS micro session** (G-3 encode-handler metric reuse, G-5 prepareAdvancedSettings): small,
+  safe, mirror established patterns; need the jxl-worker-browser/jxl-wasm TS build + vitest. Avoid
+  collision with the concurrent agent on `jxl-cache`/`jxl-wasm/loader`.
+- **Respect-the-rejection (do NOT pursue):** B2/B6 demosaic + E2/E3 cr2/dng "uninit skip-zero-init"
+  — the unsafe `set_len`/`MaybeUninit` class was already rejected (D6, unsafe-surface/WASM-audit).
+  ~144 MB memset @24MP on the demosaic hot path is tempting but out of bounds without the project
+  owner relaxing that policy.
+- **Caller-wiring-dependent:** B1 demosaic MHC `_into` variants — only pays off if a same-dims batch
+  re-demosaic caller is added; speculative without one.
+- **Low-value / fixture-gated:** C-2 blur scratch (construction-only, sub-floor), E4 ljpeg DHT key
+  (correctness-critical cache, needs DNG fixture), E5 dng dead `ctx.fill(0)` (safe but test-only
+  caller + fixture), E6 tiff SOI Vec (tiny), B3/B5 frame_stats/saliency (speculative/niche),
+  D1–D5 SIMD backends (AVX-512 = no dev hardware; wasm = needs flipflopdom build).
+
+**Why stop here unattended:** every remaining item trades a *small or conditional* gain for a *new
+build mode, a fixture, or a rejected unsafe pattern* — exactly the kind of work that wants a human in
+the loop or a dedicated harness session, not an overnight auto-pass. The 5 shipped wins are
+byte-exact (or parity-preserved), measured, and isolated on per-file branches for clean review.
+
 <!-- File chapters appended below as work completes. Each ends with a Conclusion. -->
 
 ---
