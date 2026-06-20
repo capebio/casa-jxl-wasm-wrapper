@@ -21,6 +21,8 @@ node_modules/
 target/
 .cargo-home/
 .codex-cargo-target-*/
+# Generated threaded-wasm pkg (build with tools/build-mt-wasm.sh)
+pkg-mt/
 
 # Temporary / scratch (already partially ignored; ensure all)
 tmp/
