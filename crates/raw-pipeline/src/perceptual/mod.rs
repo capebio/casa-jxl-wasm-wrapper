@@ -199,30 +199,33 @@ impl Comparer {
     }
 
     fn downsample_dispatch(&mut self, w: usize, h: usize, dw: usize, dh: usize) {
-        match self.backend {
-            #[cfg(target_arch = "x86_64")]
-            Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe {
-                simd::avx2::downsample_avx2(&self.tx, &mut self.dx, w, h, dw, dh);
-                simd::avx2::downsample_avx2(&self.ty, &mut self.dy, w, h, dw, dh);
-                simd::avx2::downsample_avx2(&self.tb, &mut self.db, w, h, dw, dh);
-            },
-            #[cfg(target_arch = "x86_64")]
-            Backend::Avx512Strict | Backend::Avx512Rsqrt => unsafe {
-                simd::avx512::downsample_avx512(&self.tx, &mut self.dx, w, h, dw, dh);
-                simd::avx512::downsample_avx512(&self.ty, &mut self.dy, w, h, dw, dh);
-                simd::avx512::downsample_avx512(&self.tb, &mut self.db, w, h, dw, dh);
-            },
-            #[cfg(target_arch = "wasm32")]
-            Backend::WasmSimd => {
-                simd::wasm::downsample_wasm(&self.tx, &mut self.dx, w, h, dw, dh);
-                simd::wasm::downsample_wasm(&self.ty, &mut self.dy, w, h, dw, dh);
-                simd::wasm::downsample_wasm(&self.tb, &mut self.db, w, h, dw, dh);
-            },
-            _ => {
-                downsample_inplace(&self.tx, &mut self.dx, w, h, dw, dh);
-                downsample_inplace(&self.ty, &mut self.dy, w, h, dw, dh);
-                downsample_inplace(&self.tb, &mut self.db, w, h, dw, dh);
-            }
+        // CRAWL C-3: the three X/Y/B planes are disjoint (separate src/dst Vecs, no
+        // cross-dependency), so split the borrows and run them concurrently under the
+        // `parallel` feature. The SoA layout (PERC-04) means no per-thread allocation —
+        // each task writes its own output plane. Measured native AVX2: −12.6% @2048² /
+        // −6.6% @4096² butteraugli end-to-end (shrinks with size as the bandwidth-bound
+        // downsample saturates). WASM (serial, no `parallel`) is unaffected. rayon::join
+        // is nesting-safe (degrades to inline under a saturated outer pool).
+        let backend = self.backend;
+        let (tx, ty, tb) = (&self.tx, &self.ty, &self.tb);
+        let (dx, dy, db) = (&mut self.dx, &mut self.dy, &mut self.db);
+        #[cfg(feature = "parallel")]
+        {
+            rayon::join(
+                || downsample_one(backend, tx, dx, w, h, dw, dh),
+                || {
+                    rayon::join(
+                        || downsample_one(backend, ty, dy, w, h, dw, dh),
+                        || downsample_one(backend, tb, db, w, h, dw, dh),
+                    );
+                },
+            );
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            downsample_one(backend, tx, dx, w, h, dw, dh);
+            downsample_one(backend, ty, dy, w, h, dw, dh);
+            downsample_one(backend, tb, db, w, h, dw, dh);
         }
         // Swap tx↔dx (and ty↔dy, tb↔db) so the downsampled output is now in
         // tx/ty/tb — ready for the next scale's scale_err_dispatch — while dx/dy/db
@@ -421,6 +424,25 @@ fn resolve_forced_backend(id: u8) -> Backend {
     {
         let _ = id;
         Backend::Scalar
+    }
+}
+
+/// CRAWL C-3: single-plane backend dispatch for the downsample, factored out so the
+/// three X/Y/B planes can run concurrently (see `downsample_dispatch`).
+#[inline]
+fn downsample_one(backend: Backend, src: &[f32], dst: &mut [f32], w: usize, h: usize, dw: usize, dh: usize) {
+    match backend {
+        #[cfg(target_arch = "x86_64")]
+        Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe {
+            simd::avx2::downsample_avx2(src, dst, w, h, dw, dh);
+        },
+        #[cfg(target_arch = "x86_64")]
+        Backend::Avx512Strict | Backend::Avx512Rsqrt => unsafe {
+            simd::avx512::downsample_avx512(src, dst, w, h, dw, dh);
+        },
+        #[cfg(target_arch = "wasm32")]
+        Backend::WasmSimd => simd::wasm::downsample_wasm(src, dst, w, h, dw, dh),
+        _ => downsample_inplace(src, dst, w, h, dw, dh),
     }
 }
 
