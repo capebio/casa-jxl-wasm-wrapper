@@ -96,7 +96,12 @@ pub struct Comparer {
 }
 
 impl Comparer {
-    pub fn new(ref_rgba: &[u8], width: usize, height: usize, opts: Opts) -> Self {
+    /// CRAWL C-7: takes the reference RGBA **by value** so it can be MOVED into the Comparer
+    /// (which must own a stable copy for every later ssim()/psnr() eval) instead of copied via
+    /// `to_vec`. Same move-not-copy logic as A-5b. The construction reads borrow it; the field
+    /// takes it at the end. Callers that must keep their buffer pass a clone (their choice);
+    /// the wasm binding hands over the buffer wasm-bindgen already owns at the FFI boundary.
+    pub fn new(ref_rgba: Vec<u8>, width: usize, height: usize, opts: Opts) -> Self {
         // Reject overflowing dimensions before they wrap `n` (the master bound the
         // unsafe SIMD kernels trust). On wasm32 usize is 32-bit, so this is reachable.
         let n = width
@@ -106,7 +111,7 @@ impl Comparer {
         assert_eq!(ref_rgba.len(), n * 4, "ref must be RGBA");
         // Build reference XYB pyramid + masks (3 scales, blur radius ~w/64 clamped 1..8).
         let (mut rx, mut ry, mut rb) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
-        xyb::pixels_to_xyb(ref_rgba, n, &mut rx, &mut ry, &mut rb);
+        xyb::pixels_to_xyb(&ref_rgba, n, &mut rx, &mut ry, &mut rb);
         let mut levels = Vec::with_capacity(3);
         let (mut w, mut h) = (width, height);
         let (mut cx, mut cy, mut cb) = (rx, ry, rb);
@@ -138,7 +143,7 @@ impl Comparer {
                 break;
             }
         }
-        let (ssim_sb, ssim_sbb) = ssim::ref_moments(ref_rgba, n, 4);
+        let (ssim_sb, ssim_sbb) = ssim::ref_moments(&ref_rgba, n, 4);
         let backend = match opts.backend {
             BackendChoice::ForceScalar => Backend::Scalar,
             // A forced SIMD id is honoured only if this CPU actually supports the
@@ -166,7 +171,7 @@ impl Comparer {
         };
         Comparer {
             width, height, n, opts, backend, levels,
-            ref_rgba: ref_rgba.to_vec(),
+            ref_rgba, // CRAWL C-7: moved in (was ref_rgba.to_vec() — a full n*4 copy)
             ssim_sb, ssim_sbb,
             tx: vec![0f32; n], ty: vec![0f32; n], tb: vec![0f32; n],
             dx: vec![0f32; n], dy: vec![0f32; n], db: vec![0f32; n],
@@ -481,7 +486,7 @@ mod tests {
     fn identical_image_scores_perfect() {
         let (w, h) = (16, 16);
         let img = checker(w, h);
-        let mut cmp = Comparer::new(&img, w, h, Opts::default());
+        let mut cmp = Comparer::new(img.clone(), w, h, Opts::default());
         assert!(cmp.butteraugli(&img).abs() < 1e-4);
         assert!((cmp.ssim(&img) - 1.0).abs() < 1e-4);
         assert_eq!(cmp.psnr(&img), f32::INFINITY);
@@ -498,7 +503,7 @@ mod tests {
         for (i, p) in noisy.iter_mut().enumerate() {
             if i % 4 != 3 { *p = p.saturating_add(((i * 7) % 11) as u8); }
         }
-        let mut cmp = Comparer::new(&img, w, h, Opts::default());
+        let mut cmp = Comparer::new(img.clone(), w, h, Opts::default());
         let m1 = cmp.all(&noisy);
         let m2 = cmp.all(&noisy);
         assert!((m1.butteraugli - m2.butteraugli).abs() < 1e-6, "butteraugli not idempotent");
@@ -514,9 +519,9 @@ mod tests {
         for (i, p) in noisy.iter_mut().enumerate() {
             if i % 4 != 3 { *p = p.saturating_add(((i * 7) % 11) as u8); }
         }
-        let mut cmp = Comparer::new(&img, w, h, Opts::default());
+        let mut cmp = Comparer::new(img.clone(), w, h, Opts::default());
         let m = cmp.all(&noisy);
-        let mut cmp2 = Comparer::new(&img, w, h, Opts::default());
+        let mut cmp2 = Comparer::new(img.clone(), w, h, Opts::default());
         assert!((m.butteraugli - cmp2.butteraugli(&noisy)).abs() < 1e-5);
         assert!((m.ssim - cmp2.ssim(&noisy)).abs() < 1e-6);
         assert!((m.psnr - cmp2.psnr(&noisy)).abs() < 1e-3);
@@ -534,7 +539,7 @@ mod tests {
         for (i, p) in noisy.iter_mut().enumerate() {
             if i % 4 != 3 { *p = p.saturating_add(((i * 13) % 17) as u8); }
         }
-        let mut cmp = Comparer::new(&img, w, h, Opts::default());
+        let mut cmp = Comparer::new(img.clone(), w, h, Opts::default());
         // Call all() first — this mutates tx/ty/tb via butteraugli.
         let m = cmp.all(&noisy);
         // Call individual metrics on the same Comparer after all() resets state.

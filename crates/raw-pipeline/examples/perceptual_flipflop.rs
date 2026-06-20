@@ -27,7 +27,7 @@ fn synth(w: usize, h: usize, seed: u32) -> Vec<u8> {
 fn time_runs(reference: &[u8], test: &[u8], w: usize, h: usize, choice: BackendChoice, iters: usize) -> f64 {
     let mut opts = Opts::default();
     opts.backend = choice;
-    let mut cmp = Comparer::new(reference, w, h, opts);
+    let mut cmp = Comparer::new(reference.to_vec(), w, h, opts); // C-7: by-value API
     // warmup
     let _ = cmp.butteraugli(test);
     let t0 = Instant::now();

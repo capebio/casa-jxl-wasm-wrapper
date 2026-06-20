@@ -2658,7 +2658,10 @@ pub struct PerceptualComparer {
 #[wasm_bindgen]
 impl PerceptualComparer {
     #[wasm_bindgen(constructor)]
-    pub fn new(ref_rgba: &[u8], width: usize, height: usize) -> PerceptualComparer {
+    // CRAWL C-7: take the reference RGBA by value. wasm-bindgen already copies the JS bytes into
+    // an owned Vec<u8> at the FFI boundary; taking Vec<u8> (not &[u8]) lets that buffer be MOVED
+    // into the Comparer instead of copied a second time via to_vec (a full n*4 = 96 MB @24MP copy).
+    pub fn new(ref_rgba: Vec<u8>, width: usize, height: usize) -> PerceptualComparer {
         let expected = width.saturating_mul(height).saturating_mul(4);
         assert!(
             ref_rgba.len() == expected,

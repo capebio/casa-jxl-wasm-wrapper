@@ -15,7 +15,7 @@ fn main() {
         for i in (0..test.len()).step_by(7) {
             test[i] = 130;
         }
-        let mut cmp = Comparer::new(&refr, size, size, Opts::default());
+        let mut cmp = Comparer::new(refr, size, size, Opts::default()); // C-7: move (refr unused after)
         let _ = cmp.butteraugli(&test); // warm (build masks, LUTs)
         let reps = 15;
         let mut ms = Vec::new();

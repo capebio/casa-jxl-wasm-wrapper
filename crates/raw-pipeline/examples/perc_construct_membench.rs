@@ -49,8 +49,6 @@ const MB: f64 = 1024.0 * 1024.0;
 
 fn measure(size: usize, reps: usize) -> (f64, f64, usize, f64) {
     let n = size * size;
-    // Allocate input OUTSIDE the measurement window (it is part of baseline, not the win).
-    let rgba = vec![128u8; n * 4];
     let mut peaks = Vec::new();
     let mut residents = Vec::new();
     let mut counts = Vec::new();
@@ -59,8 +57,13 @@ fn measure(size: usize, reps: usize) -> (f64, f64, usize, f64) {
         let base = CURRENT.load(Relaxed);
         PEAK.store(base, Relaxed);
         COUNT.store(0, Relaxed);
+        // CRAWL C-7: the reference buffer is allocated INSIDE the window and handed to the
+        // Comparer by value (the "relinquish" path — e.g. the wasm binding hands over the
+        // buffer wasm-bindgen already owns). C-7 MOVES it in; the old &[u8] API to_vec'd it,
+        // an extra n*4 copy that showed up here as +1 alloc and +n*4 peak.
+        let rgba = vec![128u8; n * 4];
         let t = Instant::now();
-        let c = Comparer::new(&rgba, size, size, Opts::default());
+        let c = Comparer::new(rgba, size, size, Opts::default());
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         let peak = PEAK.load(Relaxed).saturating_sub(base);
         let resident = CURRENT.load(Relaxed).saturating_sub(base);
