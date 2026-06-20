@@ -69,6 +69,27 @@ pub fn decode(path: &std::path::Path) -> Result<DngImage> {
     decode_bytes(&bytes)
 }
 
+/// Byte ranges of each LJPEG-compressed tile (compression=7) within `data`.
+/// Exposed for A/B benchmarking the LJPEG decoder in isolation; not part of the
+/// stable API.
+#[doc(hidden)]
+pub fn ljpeg_tile_ranges(data: &[u8]) -> Result<Vec<(usize, usize)>> {
+    let (_state, raw, _le) = load_dng(data)?;
+    if raw.compression != 7 {
+        bail!("DNG: not LJPEG-compressed (compression={})", raw.compression);
+    }
+    let mut ranges = Vec::with_capacity(raw.tile_offsets.len());
+    for (o, c) in raw.tile_offsets.iter().zip(raw.tile_byte_counts.iter()) {
+        let off = *o as usize;
+        let end = off
+            .checked_add(*c as usize)
+            .filter(|&e| e <= data.len())
+            .ok_or_else(|| anyhow!("tile range OOB"))?;
+        ranges.push((off, end));
+    }
+    Ok(ranges)
+}
+
 pub fn decode_bytes(data: &[u8]) -> Result<DngImage> {
     let (state, raw, le) = load_dng(data)?;
 
