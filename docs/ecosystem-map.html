@@ -1268,8 +1268,12 @@ function drawBoxes(node,depth){
     // fn list inside unexpanded file box — clipped to box, centered horizontally
     if(node.k==='file' && sw>80 && sh>44){
       const fns=node.children.filter(c=>c.k==='fn'||c.k==='module'||c.k==='component');
-      if(fns.length){
+      // fade the preview IN as the box grows (sw 105→135) — the mirror of the
+      // centred-name fade-OUT in drawLabels, so the two never sit opaque at once.
+      const fnFade=Math.max(0,Math.min(1,(sw-105)/30));
+      if(fns.length && fnFade>0.02){
         ctx.save();
+        ctx.globalAlpha=fnFade;
         ctx.beginPath(); ctx.rect(sx+2, sy+2, sw-4, sh-4); ctx.clip();
         const fs=Math.max(8,Math.min(11,sh*0.09)|0);
         ctx.font=`400 ${fs}px ui-monospace,Menlo,Consolas,monospace`;
@@ -1332,8 +1336,15 @@ function drawLabels(){
     if(!expanded){
       const kindMatch = !kindFilter || node.k === kindFilter;
       const isSysLabel = node.k === "system";
+      // A file box wide enough to render its inner fn-list preview (see drawBoxes)
+      // must NOT also paint the big centred filename — two opaque text layers on
+      // top of each other read as "run-on" garbage. Cross-fade: as the preview
+      // fades IN (sw 105→135 there) the centred name fades OUT here (sw 125→95).
+      const hasFnPreview = node.k==="file" && sw>80 && sh>44 &&
+        node.children.some(c=>c.k==="fn"||c.k==="module"||c.k==="component");
+      const nameFade = hasFnPreview ? Math.max(0,Math.min(1,(125-sw)/30)) : 1;
       // centered, WORD-WRAPPED label — fades in with size; the "current" LOD name
-      const a=Math.max(0,Math.min(1,isSysLabel?(sw-10)/32:(sw-30)/48)) * (kindMatch ? 1 : 0.15);
+      const a=Math.max(0,Math.min(1,isSysLabel?(sw-10)/32:(sw-30)/48)) * (kindMatch ? 1 : 0.15) * nameFade;
       if(a<=0.02) return;
       const weight=node.k==="system"?700:node.k==="file"?600:500;
       const maxW=sw*0.86, maxH=sh*0.82;
