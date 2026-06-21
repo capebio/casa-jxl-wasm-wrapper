@@ -2182,12 +2182,194 @@
     },
     {
       "id": "t_gpl_libjxl",
-      "k": "component",
-      "l": "jpegxl-rs / jpegxl-sys → libjxl 0.10 (GPL)",
+      "k": "system",
+      "l": "jpegxl-rs / jpegxl-sys (GPL)",
       "tech": [
         "rust"
       ],
-      "desc": "The JXL codec the Tauri app actually uses: GPL-licensed jpegxl-rs 0.10 (safe wrapper) + jpegxl-sys 0.10 (raw C FFI), both binding vendored libjxl 0.10. The encode+decode engine behind jxl_native.rs, encode_jxl_with_channels and the forked casabio_encode. A DIFFERENT codec from the wasm repo's BSD jxl-ffi (external/libjxl 0.11 + jxl_casaencoder/jxl_casadecoder): different version (0.10 vs 0.11), licence (GPL vs BSD) and API. Region/ROI decode uses jxl-oxide."
+      "desc": "The JXL codec the Tauri app actually uses: GPL-licensed jpegxl-rs 0.10 (safe wrapper) + jpegxl-sys 0.10 (raw C FFI), both binding vendored libjxl 0.10. The encode+decode engine behind jxl_native.rs, encode_jxl_with_channels and the forked casabio_encode. A DIFFERENT codec from the wasm repo's BSD jxl-ffi (external/libjxl 0.11 + jxl_casaencoder/jxl_casadecoder): different version (0.10 vs 0.11), licence (GPL vs BSD) and API. Region/ROI decode uses jxl-oxide.",
+      "col": "ffi"
+    },
+    {
+      "id": "fb_wasm",
+      "k": "fn",
+      "p": "ffi_build",
+      "l": "wasm32 short-circuit",
+      "tech": [
+        "rust"
+      ],
+      "desc": "First thing build.rs does: if TARGET contains \"wasm32\" it returns immediately, before cmake or bindgen ever run. This keeps the native-only FFI invisible to WASM builds - the browser JXL path stays on web/pkg + bridge.cpp, and cross-compiling libjxl to wasm32-unknown-unknown (which needs Emscripten) is never attempted."
+    },
+    {
+      "id": "fb_cmake",
+      "k": "fn",
+      "p": "ffi_build",
+      "l": "cmake static libjxl",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Job 1: drive cmake (via the cmake crate) over external/libjxl (LIBJXL_SOURCE_DIR, set in .cargo/config.toml) to produce STATIC archives. Disables tools/tests/examples/JNI/sjpeg/openexr/jpegli, builds RelWithDebInfo regardless of Cargo profile (a Debug libjxl cripples the whole test inner loop; opt back with JXL_FFI_DEBUG_LIBJXL=1), honours NUM_JOBS for parallelism. On Windows it selects the ClangCL toolset, MultiThreaded CRT, and /Zl so the archives do not bake a CRT choice."
+    },
+    {
+      "id": "fb_optflags",
+      "k": "fn",
+      "p": "ffi_build",
+      "l": "force O2 Ob2",
+      "tech": [
+        "rust"
+      ],
+      "desc": "On Windows/ClangCL, cmake-rs silently drops MSVC default /O2 under the multi-config generator - the cause of the notorious libjxl \"0.11 ~30x regression\" (the codec was simply built unoptimised, not an algorithm change). build.rs force-injects /O2 /Ob2 on both C and C++ flags to restore release optimisation and full inlining. Only applied when optimize_libjxl is on."
+    },
+    {
+      "id": "fb_link",
+      "k": "fn",
+      "p": "ffi_build",
+      "l": "static link line",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Emits the rustc link directives: rustc-link-search at the resolved lib/ or lib64/ (chosen by probing for jxl.lib / libjxl.a), then rustc-link-lib=static for jxl, jxl_cms, jxl_threads, hwy, brotlidec, brotlienc, brotlicommon. Adds stdc++ on Linux and c++ on Apple/FreeBSD so the C++ codec links into Rust cleanly."
+    },
+    {
+      "id": "fb_bindgen",
+      "k": "fn",
+      "p": "ffi_build",
+      "l": "bindgen bindings.rs",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Job 2: run bindgen over wrapper.h against the INSTALLED headers (which include cmake-generated jxl_export.h / version.h) to emit OUT_DIR/bindings.rs. Allowlists Jxl.* functions/types and JXL_.* / Jxl.* vars only, generates C enums as NewType (FFI-safe transparent integers), and turns off layout_tests + generate_comments and merges extern blocks for a cheaper compile - no change to the FFI surface."
+    },
+    {
+      "id": "fb_rerun",
+      "k": "fn",
+      "p": "ffi_build",
+      "l": "rerun-if-changed tracking",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Cache-correctness plumbing: rerun-if-changed on wrapper.h, the libjxl submodule .git pointer file (so a submodule update rebuilds), every jxl/*.h public header individually (directory watches do not recurse), CMakeLists.txt and the lib/include / lib/jxl / lib/threads subtrees, plus rerun-if-env-changed on LIBJXL_SOURCE_DIR and JXL_FFI_DEBUG_LIBJXL."
+    },
+    {
+      "id": "fw_decode",
+      "k": "component",
+      "p": "ffi_wrap",
+      "l": "jxl/decode.h",
+      "tech": [
+        "rust"
+      ],
+      "desc": "libjxl public decode API: JxlDecoderCreate/Subscribe/SetInput/ProcessInput/GetBasicInfo/SetImageOutBuffer/FlushImage/Reset/Destroy and the JxlDecoderStatus enum. Bound verbatim by bindgen and called through the safe Decoder in jxl_casadecoder.rs."
+    },
+    {
+      "id": "fw_encode",
+      "k": "component",
+      "p": "ffi_wrap",
+      "l": "jxl/encode.h",
+      "tech": [
+        "rust"
+      ],
+      "desc": "libjxl public encode API: JxlEncoderCreate/SetBasicInfo/SetColorEncoding/AddImageFrame/SetExtraChannelBuffer/ProcessOutput/Reset/Destroy plus frame-settings setters and JxlEncoderStatus. Bound by bindgen and driven by the RAII Encoder in jxl_casaencoder.rs."
+    },
+    {
+      "id": "fw_threads",
+      "k": "component",
+      "p": "ffi_wrap",
+      "l": "thread_parallel_runner.h",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The fixed-size thread-pool parallel runner (JxlThreadParallelRunner*) that both codecs attach so libjxl can fan work across cores. Pure C header, included by wrapper.h for bindgen."
+    },
+    {
+      "id": "fw_resizable",
+      "k": "component",
+      "p": "ffi_wrap",
+      "l": "resizable_parallel_runner.h",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The resizable parallel runner (JxlResizableParallelRunner*) variant that grows its worker count to the image size. Included by wrapper.h so the binding surface offers both runner flavours."
+    },
+    {
+      "id": "fl_include",
+      "k": "component",
+      "p": "ffi_lib",
+      "l": "include! bindings.rs",
+      "tech": [
+        "rust"
+      ],
+      "desc": "src/lib.rs is a thin shim: under cfg(not(target_arch = \"wasm32\")) it includes the bindgen-generated bindings.rs, re-exporting every extern \"C\" Jxl* function and type. On wasm32 the crate body is empty. allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code) silences the C naming."
+    },
+    {
+      "id": "fl_newtype",
+      "k": "component",
+      "p": "ffi_lib",
+      "l": "NewType status enums",
+      "tech": [
+        "rust"
+      ],
+      "desc": "JxlDecoderStatus / JxlEncoderStatus / JxlDataType are generated as NewType transparent-integer wrappers, not native Rust enums. Deliberate FFI safety: a C function can return an integer outside the named set, and a real Rust enum holding an out-of-range discriminant is undefined behaviour."
+    },
+    {
+      "id": "fl_smoke",
+      "k": "component",
+      "p": "ffi_lib",
+      "l": "links_to_libjxl test",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Phase-0 link smoke test: asserts JxlDecoderVersion() > 0. If it passes, the cmake build + static link + bindgen toolchain are wired end-to-end and the rest is mechanical.",
+      "line": 25
+    },
+    {
+      "id": "gpl_rs",
+      "k": "component",
+      "p": "t_gpl_libjxl",
+      "l": "jpegxl-rs 0.10 (safe wrapper)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The safe, RAII wrapper crate (encoder_builder / decoder_builder over jpegxl-sys). This is the GPL counterpart of the BSD jxl_casaencoder / jxl_casadecoder - it is what jxl_native.rs decode and the forked casabio_encode (encode_variants / pyramid) actually call in the live Tauri app. Pulled from crates.io, so there is no in-repo source to map as files - the reason this system was a single opaque node until now."
+    },
+    {
+      "id": "gpl_sys",
+      "k": "component",
+      "p": "t_gpl_libjxl",
+      "l": "jpegxl-sys 0.10 (raw FFI)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The raw extern \"C\" bindings crate - the GPL analogue of this repo BSD jxl-ffi. Exposes the libjxl 0.10 Jxl* symbols that jpegxl-rs builds its safe API on top of. Also a crates.io dependency, not vendored source."
+    },
+    {
+      "id": "gpl_libjxl",
+      "k": "component",
+      "p": "t_gpl_libjxl",
+      "l": "libjxl 0.10 (vendored, GPL build)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The actual codec doing the compression behind jpegxl-rs/sys. Version- and licence-skewed from the BSD external/libjxl 0.11.2 used by jxl-ffi: 0.10 vs 0.11, GPL build vs BSD, and a different C API. The two codecs must not be confused."
+    },
+    {
+      "id": "gpl_oxide",
+      "k": "component",
+      "p": "t_gpl_libjxl",
+      "l": "jxl-oxide (region / ROI)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Pure-Rust JPEG XL decoder used by the Tauri app for region / ROI decode (tile windows of a large image) where the libjxl path is not used. Sits alongside the jpegxl-rs codec inside this GPL-ish JXL stack."
+    },
+    {
+      "id": "gpl_threads",
+      "k": "component",
+      "p": "t_gpl_libjxl",
+      "l": "ThreadsRunner (parallel)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "libjxl 0.10 thread-pool parallel runner that jpegxl-rs attaches so encode/decode fan out across cores - the GPL-side equivalent of the runner bound by jxl-ffi."
     }
   ],
   "edges": [
@@ -2923,9 +3105,98 @@
       "t": "casabio",
       "l": "encode_variants (native)",
       "pay": "rgba8"
+    },
+    {
+      "f": "fw_decode",
+      "t": "fb_bindgen",
+      "l": "bindgen input",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fw_encode",
+      "t": "fb_bindgen",
+      "l": "bindgen input",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fw_threads",
+      "t": "fb_bindgen",
+      "l": "bindgen input",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fw_resizable",
+      "t": "fb_bindgen",
+      "l": "bindgen input",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fb_cmake",
+      "t": "ffi_libjxl",
+      "l": "cmake static",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fb_optflags",
+      "t": "fb_cmake",
+      "l": "inject flags",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fb_link",
+      "t": "ffi_libjxl",
+      "l": "static link",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fb_bindgen",
+      "t": "fl_include",
+      "l": "bindings.rs",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fl_include",
+      "t": "fl_newtype",
+      "l": "re-export",
+      "pay": "bytes",
+      "k": "uses"
+    },
+    {
+      "f": "fl_smoke",
+      "t": "ffi_libjxl",
+      "l": "JxlDecoderVersion",
+      "pay": "jxl",
+      "k": "uses"
+    },
+    {
+      "f": "gpl_rs",
+      "t": "gpl_sys",
+      "l": "safe over raw",
+      "k": "uses"
+    },
+    {
+      "f": "gpl_sys",
+      "t": "gpl_libjxl",
+      "l": "links GPL 0.10",
+      "pay": "jxl",
+      "k": "uses"
+    },
+    {
+      "f": "gpl_rs",
+      "t": "gpl_threads",
+      "l": "parallel runner",
+      "k": "uses"
     }
   ],
-  "generated": "2026-06-20",
+  "generated": "2026-06-21",
   "tech": {
     "rust": {
       "c": "#e9b73e",
