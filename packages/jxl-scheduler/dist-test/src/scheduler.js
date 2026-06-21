@@ -129,9 +129,14 @@ export class Scheduler {
                 if (sub !== params.sessionId) {
                     const subRec = this.sessions.get(sub);
                     if (subRec !== undefined) {
+                        // Kind-aware terminal: an encode subscriber must receive encode_cancelled,
+                        // not decode_cancelled — otherwise its consumer never recognizes the terminal
+                        // and hangs. Mirrors the kind-aware synthesis in shutdown() and the preempt-
+                        // timeout path; the abort-before-assignment path was previously decode-only.
+                        const cancelType = subRec.kind === "encode" ? "encode_cancelled" : "decode_cancelled";
                         for (const h of subRec.handlers) {
                             try {
-                                h({ type: "decode_cancelled", sessionId: sub });
+                                h({ type: cancelType, sessionId: sub });
                             }
                             catch { }
                         }
