@@ -1058,8 +1058,8 @@
       "tech": [
         "rust"
       ],
-      "gc": 3,
-      "lines": 236
+      "gc": 4,
+      "lines": 379
     },
     {
       "id": "ffi_wrap",
@@ -1433,7 +1433,7 @@
       ],
       "desc": "jxl-scheduler (packages/jxl-scheduler/src/scheduler.ts) is the brain of the browser decode system — the layer the architecture map calls \"intelligence.\" Where the session presents a simple API and the worker does the raw decoding, the scheduler is what makes many concurrent image decodes behave well: it manages a pool of web workers, decides which work runs where, preempts low-priority decodes when something more urgent arrives, deduplicates requests for the same image, and applies backpressure so a fast network can't drown a slower decoder. In the layer map it sits between jxl-session above and the worker(s) below. What flows through it is control and routing: session requests and byte chunks come down from sessions, and it dispatches them to workers and routes worker messages (frames, metrics, acks) back up.\n\nWhy it exists: a biodiversity image gallery (or any image-heavy app) can have dozens of decodes in flight — thumbnails, the lightbox, prefetches — competing for a handful of CPU cores. Without coordination you get thrashing, duplicated work, unbounded memory growth, and an unresponsive UI when the user navigates away from an image that is still decoding. The scheduler centralises all those concerns into one place so the policies are consistent and testable. CLAUDE.md is emphatic that certain responsibilities live HERE and nowhere else: deduplication (the DedupeRegistry — so two requests for the same source share one decode and fan out the result), preemption, batching, and adaptive high-water-mark backpressure. Putting any of these in the session, facade, or cache is explicitly a rejected anti-pattern.\n\nHow it works (architecturally): the scheduler owns a worker pool (the sibling pool.ts handles worker lifecycle, prewarming and idle reaping) and a queue. A DedupeRegistry collapses identical in-flight requests so the result fans out to all waiters. Preemption is implemented strictly at the scheduler level using a pause/resume protocol — it sends decode_pause to a worker, waits for the decode_paused acknowledgement, and later sends decode_resume; there is no \"soft yield,\" because the wasm decoder's push() runs synchronously and cannot be interrupted mid-chunk, so hard cancel between chunks is already effectively soft. Backpressure uses an adaptive high-water-mark (HWM) on queued bytes so producers wait (waitForDrain) when the decoder falls behind. CLAUDE.md pins down its method contracts: onMessage(sessionId, handler) returns void (there is no unsubscribe), and send() is fire-and-forget — it does not throw even if the target session is already dead.\n\nConnections: above, jxl_session calls the scheduler to acquire a slot and to send chunks; the scheduler calls the session's handlers back with frames/metrics. Below, it dispatches to jxl_worker (the decode-handler running in a web worker), which in turn drives the bridge wasm codec. The data crossing these edges is byte chunks and control messages down, and decoded-frame and metric messages up. It also coordinates with pool.ts for worker supply. Pixel buffers transferred up from workers arrive as transferred ArrayBuffers, which detach on postMessage.\n\nGotchas, all from hard-won experience: because transferred pixel ArrayBuffers detach, you cannot recycle them into a pool — a repeatedly-rejected idea. Preemption must stay scheduler-only; a \"yield message\" soft-preemption is impossible given synchronous wasm push. Adaptive/heuristic tunables here require benchmark evidence before being added — CLAUDE.md forbids adding knobs without data. And the terminal-acknowledgement matching matters: when cancelling, the scheduler must match the worker's terminal ack to the right session, and must not release a pool slot on a non-terminal (mid-decode) event — past bugs (S1/S2/S3) came from exactly these races. Workers are stateless between sessions, so the scheduler must not assume any decoder state carries across a recycle().",
       "gc": 27,
-      "lines": 1464
+      "lines": 1469
     },
     {
       "id": "jxl_worker",
@@ -2370,6 +2370,232 @@
         "rust"
       ],
       "desc": "libjxl 0.10 thread-pool parallel runner that jpegxl-rs attaches so encode/decode fan out across cores - the GPL-side equivalent of the runner bound by jxl-ffi."
+    },
+    {
+      "id": "smp_dtype",
+      "k": "component",
+      "p": "e_sample",
+      "l": "data_type()",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Maps each sample type to its libjxl JxlDataType (u8 to JXL_TYPE_UINT8, u16 to JXL_TYPE_UINT16, f16 to JXL_TYPE_FLOAT16, f32 to JXL_TYPE_FLOAT). The single point where Rust pixel storage meets libjxl pixel format.",
+      "line": 49
+    },
+    {
+      "id": "smp_bps",
+      "k": "component",
+      "p": "e_sample",
+      "l": "bits_per_sample()",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Returns (bits_per_sample, exponent_bits_per_sample) per type. A non-zero exponent count marks a float type (f16 = (16,5), f32 = (32,8)); integers report (N,0). Feeds SetBasicInfo so libjxl writes the correct sample header.",
+      "line": 51
+    },
+    {
+      "id": "smp_isfloat",
+      "k": "component",
+      "p": "e_sample",
+      "l": "is_float()",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Convenience predicate derived from bits_per_sample(): exponent_bits > 0. Drives the auto colour-encoding default (linear sRGB for float input, sRGB for integer).",
+      "line": 53
+    },
+    {
+      "id": "smp_impls",
+      "k": "component",
+      "p": "e_sample",
+      "l": "u8 / u16 / f16 / f32 impls",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The four concrete Sample implementations the encoder accepts. u8 is the dominant photo path (interleaved RGBA8); u16 / f16 / f32 cover high-bit-depth and HDR/linear inputs. half::f16 brings the dependency for the 16-bit float type."
+    },
+    {
+      "id": "frm_struct",
+      "k": "component",
+      "p": "e_frame",
+      "l": "Frame<S> (borrowed color)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "One image to encode: borrowed interleaved color slice (+ interleaved alpha when alpha=true), width/height, color_channels (1 gray or 3 RGB), endianness, and a borrowed slice of planar extra channels. Zero-copy in - libjxl AddImageFrame reads this buffer directly.",
+      "line": 125
+    },
+    {
+      "id": "frm_ctors",
+      "k": "component",
+      "p": "e_frame",
+      "l": "rgb / rgba / gray / rgba8",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Constructors over the private base(): rgb (3ch), rgba (3ch + interleaved alpha), gray (1ch), and the rgba8 sugar for the dominant interleaved-RGBA8 photo path. Default endianness is native, extra is empty.",
+      "line": 160
+    },
+    {
+      "id": "frm_stride",
+      "k": "component",
+      "p": "e_frame",
+      "l": "interleaved_channels()",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Computes the interleaved color stride: color_channels + 1 when alpha is interleaved, else color_channels. Used to validate the color buffer length and to tell libjxl the pixel layout.",
+      "line": 164
+    },
+    {
+      "id": "frm_extra",
+      "k": "component",
+      "p": "e_frame",
+      "l": "ExtraChannel<S>",
+      "tech": [
+        "rust"
+      ],
+      "desc": "A single planar extra channel (depth / thermal / hyperspectral band / alpha): a kind plus a borrowed width*height sample slice. Declared to libjxl with SetExtraChannelInfo before the first frame and supplied via SetExtraChannelBuffer.",
+      "line": 119
+    },
+    {
+      "id": "frm_extrakind",
+      "k": "component",
+      "p": "e_frame",
+      "l": "ExtraKind -> JxlExtraChannelType",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Enum (Alpha, Depth, Thermal, Spectral, Optional) mapped by to_ffi() to libjxl JxlExtraChannelType. libjxl has no hyperspectral type, so Spectral and Optional both map to JXL_CHANNEL_OPTIONAL.",
+      "line": 95
+    },
+    {
+      "id": "opt_rate",
+      "k": "component",
+      "p": "e_opts",
+      "l": "Rate (Quality / Distance / Lossless)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Mutually-exclusive rate control as an enum: Quality(0..100), Distance(0..25, 0 = mathematically lossless), or Lossless (modular). Making Lossless a distinct variant makes the upstream \"SetFrameDistance silently un-lossless's the image\" bug structurally impossible.",
+      "line": 181
+    },
+    {
+      "id": "opt_struct",
+      "k": "component",
+      "p": "e_opts",
+      "l": "EncodeOptions",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The full encode knob set: rate, effort (1..=10), progressive_dc, group_order, optional colour encoding, use_container, uses_original_profile, and an extra Vec<(FrameSettingId, i64)> escape hatch for any present/future libjxl frame setting.",
+      "line": 242
+    },
+    {
+      "id": "opt_default",
+      "k": "component",
+      "p": "e_opts",
+      "l": "Default (q90, effort 3)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Default options: Rate::Quality(90), effort 3, no progressive DC / group order, auto colour, no container. effort 3 matches the project default measured fastest on speed+filesize."
+    },
+    {
+      "id": "opt_builders",
+      "k": "component",
+      "p": "e_opts",
+      "l": "quality / distance / lossless / with_effort",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Ergonomic constructors and the chainable with_effort() builder, each layered over Default so callers spell out only what they change.",
+      "line": 272
+    },
+    {
+      "id": "opt_validate",
+      "k": "component",
+      "p": "e_opts",
+      "l": "validate()",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Range-checks options before any libjxl call (Quality 0..=100, Distance 0..=25, effort 1..=10), returning EncodeError::Channels on violation. Called automatically by Encoder::encode but exposed so callers can fail fast.",
+      "line": 297
+    },
+    {
+      "id": "opt_grouporder",
+      "k": "component",
+      "p": "e_opts",
+      "l": "GroupOrder",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Optional encode group ordering with an optional center (x,y) - drives JXL_ENC_FRAME_SETTING_GROUP_ORDER* so a chosen region decodes first (center-out progressive for the pyramid viewer).",
+      "line": 191
+    },
+    {
+      "id": "opt_colorenc",
+      "k": "component",
+      "p": "e_opts",
+      "l": "ColorEncoding (sRGB / linear)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Srgb or LinearSrgb. None on EncodeOptions means auto: sRGB for integer samples, linear sRGB for float - the SetColorEncoding input.",
+      "line": 196
+    },
+    {
+      "id": "fsid_variants",
+      "k": "component",
+      "p": "e_fsid",
+      "l": "Effort / Progressive* / Modular / Gaborish / Epf",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Typed mirror of JxlEncoderFrameSettingId: Effort, DecodingSpeed, GroupOrder(+CenterX/Y), ProgressiveDc/Ac, QprogressiveAc, Responsive, Modular, Gaborish, Epf. Replaces the old transmute(14i32) hack with named variants."
+    },
+    {
+      "id": "fsid_toffi",
+      "k": "component",
+      "p": "e_fsid",
+      "l": "to_ffi() -> JxlEncoderFrameSettingId",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Translates each typed variant to the libjxl JXL_ENC_FRAME_SETTING_* integer id before JxlEncoderFrameSettingsSetOption.",
+      "line": 105
+    },
+    {
+      "id": "fsid_raw",
+      "k": "component",
+      "p": "e_fsid",
+      "l": "Raw(i32) escape hatch",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Raw(i32) carries any frame-setting id not enumerated here straight through to libjxl, so a new knob needs no enum edit."
+    },
+    {
+      "id": "e_error",
+      "k": "module",
+      "p": "enc_rs",
+      "l": "EncodeError",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The encoder error type. Every fallible Encoder path returns Result<_, EncodeError>; the Encoder is Reset on every error path so a prior failure never poisons a reused handle.",
+      "line": 33
+    },
+    {
+      "id": "err_variants",
+      "k": "component",
+      "p": "e_error",
+      "l": "Jxl / Channels / Size / Create",
+      "tech": [
+        "rust"
+      ],
+      "desc": "thiserror enum: Jxl(String) for a libjxl failure, Channels(String) for invalid channel/option config (also used by validate()), Size{expected,got} for a pixel-count mismatch, and Create when JxlEncoderCreate returns null."
     }
   ],
   "edges": [
@@ -3193,6 +3419,36 @@
       "f": "gpl_rs",
       "t": "gpl_threads",
       "l": "parallel runner",
+      "k": "uses"
+    },
+    {
+      "f": "e_sample",
+      "t": "frm_struct",
+      "l": "Frame<S: Sample>",
+      "k": "uses"
+    },
+    {
+      "f": "frm_extrakind",
+      "t": "frm_extra",
+      "l": "kind of",
+      "k": "uses"
+    },
+    {
+      "f": "opt_rate",
+      "t": "opt_validate",
+      "l": "range-checked",
+      "k": "uses"
+    },
+    {
+      "f": "fsid_variants",
+      "t": "fsid_toffi",
+      "l": "mapped to ffi",
+      "k": "uses"
+    },
+    {
+      "f": "opt_validate",
+      "t": "err_variants",
+      "l": "Channels on bad opts",
       "k": "uses"
     }
   ],
