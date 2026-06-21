@@ -61,3 +61,49 @@ no layer violations found (backpressure / dedupe / budget all in their CLAUDE.md
 Two real fixes (one latent hang, one hot-path allocation) on otherwise solid, well-defended code.
 No correctness-breaking bugs in the core state machine. Everything uncertain or API-shaped was
 deferred rather than guessed.
+
+---
+
+## Follow-up sweep — GC-churn across the TS packages (2026-06-21)
+
+Requested after the `forEachSubscriber` fix: hunt the same CLASS (per-message / per-frame / per-tile
+throwaway allocations) codebase-wide. Four parallel read-only finders over the hot clusters
+(jxl-worker-browser, jxl-wasm/facade, jxl-session+stream, jxl-pyramid+progressive). Rust crates
+excluded — no GC.
+
+**Honest framing:** these are GC-hygiene / allocation-count reductions verified by full test parity,
+NOT wall-clock movers. The pipeline is WASM-bound; eliminating these short-lived objects cuts
+minor-GC pressure under bursty load, not decode/encode time.
+
+### Fixed (committed in `f1a57528` — see note below)
+1. **`jxl-session/decode-session.ts` `makeFrame`** — replaced 11 conditional-spread
+   `...(cond ? { X } : {})` with guard-assign onto one object. Each spread allocated a throwaway
+   intermediate `{X}`/`{}` per **frame** (per pass / per animation frame). Mirrors the existing
+   `toFrameMeta()` pattern in jxl-worker-browser. Byte-identical result. **jxl-session 63 tests, 0 fail.**
+2. **`jxl-progressive/progressive-scheduler.ts` `tierRank`** — hoisted the per-call
+   `Record<Tier,number>` literal to a module const. Hit per-candidate per RAF tick (~60fps via
+   `fairnessScore`). Pure lookup, parity-exact. **jxl-progressive 88 tests, 0 fail.**
+3. **`jxl-session/util.ts`** (enabler, not GC) — fixed a **pre-existing** compile break
+   (`Uint8Array.buffer` is `ArrayBufferLike` under TS 5.5 / @types/node 22) with the same
+   `as ArrayBuffer` cast the sibling `toTransferablePixels` already uses. Without this, jxl-session
+   did not compile and its test suite could not run to verify fix #1.
+
+### Considered and REJECTED (with reason)
+- **`jxl-wasm/facade.ts` — 0 findings.** Already aggressively swept (cached bridge refs, `EMPTY_U8`
+  reuse, shared `_f32Scratch`, copyWithin compaction). All remaining per-call allocs are mandatory
+  WASM-heap copy-outs or consumer-facing event objects.
+- **`decode-handler.ts:731 transferList()`** — `[buf]` per frame IS the exemplar class, but the only
+  safe fix is a shared mutable holder array returned to callers — a latent aliasing foot-gun for any
+  future caller that retains it, for dozens-of-arrays-per-decode savings. Reward < risk; rejected on
+  safety (matches the package's own conservatism).
+- worker-browser `_metricMsg`/`_drainMsg`/`_chunkMsg` (already pre-allocated), encode-handler
+  per-chunk wrappers (queued, not throwaway), event-stream IteratorResults / Promises (required-fresh,
+  contractually mandated), pyramid `gridTile` region args (required values) — all correctly excluded.
+
+### ⚠️ Branch / commit note
+This package's branch (`EpicCodeReviewJxl-Scheduler`) is **shared with concurrent EpicCodeReview and
+build processes** that committed during this run. The three GC fixes above were swept into a
+concurrent commit (`f1a57528`, "perf(fast-jpeg)…") rather than landing in their own labelled commit —
+the files are intact and test-verified, but the commit message does not describe them. The two
+scheduler fixes are cleanly in `eb51ff6b` / `1c6cf895`. No history was rewritten (forbidden, and
+unsafe against a live concurrent committer).
