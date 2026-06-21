@@ -9,11 +9,12 @@ import {
     formatLoadProgress,
 } from './jxl-benchmark-progress.js';
 import { createFilePicker } from './jxl-file-picker.js';
+import { detectFormat } from './format-detect.js';
 
 // Console page header — always shows which page this console belongs to (dev productivity across many open lab/benchmark tabs)
 console.log('%c[Benchmark] jxl-benchmark.js loaded — JXL Benchmark page (performance batch runs)', 'color:#3b82f6;font-weight:600', { page: 'Benchmark', url: location.href, t: new Date().toISOString(), ua: navigator.userAgent.slice(0, 120) });
 
-const { process_orf } = rawWasm;
+const { process_orf, decode_tiff, decode_exr } = rawWasm;
 
 const ALL_SIZES = [128, 256, 512, 1080, 1920, 'fullsize'];
 const DEFAULT_SIZES = [128, 512, 1080];
@@ -487,7 +488,7 @@ const filePicker = createFilePicker({
     input: sourceInput,
     dropZone: sourceDrop,
     multiple: true,
-    accept: '.orf,.ORF,.jpg,.jpeg,.png,.tif,.tiff,.jxl,image/*',
+    accept: '.orf,.ORF,.dng,.cr2,.jpg,.jpeg,.png,.gif,.webp,.avif,.tif,.tiff,.exr,.jxl,image/*',
     persistKey: 'jxl-benchmark-last-files',
     onFiles: (files) => {
         loadFiles(files);
@@ -747,27 +748,42 @@ async function processImageFile(file, arrayBuffer) {
     const type = file.type;
 
     try {
-        if (name.match(/\.(orf|raw)$/i)) {
-            if (!wasmReady) {
-                dbgLog('WASM not ready');
-                console.error('WASM not ready');
-                return null;
-            }
-            console.log('Processing ORF:', name, 'bytes:', arrayBuffer.byteLength);
+        const head = new Uint8Array(arrayBuffer.slice(0, 16));
+        const route = detectFormat(head, name);
+
+        if (route === 'raw') {
+            if (!wasmReady) { dbgLog('WASM not ready'); console.error('WASM not ready'); return null; }
+            console.log('Processing RAW:', name, 'bytes:', arrayBuffer.byteLength);
             const result = process_orf(new Uint8Array(arrayBuffer), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
             try {
-                const pixels = result.take_rgb();
-                console.log(`Converted: ${result.width}×${result.height}`);
-                return {
-                    pixels,
-                    format: 'rgb8',
-                    width: result.width,
-                    height: result.height,
-                };
+                return { pixels: result.take_rgb(), format: 'rgb8', width: result.width, height: result.height };
             } finally {
                 result.free();
             }
-        } else if (type.startsWith('image/') || name.match(/\.(jpg|jpeg|png|webp|jxl)$/i)) {
+        }
+
+        if (route === 'tiff' || route === 'exr') {
+            if (!wasmReady) { dbgLog('WASM not ready'); console.error('WASM not ready'); return null; }
+            console.log(`Processing ${route.toUpperCase()}:`, name);
+            const u8 = new Uint8Array(arrayBuffer);
+            const dec = route === 'exr' ? decode_exr(u8) : decode_tiff(u8);
+            try {
+                // display path: always present a clean RGBA8 preview regardless of source depth
+                const pixels = dec.to_display_rgba8();
+                return {
+                    pixels,
+                    format: 'rgba8',
+                    width: dec.width,
+                    height: dec.height,
+                    bitDepth: dec.bit_depth,   // 8/16/32 retained for the encode path
+                };
+            } finally {
+                dec.free();
+            }
+        }
+
+        // sdr (png/jpg/gif/webp/avif) + jxl -> browser-native decode
+        if (route === 'sdr' || route === 'jxl' || type.startsWith('image/')) {
             console.log('Processing as image:', name, type);
             const blob = new Blob([arrayBuffer], { type: type || 'application/octet-stream' });
             const bitmap = await createImageBitmap(blob);
@@ -779,16 +795,11 @@ async function processImageFile(file, arrayBuffer) {
             const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
             const d = imageData.data;
             const pixels = new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
-            return {
-                pixels,
-                format: 'rgba8',
-                width: bitmap.width,
-                height: bitmap.height,
-            };
-        } else {
-            dbgLog(`✗ Unknown file type: ${name} (${type})`);
-            console.error('Unknown file type:', name, type);
+            return { pixels, format: 'rgba8', width: bitmap.width, height: bitmap.height };
         }
+
+        dbgLog(`✗ Unsupported/unknown file: ${name} (${type})`);
+        console.error('Unsupported/unknown file:', name, type);
     } catch (err) {
         dbgLog(`✗ Process: ${err.message}`);
         console.error('processImageFile error:', err);
