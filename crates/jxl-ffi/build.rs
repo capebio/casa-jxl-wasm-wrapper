@@ -58,6 +58,44 @@ fn which_on_path(exe: &str) -> Option<PathBuf> {
     None
 }
 
+/// Resolve the git HEAD file(s) to watch for the working tree at `dir`, following
+/// a submodule's `.git` "gitdir:" pointer. Returns HEAD plus, when HEAD is a
+/// symbolic ref, the loose ref file it points at. Best-effort — an empty vec when
+/// it can't resolve (the directory/header watches then remain the fallback).
+fn resolved_git_head_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let dot_git = dir.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else if let Ok(contents) = std::fs::read_to_string(&dot_git) {
+        // Submodule / linked worktree: ".git" is a file "gitdir: <path>".
+        match contents.lines().next().and_then(|l| l.strip_prefix("gitdir:")) {
+            Some(p) => {
+                let p = PathBuf::from(p.trim());
+                if p.is_absolute() { p } else { dir.join(p) }
+            }
+            None => return Vec::new(),
+        }
+    } else {
+        return Vec::new();
+    };
+    let head = git_dir.join("HEAD");
+    if !head.is_file() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    // If HEAD is a symref ("ref: refs/heads/<x>"), also watch that loose ref.
+    if let Ok(h) = std::fs::read_to_string(&head) {
+        if let Some(r) = h.strip_prefix("ref:") {
+            let ref_path = git_dir.join(r.trim());
+            if ref_path.is_file() {
+                files.push(ref_path);
+            }
+        }
+    }
+    files.push(head);
+    files
+}
+
 fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target.contains("wasm32") {
@@ -136,6 +174,26 @@ fn main() {
     let optimize_libjxl = env::var_os("JXL_FFI_DEBUG_LIBJXL").is_none();
     if optimize_libjxl {
         cfg.profile("RelWithDebInfo");
+    } else {
+        // JXL_FFI_DEBUG_LIBJXL=1: build libjxl to match Cargo's profile so you can
+        // step into the codec. Select Debug explicitly rather than relying on
+        // cmake-rs's profile inference (keyed off OPT_LEVEL/DEBUG, which could
+        // drift) — this guarantees the escape hatch produces a genuine Debug libjxl.
+        cfg.profile("Debug");
+    }
+
+    // Optional AVX-512 fat-dispatch targets (libjxl's Highway HWY_AVX3 family),
+    // OFF by default. This dev box (i7-10850H, Comet Lake) has no AVX-512, so
+    // enabling it here would be pure build cost with zero runtime benefit. Set
+    // JXL_FFI_ENABLE_AVX512=1 only when building for AVX-512-capable deployment
+    // targets (Ice/Tiger/Rocket Lake client; Skylake-X / Zen4 / Sapphire Rapids
+    // server). libjxl runtime-dispatches via Highway, so the compiled-in AVX-512
+    // path is taken only on CPUs that have it — safe to ship, worth it only where
+    // the silicon exists. (_ZEN4 / _SPR are separate libjxl toggles; add them the
+    // same way for those specific µarchs.)
+    if env::var_os("JXL_FFI_ENABLE_AVX512").is_some() {
+        cfg.define("JPEGXL_ENABLE_AVX512", "ON");
+        println!("cargo:warning=jxl-ffi: AVX-512 Highway targets enabled (JXL_FFI_ENABLE_AVX512)");
     }
 
     // NOTE: ThinLTO/IPO (CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON) was evaluated and
@@ -226,14 +284,19 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBJXL_SOURCE_DIR");
     // Toggling the codec optimization level must reconfigure + rebuild libjxl.
     println!("cargo:rerun-if-env-changed=JXL_FFI_DEBUG_LIBJXL");
-    // Re-run when the libjxl submodule HEAD changes. In a git submodule the
-    // `.git` entry is a plain file (pointing into the superproject gitdir);
-    // Cargo tracks it as a file, so `git submodule update` bumps its mtime
-    // and triggers a rebuild + bindgen re-run.
-    println!(
-        "cargo:rerun-if-changed={}",
-        source.join(".git").display()
-    );
+    // Toggling AVX-512 must reconfigure libjxl (changes the compiled HWY targets).
+    println!("cargo:rerun-if-env-changed=JXL_FFI_ENABLE_AVX512");
+    // Re-run when the libjxl submodule revision changes. The `.git` entry in a
+    // submodule working tree is a FILE ("gitdir: <path>") whose mtime does NOT
+    // change on `git submodule update` — only the submodule's checked-out HEAD
+    // does. Watch the resolved gitdir's HEAD (and the ref it names, if symbolic)
+    // so a revision bump reliably triggers a rebuild + bindgen re-run, regardless
+    // of whether Cargo recurses the watched source directories below. Keep the
+    // `.git` file watch too (cheap belt-and-suspenders).
+    println!("cargo:rerun-if-changed={}", source.join(".git").display());
+    for head in resolved_git_head_files(&source) {
+        println!("cargo:rerun-if-changed={}", head.display());
+    }
     // Re-run when key source subtrees change so cmake rebuilds on CMakeLists.txt
     // changes and bindgen regenerates on header edits.
     for subpath in &["CMakeLists.txt", "lib/include", "lib/jxl", "lib/threads"] {
@@ -294,8 +357,22 @@ fn main() {
              in .cargo/config.toml",
         );
 
+    // Write bindings.rs only when the content actually changed. bindgen is
+    // deterministic, so a script rerun caused by a libjxl .cc edit (headers
+    // unchanged) regenerates byte-identical bindings; rewriting them would bump
+    // the file mtime and force every crate that transitively `include!`s them to
+    // recompile. Comparing first stops a codec-only change from cascading into a
+    // full Rust rebuild of the workspace.
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let bindings_path = out.join("bindings.rs");
+    let mut rendered: Vec<u8> = Vec::new();
     bindings
-        .write_to_file(out.join("bindings.rs"))
-        .expect("failed to write bindings.rs");
+        .write(Box::new(&mut rendered))
+        .expect("failed to render libjxl bindings");
+    let changed = std::fs::read(&bindings_path)
+        .map(|existing| existing != rendered)
+        .unwrap_or(true);
+    if changed {
+        std::fs::write(&bindings_path, &rendered).expect("failed to write bindings.rs");
+    }
 }
