@@ -55,6 +55,91 @@ export class DecodeBench {
 if (Symbol.dispose) DecodeBench.prototype[Symbol.dispose] = DecodeBench.prototype.free;
 
 /**
+ * Decoded non-RAW image handed to JS. One of the take_* buffers is non-empty,
+ * selected by `bit_depth` (8 -> take_rgba8, 16 -> take_rgba16_le, 32 -> take_rgba_f32).
+ */
+export class DecodedImage {
+    static __wrap(ptr) {
+        const obj = Object.create(DecodedImage.prototype);
+        obj.__wbg_ptr = ptr;
+        DecodedImageFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        DecodedImageFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_decodedimage_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get bit_depth() {
+        const ret = wasm.decodedimage_bit_depth(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get height() {
+        const ret = wasm.decodedimage_height(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * RGBA16 packed little-endian, 8 bytes/px (bit_depth == 16). Empty otherwise.
+     * @returns {Uint8Array}
+     */
+    take_rgba16_le() {
+        const ret = wasm.decodedimage_take_rgba16_le(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * RGBA8 (bit_depth == 8). Empty otherwise.
+     * @returns {Uint8Array}
+     */
+    take_rgba8() {
+        const ret = wasm.decodedimage_take_rgba8(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * RGBA f32 (bit_depth == 32). Returned as Float32Array. Empty otherwise.
+     * @returns {Float32Array}
+     */
+    take_rgba_f32() {
+        const ret = wasm.decodedimage_take_rgba_f32(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * Display-ready RGBA8 regardless of source depth (f32 -> linear->sRGB).
+     * @returns {Uint8Array}
+     */
+    to_display_rgba8() {
+        const ret = wasm.decodedimage_to_display_rgba8(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    get width() {
+        const ret = wasm.decodedimage_width(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) DecodedImage.prototype[Symbol.dispose] = DecodedImage.prototype.free;
+
+/**
  * WASM-resident rendering state for a single image (lightbox or thumbnail).
  *
  * Owns the pre-tonemapped RGB16 buffer.  Slider changes call `render()` without
@@ -62,8 +147,9 @@ if (Symbol.dispose) DecodeBench.prototype[Symbol.dispose] = DecodeBench.prototyp
  * at construction; every subsequent edit stays inside WASM.
  *
  * When `texture` and `clarity` are both zero (the common case), `render` reads the
- * internal buffer without cloning.  When either is nonzero, a clone is made before
- * in-place sharpening so the cached buffer is never mutated.
+ * internal buffer without cloning.  When either is nonzero, a thread-local scratch
+ * buffer is reused for in-place sharpening so the cached buffer is never mutated
+ * and no per-call Vec::clone occurs.
  */
 export class LookRenderer {
     static __wrap(ptr) {
@@ -936,6 +1022,36 @@ export function bench_decode_orf(data) {
 }
 
 /**
+ * Decode an OpenEXR image to RGBA f32 (linear HDR preserved).
+ * @param {Uint8Array} bytes
+ * @returns {DecodedImage}
+ */
+export function decode_exr(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.decode_exr(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return DecodedImage.__wrap(ret[0]);
+}
+
+/**
+ * Decode a general RGB(A) TIFF (u8 or u16) to RGBA.
+ * @param {Uint8Array} bytes
+ * @returns {DecodedImage}
+ */
+export function decode_tiff(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.decode_tiff(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return DecodedImage.__wrap(ret[0]);
+}
+
+/**
  * @returns {boolean}
  */
 export function demosaic_bench_equal() {
@@ -1590,7 +1706,7 @@ function __wbg_get_imports(memory) {
             table.set(offset + 2, true);
             table.set(offset + 3, false);
         },
-        memory: memory || new WebAssembly.Memory({initial:18,maximum:32768,shared:true}),
+        memory: memory || new WebAssembly.Memory({initial:22,maximum:32768,shared:true}),
     };
     return {
         __proto__: null,
@@ -1601,6 +1717,9 @@ function __wbg_get_imports(memory) {
 const DecodeBenchFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_decodebench_free(ptr, 1));
+const DecodedImageFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_decodedimage_free(ptr, 1));
 const LookRendererFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_lookrenderer_free(ptr, 1));
