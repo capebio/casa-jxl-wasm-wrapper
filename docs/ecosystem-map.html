@@ -2984,6 +2984,9 @@ const PERF_LOG = [
   {id:'le_pack_bulk',      who:'David', date:'2026-06-21',
    desc:'decode_jxl_rgba16 u16→LE: per-elem extend → chunks_copy memcpy (+62%, tauri)',
    ratio:2.65, hrs:1, msSaved:34, memMB:0,  fileSizePct:null},
+  {id:'dng_tile_direct',   who:'David', date:'2026-06-21',
+   desc:'DNG tiles decode direct into output bands; drop per-row alloc + Mutex copy (+16.6%, tauri)',
+   ratio:1.17, hrs:1, msSaved:6,  memMB:0,  fileSizePct:null},
 ];
 
 function renderPerfLb(){
