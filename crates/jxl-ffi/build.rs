@@ -27,6 +27,37 @@
 use std::env;
 use std::path::PathBuf;
 
+/// Best-effort lookup of an executable on `PATH` (honours Windows `PATHEXT`).
+/// Returns the resolved path if found. Used to make the sccache launcher a
+/// pure no-op when sccache isn't installed.
+fn which_on_path(exe: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    // On Windows, also try the executable extensions (sccache → sccache.exe).
+    let exts: Vec<String> = if cfg!(windows) {
+        env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.BAT;.CMD".into())
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_lowercase())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for dir in env::split_paths(&path) {
+        let direct = dir.join(exe);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        for ext in &exts {
+            let cand = dir.join(format!("{exe}{ext}"));
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
 fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target.contains("wasm32") {
@@ -57,7 +88,29 @@ fn main() {
         .define("JPEGXL_ENABLE_SJPEG", "OFF")
         .define("JPEGXL_ENABLE_OPENEXR", "OFF")
         .define("JPEGXL_ENABLE_JPEGLI", "OFF")
-        .define("JPEGXL_BUNDLE_LIBPNG", "OFF");
+        .define("JPEGXL_BUNDLE_LIBPNG", "OFF")
+        // JPEG↔JXL lossless transcode (AddJPEGFrame / SetJPEGBuffer / jpeg_data).
+        // No jxl-ffi consumer uses it: the only JPEG-transcode path in this repo
+        // is web/bridge.cpp's WASM build, which does NOT link jxl-ffi. Turning it
+        // OFF drops decode_to_jpeg.cc + enc_jpeg_data.cc + the jpeg_data subtree
+        // from the static lib (a build-time-only reduction; the public decode/
+        // encode symbols we DO use are unaffected). libjxl's own CI builds with
+        // this OFF, so it is a supported configuration. If any consumer ever
+        // calls JxlEncoderAddJPEGFrame / JxlDecoderSetJPEGBuffer, flip this back.
+        .define("JPEGXL_ENABLE_TRANSCODE_JPEG", "OFF");
+
+    // sccache compiler-cache launcher (optional, guarded). When `sccache` is on
+    // PATH, route libjxl's C/C++ compiles through it so object files are cached
+    // and SHARED across the many sibling git worktrees / clean rebuilds. No-op
+    // when sccache is absent (the common case here) — we never inject a launcher
+    // that doesn't exist, so the build cannot break from this. sccache is NOT
+    // currently installed; installing it would make repeated libjxl rebuilds
+    // (minutes each, cold) near-instant on a cache hit.
+    if which_on_path("sccache").is_some() {
+        cfg.define("CMAKE_C_COMPILER_LAUNCHER", "sccache")
+            .define("CMAKE_CXX_COMPILER_LAUNCHER", "sccache");
+        println!("cargo:warning=jxl-ffi: routing libjxl compiles through sccache");
+    }
 
     // Prefer Cargo's NUM_JOBS (set by `-j N`) so explicit parallelism flags are
     // honoured. Fall back to available_parallelism() only when Cargo doesn't
@@ -84,6 +137,14 @@ fn main() {
     if optimize_libjxl {
         cfg.profile("RelWithDebInfo");
     }
+
+    // NOTE: ThinLTO/IPO (CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON) was evaluated and
+    // dropped. It LINKS fine — lld-link consumes the ThinLTO-bitcode static
+    // archives into the Rust binary without error — and it preserves bit-exact
+    // codec output. But on the i7-10850H it delivered no measurable enc/dec win
+    // (interleaved, thermal-cancelled A/B: ~0% / marginally negative, far below
+    // the ≥5% gate) while making clean libjxl builds slower. Not worth shipping.
+    // Re-evaluate only if libjxl's hot path becomes cross-TU-inlining-bound.
 
     // Use CARGO_CFG_TARGET_* (target triple) not cfg!(windows) (host) for cross-compilation.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -220,6 +281,11 @@ fn main() {
         .layout_tests(false)
         .generate_comments(false)
         .merge_extern_blocks(true)
+        // The bindings are machine-read (`include!`d, never opened by a human),
+        // so running rustfmt over them is wasted work. Formatter::None skips the
+        // rustfmt subprocess entirely (bindgen's default is Formatter::Rustfmt),
+        // trimming one process spawn off every bindgen run with no FFI change.
+        .formatter(bindgen::Formatter::None)
         .generate()
         .expect(
             "bindgen failed to generate libjxl bindings — \
