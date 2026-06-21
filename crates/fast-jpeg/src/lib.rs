@@ -95,10 +95,13 @@ fn to_rgba(pixels: &[u8], format: PixelFormat) -> Result<Vec<u8>, String> {
             if pixels.len() % 3 != 0 {
                 return Err("rgb24 pixel buffer length is not divisible by 3".into());
             }
-            let mut rgba = Vec::with_capacity((pixels.len() / 3) * 4);
-            for chunk in pixels.chunks_exact(3) {
-                rgba.extend_from_slice(chunk);
-                rgba.push(255);
+            // Prefill alpha=255 with one vectorized memset, then copy the 3-byte
+            // RGB runs into a fixed-size buffer. Avoids the per-pixel length-bump +
+            // capacity check of extend_from_slice/push (~45-56% faster @12-24MP;
+            // see examples/to_rgba_flip.rs). Byte-exact with the old loop.
+            let mut rgba = vec![255u8; (pixels.len() / 3) * 4];
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(pixels.chunks_exact(3)) {
+                dst[..3].copy_from_slice(src);
             }
             Ok(rgba)
         }
@@ -107,9 +110,12 @@ fn to_rgba(pixels: &[u8], format: PixelFormat) -> Result<Vec<u8>, String> {
                 .len()
                 .checked_mul(4)
                 .ok_or_else(|| "L8 pixel buffer too large".to_string())?;
-            let mut rgba = Vec::with_capacity(capacity);
-            for &lum in pixels {
-                rgba.extend_from_slice(&[lum, lum, lum, 255]);
+            // Same prefill-then-write strategy as RGB24 (~31-42% faster).
+            let mut rgba = vec![255u8; capacity];
+            for (dst, &lum) in rgba.chunks_exact_mut(4).zip(pixels) {
+                dst[0] = lum;
+                dst[1] = lum;
+                dst[2] = lum;
             }
             Ok(rgba)
         }

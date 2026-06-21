@@ -34,6 +34,18 @@ class DecodeResult {
         return ret >>> 0;
     }
     /**
+     * Consuming accessor — moves the pixel buffer out without cloning.
+     * Prefer this over `data` when you only need the pixels once.
+     * @returns {Uint8Array}
+     */
+    take_data() {
+        const ptr = this.__destroy_into_raw();
+        const ret = wasm.decoderesult_take_data(ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
      * @returns {number}
      */
     get width() {

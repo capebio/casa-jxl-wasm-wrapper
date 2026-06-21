@@ -89,10 +89,13 @@ export interface GalleryOptions {
   testFetchTierWithPrefix?: typeof fetchTierWithPrefix;
 }
 
+// Hoisted module const — tierRank is hit per-candidate per RAF tick (via fairnessScore);
+// re-allocating this table on every call was throwaway garbage on a ~60fps path.
+const TIER_RANKS: Record<Tier, number> = { none: 0, dc: 1, preview: 2, full: 3 };
+
 /** Lower priority number = more important. Maps to a score where higher = better. */
 export function tierRank(tier: Tier): number {
-  const ranks: Record<Tier, number> = { none: 0, dc: 1, preview: 2, full: 3 };
-  return ranks[tier];
+  return TIER_RANKS[tier];
 }
 
 /** Higher score = schedule this job sooner. */

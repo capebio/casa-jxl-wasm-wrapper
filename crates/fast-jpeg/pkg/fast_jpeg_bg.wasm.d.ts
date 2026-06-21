@@ -5,6 +5,7 @@ export const __wbg_decoderesult_free: (a: number, b: number) => void;
 export const decode_scaled: (a: number, b: number, c: number) => [number, number, number];
 export const decoderesult_data: (a: number) => [number, number];
 export const decoderesult_height: (a: number) => number;
+export const decoderesult_take_data: (a: number) => [number, number];
 export const decoderesult_width: (a: number) => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;

@@ -220,23 +220,29 @@ export class DecodeSessionImpl implements DecodeSession {
     stage: DecodeFrameEvent["stage"],
     msg: { info: ImageInfo; pixels: DecodeFrameEvent["pixels"]; format: DecodeFrameEvent["format"]; pixelStride: number } & DecodeFrameMeta,
   ): DecodeFrameEvent {
-    return {
+    // Guard-assign onto one result object rather than conditional-spreading. Each
+    // `...(cond ? { X } : {})` allocated a throwaway intermediate object (or {}) that was
+    // immediately copied and garbaged — up to 11 per frame, on the per-pass/per-animation-
+    // frame path. Direct assignment under exactOptionalPropertyTypes is byte-identical (only
+    // present fields are set) and mirrors toFrameMeta() in jxl-worker-browser/decode-handler.
+    const ev: DecodeFrameEvent = {
       stage,
       info: msg.info,
       pixels: msg.pixels,
       format: msg.format,
       pixelStride: msg.pixelStride,
-      ...(msg.region !== undefined ? { region: msg.region } : {}),
-      ...(msg.sourceScale !== undefined ? { sourceScale: msg.sourceScale } : {}),
-      ...(msg.progressiveRegion !== undefined ? { progressiveRegion: msg.progressiveRegion } : {}),
-      ...(msg.regionFallback !== undefined ? { regionFallback: msg.regionFallback } : {}),
-      ...(msg.progressiveSequence !== undefined ? { progressiveSequence: msg.progressiveSequence } : {}),
-      ...(msg.passOrdinal !== undefined ? { passOrdinal: msg.passOrdinal } : {}),
-      ...(msg.frameIndex !== undefined ? { frameIndex: msg.frameIndex } : {}),
-      ...(msg.frameDuration !== undefined ? { frameDuration: msg.frameDuration } : {}),
-      ...(msg.frameName !== undefined ? { frameName: msg.frameName } : {}),
-      ...(msg.animTicksPerSecond !== undefined ? { animTicksPerSecond: msg.animTicksPerSecond } : {}),
     };
+    if (msg.region !== undefined) ev.region = msg.region;
+    if (msg.sourceScale !== undefined) ev.sourceScale = msg.sourceScale;
+    if (msg.progressiveRegion !== undefined) ev.progressiveRegion = msg.progressiveRegion;
+    if (msg.regionFallback !== undefined) ev.regionFallback = msg.regionFallback;
+    if (msg.progressiveSequence !== undefined) ev.progressiveSequence = msg.progressiveSequence;
+    if (msg.passOrdinal !== undefined) ev.passOrdinal = msg.passOrdinal;
+    if (msg.frameIndex !== undefined) ev.frameIndex = msg.frameIndex;
+    if (msg.frameDuration !== undefined) ev.frameDuration = msg.frameDuration;
+    if (msg.frameName !== undefined) ev.frameName = msg.frameName;
+    if (msg.animTicksPerSecond !== undefined) ev.animTicksPerSecond = msg.animTicksPerSecond;
+    return ev;
   }
 
   private emitFoldedMetrics(m: {

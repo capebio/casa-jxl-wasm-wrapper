@@ -1,10 +1,12 @@
 // packages/jxl-progressive/src/progressive-scheduler.ts
 import { validateManifest, lookupTier, checkHash, } from "./progressive-manifest.js";
 import { fetchTier, fetchFull, streamTierFrames, fetchTierWithPrefix, RangeNotSupportedError, HttpError, } from "./progressive-stream.js";
+// Hoisted module const — tierRank is hit per-candidate per RAF tick (via fairnessScore);
+// re-allocating this table on every call was throwaway garbage on a ~60fps path.
+const TIER_RANKS = { none: 0, dc: 1, preview: 2, full: 3 };
 /** Lower priority number = more important. Maps to a score where higher = better. */
 export function tierRank(tier) {
-    const ranks = { none: 0, dc: 1, preview: 2, full: 3 };
-    return ranks[tier];
+    return TIER_RANKS[tier];
 }
 /** Higher score = schedule this job sooner. */
 export function fairnessScore(job, now) {

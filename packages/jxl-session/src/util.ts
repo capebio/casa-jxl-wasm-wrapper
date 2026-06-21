@@ -29,10 +29,14 @@ export function deferred<T>(): Deferred<T> {
 // may transfer the result without invalidating the cache master copy.
 export function toTransferableBuffer(chunk: ArrayBuffer | Uint8Array): ArrayBuffer {
   if (chunk instanceof ArrayBuffer) return chunk;
+  // chunk.buffer is ArrayBufferLike (ArrayBuffer | SharedArrayBuffer) under TS 5.5 +
+  // @types/node 22. These helpers normalize a chunk for postMessage transfer; the SAB
+  // case is handled by callers (omitted from the transfer list, shared by reference), so
+  // the cast is safe. Mirrors toTransferablePixels() in jxl-worker-browser/decode-handler.
   if (chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength) {
-    return chunk.buffer;
+    return chunk.buffer as ArrayBuffer;
   }
-  return chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+  return chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer;
 }
 
 // Generate a session id. crypto.randomUUID is available in browsers and Node >= 19.

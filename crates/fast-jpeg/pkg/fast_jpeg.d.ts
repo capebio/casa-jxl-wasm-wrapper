@@ -5,6 +5,11 @@ export class DecodeResult {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Consuming accessor — moves the pixel buffer out without cloning.
+     * Prefer this over `data` when you only need the pixels once.
+     */
+    take_data(): Uint8Array;
     readonly data: Uint8Array;
     readonly height: number;
     readonly width: number;
