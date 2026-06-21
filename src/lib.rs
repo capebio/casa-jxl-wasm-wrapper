@@ -3245,3 +3245,88 @@ pub fn fstats_simd_exact() -> JsValue {
         fs_to_js(&fs_core_simd_exact(&g.0, px), px)
     })
 }
+
+// ─── Multi-format image ingestion (TIFF / EXR) ───────────────────────────────
+// Browser-only non-RAW decoders. SDR formats (png/jpg/gif/webp/avif) decode
+// browser-native via createImageBitmap; these two cover the high-bit path.
+
+/// Decoded non-RAW image handed to JS. One of the take_* buffers is non-empty,
+/// selected by `bit_depth` (8 -> take_rgba8, 16 -> take_rgba16_le, 32 -> take_rgba_f32).
+#[wasm_bindgen]
+pub struct DecodedImage {
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    u8buf: Vec<u8>,
+    u16buf: Vec<u16>,
+    f32buf: Vec<f32>,
+}
+
+#[wasm_bindgen]
+impl DecodedImage {
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    #[wasm_bindgen(getter)]
+    pub fn bit_depth(&self) -> u8 {
+        self.bit_depth
+    }
+
+    /// RGBA8 (bit_depth == 8). Empty otherwise.
+    pub fn take_rgba8(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.u8buf)
+    }
+    /// RGBA16 packed little-endian, 8 bytes/px (bit_depth == 16). Empty otherwise.
+    pub fn take_rgba16_le(&mut self) -> Vec<u8> {
+        let v = std::mem::take(&mut self.u16buf);
+        let mut out = Vec::with_capacity(v.len() * 2);
+        for s in v {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        out
+    }
+    /// RGBA f32 (bit_depth == 32). Returned as Float32Array. Empty otherwise.
+    pub fn take_rgba_f32(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.f32buf)
+    }
+    /// Display-ready RGBA8 regardless of source depth (f32 -> linear->sRGB).
+    pub fn to_display_rgba8(&self) -> Vec<u8> {
+        match self.bit_depth {
+            32 => raw_pipeline::image_formats::f32_linear_to_srgb8(&self.f32buf),
+            16 => self.u16buf.iter().map(|&s| (s >> 8) as u8).collect(),
+            _ => self.u8buf.clone(),
+        }
+    }
+}
+
+fn decoded_to_wasm(d: raw_pipeline::image_formats::DecodedRgba) -> DecodedImage {
+    DecodedImage {
+        width: d.width,
+        height: d.height,
+        bit_depth: d.bit_depth,
+        u8buf: d.u8,
+        u16buf: d.u16,
+        f32buf: d.f32,
+    }
+}
+
+/// Decode a general RGB(A) TIFF (u8 or u16) to RGBA.
+#[wasm_bindgen]
+pub fn decode_tiff(bytes: &[u8]) -> Result<DecodedImage, JsValue> {
+    raw_pipeline::image_formats::decode_tiff_bytes(bytes)
+        .map(decoded_to_wasm)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Decode an OpenEXR image to RGBA f32 (linear HDR preserved).
+#[wasm_bindgen]
+pub fn decode_exr(bytes: &[u8]) -> Result<DecodedImage, JsValue> {
+    raw_pipeline::image_formats::decode_exr_bytes(bytes)
+        .map(decoded_to_wasm)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}

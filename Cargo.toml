@@ -28,7 +28,7 @@ parallel = ["raw-pipeline/parallel", "dep:rayon"]
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Performance", "WorkerGlobalScope"] }
-raw-pipeline = { path = "crates/raw-pipeline", default-features = false }
+raw-pipeline = { path = "crates/raw-pipeline", default-features = false, features = ["image-formats"] }
 wasm-bindgen-rayon = { version = "1", optional = true }
 rayon = { version = "1", optional = true }
 
@@ -36,7 +36,7 @@ rayon = { version = "1", optional = true }
 # gated by the `parallel` feature at the root level, so it can be tested with/without.
 # WASM builds use the [dependencies] entry above (default-features = false, no JXL).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-raw-pipeline = { path = "crates/raw-pipeline", default-features = false, features = ["jxl-codec"] }
+raw-pipeline = { path = "crates/raw-pipeline", default-features = false, features = ["jxl-codec", "image-formats"] }
 
 [profile.release]
 opt-level = 3
