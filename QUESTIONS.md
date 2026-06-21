@@ -1291,3 +1291,61 @@ memory bus). The `decoded_tiles` transient only holds the *overlapping* tiles (a
 a normal viewport); its peak matters only when the viewport ≈ whole image, the anti-pattern
 this API avoids. Decode-into-dest would drop the transient but needs unsafe disjoint-rect
 writes — unjustified for the small-viewport norm. Documented on `decode_jxtc_region`.
+
+---
+
+## EpicCodeReview — jxl-scheduler (2026-06-21, branch EpicCodeReviewJxl-Scheduler)
+
+Deferred items from the review of `packages/jxl-scheduler/src/`. 2 issues fixed + committed
+(`eb51ff6b`: kind-aware abort terminal, forEachSubscriber fast path). Below = uncertain or
+out-of-this-package, left for a human decision.
+
+### Q1 (uncertain, medium) — Subscriber record / `_subscriberCount` cleanup on NORMAL primary terminal
+`scheduler.ts:~1245` (handleWorkerMessage terminal branch). On normal primary completion,
+`cleanupSession(primaryId)` deletes only the primary and calls `dedupe.complete()` (strips the
+dedupe maps). The deduped-subscriber `SessionRecord`s (`isSubscriber:true`, created in
+`acquireSlot`) are NOT removed from `this.sessions`, and `_subscriberCount` is NOT decremented.
+The terminal message IS fanned out to the subscriber handlers (line ~1217), so cleanup likely
+relies on the consumer (jxl-session) calling `completeSession(subId)` per subscriber — the same
+way primaries are torn down externally elsewhere. The ABORT path (`abortAcquisition`) cleans
+subscribers explicitly; the normal-terminal path is asymmetric.
+**Decision needed:** Is per-subscriber `completeSession` a guaranteed contract from jxl-session?
+- If YES: no bug; add a one-line contract comment at the terminal fan-out and a test that the
+  consumer-driven cleanup zeroes `getMetrics().subscribers`.
+- If NO: defensive cleanup is needed, but must avoid double-decrement when the consumer also
+  calls `completeSession` (counters are `Math.max(0, …)`-guarded, so under-count, not negative).
+Cannot resolve inside this package — needs the jxl-session subscriber lifecycle.
+
+### Q2 (low) — `setPriority` has no `paused` branch + duplicates dedupe-escalation logic
+`scheduler.ts:465`. `setPriority` handles `queued` and running (`worker`) states but not
+`paused`; a paused session only updates `record.priority`, relying on `resumePausedSession`
+(line ~1082) to re-derive `backgroundWorkers` membership on resume. Works by invariant today,
+undocumented. The queued-reprioritization block also duplicates the dedupe-escalation code in
+`acquireSlot`. Low risk; extract a shared `requeueWithPriority()` helper + document the paused
+behavior if touched.
+
+### Q3 (low, API change — deferred per no-go list) — `acquireSlot` returns `workerId: -1` sentinel
+For subscribers / still-queued sessions the resolved `{ workerId: number }` uses `-1`,
+indistinguishable from a real id. Prefer `workerId: number | null`. Public return-type change →
+not done unilaterally; needs caller (jxl-session) audit.
+
+### Q4 (opportunity, low) — No input validation at public boundaries
+`acquireSlot` / `setPriority` accept `Priority` / `sessionId` without validation; a bad priority
+string (arriving via an `as` cast) reaches `queue.lane()`, which has no `default` case and throws
+deep inside `enqueue`. `CoreBudget` validates its inputs — inconsistent. Consider a cheap guard +
+explicit error at the boundary.
+
+### Q5 (low, doc) — Reentrant `cancelSession` during `maxParkedSessions` eviction
+`scheduler.ts:~977`. The S15 eviction calls `this.cancelSession(oldestRecord.sessionId)` from
+inside `tryPreempt`, firing arbitrary caller handlers against half-updated scheduler state.
+Default `maxParkedSessions = Infinity`, so this rarely runs. Document the reentrancy contract (or
+defer the eviction to a microtask) if this path is ever enabled in production.
+
+### Not pursued (deliberately)
+- `signalDrain` per-waiter `queueDepth` decrement — CLAUDE.md records this as the intentional
+  coalesced-drain gauge ("Scheduler A3 FALSIFIED, not a bug").
+- Pool/Queue "dead" public APIs (`healthSnapshot`, `idleWorkers`, `peek`, `backgroundIds`, …) —
+  test-support / observability surface, `@internal`-tagged; removing them is an API change.
+- `as`-casts to reach `sessionId`/`metric`/`stage` on the protocol union — pervasive and
+  deliberate for discriminated-union narrowing on the hot path.
+- `dist-test/` was NOT review-scoped (generated TS output of `src/`).
