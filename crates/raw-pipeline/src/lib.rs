@@ -14,6 +14,7 @@ pub mod decompress;
 pub mod demosaic;
 pub mod dng;
 pub mod exif;
+pub mod image_formats;
 pub mod ljpeg;
 pub mod pipeline;
 pub mod tiff;

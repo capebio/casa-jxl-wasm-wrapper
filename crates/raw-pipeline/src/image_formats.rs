@@ -1,0 +1,145 @@
+//! Pure-Rust decoders for already-developed RGB image formats (TIFF, EXR),
+//! built on the `image` crate already in raw-pipeline's deps. Distinct from
+//! `tiff.rs`, which parses RAW (Bayer) TIFF containers. Output is always RGBA.
+
+use image::DynamicImage;
+
+#[derive(thiserror::Error, Debug)]
+pub enum ImageFormatError {
+    #[error("image decode failed: {0}")]
+    Decode(String),
+}
+
+/// RGBA pixel buffer at a single bit depth. Exactly one of u8/u16/f32 is set.
+#[derive(Default)]
+pub struct DecodedRgba {
+    pub width: u32,
+    pub height: u32,
+    pub bit_depth: u8,
+    pub u8: Vec<u8>,
+    pub u16: Vec<u16>,
+    pub f32: Vec<f32>,
+}
+
+/// Decode a general RGB(A) TIFF. 16-bit files keep 16 bits; everything else
+/// collapses to RGBA8.
+pub fn decode_tiff_bytes(bytes: &[u8]) -> Result<DecodedRgba, ImageFormatError> {
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Tiff)
+        .map_err(|e| ImageFormatError::Decode(e.to_string()))?;
+    Ok(dynamic_to_rgba(img))
+}
+
+/// Decode an OpenEXR image to interleaved RGBA f32 (linear, scene-referred).
+/// HDR values above 1.0 are preserved.
+pub fn decode_exr_bytes(bytes: &[u8]) -> Result<DecodedRgba, ImageFormatError> {
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::OpenExr)
+        .map_err(|e| ImageFormatError::Decode(e.to_string()))?;
+    let (width, height) = (img.width(), img.height());
+    let rgba = img.to_rgba32f();
+    Ok(DecodedRgba { width, height, bit_depth: 32, f32: rgba.into_raw(), ..Default::default() })
+}
+
+/// Pick 16-bit output when the source is >8-bit, else 8-bit. Always RGBA.
+fn dynamic_to_rgba(img: DynamicImage) -> DecodedRgba {
+    let (width, height) = (img.width(), img.height());
+    let sixteen = matches!(
+        img.color(),
+        image::ColorType::L16
+            | image::ColorType::La16
+            | image::ColorType::Rgb16
+            | image::ColorType::Rgba16
+    );
+    if sixteen {
+        let rgba = img.to_rgba16();
+        DecodedRgba { width, height, bit_depth: 16, u16: rgba.into_raw(), ..Default::default() }
+    } else {
+        let rgba = img.to_rgba8();
+        DecodedRgba { width, height, bit_depth: 8, u8: rgba.into_raw(), ..Default::default() }
+    }
+}
+
+/// Convert interleaved RGBA f32 (linear) to RGBA8 for display/preview.
+/// Colour channels get the sRGB OETF; alpha is linear-scaled. HDR clamps to 1.0.
+pub fn f32_linear_to_srgb8(rgba_f32: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba_f32.len());
+    for px in rgba_f32.chunks_exact(4) {
+        for &c in &px[..3] {
+            let c = c.clamp(0.0, 1.0);
+            let s = if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+            out.push((s * 255.0 + 0.5) as u8);
+        }
+        out.push((px[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 2x1 RGB8 TIFF, red then green, encoded by the image crate itself.
+    fn make_rgb8_tiff() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let img = image::RgbImage::from_raw(2, 1, vec![255, 0, 0, 0, 255, 0]).unwrap();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, image::ImageFormat::Tiff)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    fn make_rgb16_tiff() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let img: image::ImageBuffer<image::Rgb<u16>, Vec<u16>> =
+            image::ImageBuffer::from_raw(1, 1, vec![65535, 1000, 0]).unwrap();
+        image::DynamicImage::ImageRgb16(img)
+            .write_to(&mut buf, image::ImageFormat::Tiff).unwrap();
+        buf.into_inner()
+    }
+
+    fn make_rgba32f_exr() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        // one HDR pixel above 1.0 to prove float range survives
+        let img: image::ImageBuffer<image::Rgba<f32>, Vec<f32>> =
+            image::ImageBuffer::from_raw(1, 1, vec![4.0, 0.5, 0.0, 1.0]).unwrap();
+        image::DynamicImage::ImageRgba32F(img)
+            .write_to(&mut buf, image::ImageFormat::OpenExr).unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn decode_tiff_rgb8_to_rgba8() {
+        let d = decode_tiff_bytes(&make_rgb8_tiff()).unwrap();
+        assert_eq!((d.width, d.height, d.bit_depth), (2, 1, 8));
+        assert_eq!(&d.u8[..8], &[255, 0, 0, 255, 0, 255, 0, 255]); // R, A=255, G, A=255
+        assert!(d.u16.is_empty() && d.f32.is_empty());
+    }
+
+    #[test]
+    fn decode_tiff_rgb16_keeps_16bit() {
+        let d = decode_tiff_bytes(&make_rgb16_tiff()).unwrap();
+        assert_eq!(d.bit_depth, 16);
+        assert_eq!(&d.u16[..4], &[65535, 1000, 0, 65535]); // R G B, A=65535
+    }
+
+    #[test]
+    fn decode_exr_keeps_f32_hdr() {
+        let d = decode_exr_bytes(&make_rgba32f_exr()).unwrap();
+        assert_eq!((d.width, d.height, d.bit_depth), (1, 1, 32));
+        assert!((d.f32[0] - 4.0).abs() < 1e-4, "HDR value >1.0 must survive: {}", d.f32[0]);
+        assert!((d.f32[3] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn f32_linear_to_srgb8_maps_and_clamps() {
+        // linear 0 -> 0; linear 1 -> 255; linear >1 clamps to 255; alpha passes through scaled.
+        let lin = [0.0_f32, 1.0, 4.0, 1.0, 0.5, 0.5, 0.5, 0.25];
+        let out = f32_linear_to_srgb8(&lin);
+        assert_eq!(out[0], 0);
+        assert_eq!(out[1], 255);
+        assert_eq!(out[2], 255); // HDR clamp
+        assert_eq!(out[3], 255); // alpha 1.0 -> 255
+        // sRGB(0.5 linear) ~ 0.7353 -> ~188
+        assert!((out[4] as i32 - 188).abs() <= 1, "got {}", out[4]);
+        assert_eq!(out[7], 64); // alpha 0.25 -> 64 (linear, no sRGB on alpha)
+    }
+}
