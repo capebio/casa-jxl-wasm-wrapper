@@ -198,7 +198,7 @@ function walk(dir) {
 SCAN_DIRS.forEach(walk);
 
 // ── emit GRAPH into the HTML ─────────────────────────────────────────────────
-const KEEP = ["id", "p", "k", "l", "col", "path", "line", "lines", "special", "stale", "tech", "n", "gate", "mutates", "desc", "gc"];
+const KEEP = ["id", "p", "k", "l", "col", "path", "line", "lines", "special", "stale", "tech", "n", "gate", "mutates", "desc", "gc", "hot"];
 const clean = nodes.map(n => { const o = {}; for (const k of KEEP) if (n[k] !== undefined) o[k] = n[k]; return o; });
 const gitMax = Math.max(0, ...clean.filter(n => n.gc !== undefined).map(n => n.gc));
 const generated = new Date().toISOString().slice(0, 10);

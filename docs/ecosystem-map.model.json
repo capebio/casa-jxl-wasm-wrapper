@@ -199,6 +199,7 @@
         "wasm"
       ],
       "gc": 18,
+      "hot": true,
       "lines": 1727
     },
     {
@@ -213,6 +214,7 @@
         "wasm"
       ],
       "gc": 16,
+      "hot": true,
       "lines": 944
     },
     {
@@ -241,6 +243,7 @@
         "wasm"
       ],
       "gc": 16,
+      "hot": true,
       "lines": 1399
     },
     {
@@ -255,6 +258,7 @@
         "wasm"
       ],
       "gc": 11,
+      "hot": true,
       "lines": 402
     },
     {
@@ -269,6 +273,7 @@
         "wasm"
       ],
       "gc": 23,
+      "hot": true,
       "lines": 1952
     },
     {
@@ -283,6 +288,7 @@
         "wasm"
       ],
       "gc": 43,
+      "hot": true,
       "lines": 3500
     },
     {
@@ -743,6 +749,7 @@
         "rust"
       ],
       "gc": 19,
+      "hot": true,
       "lines": 882
     },
     {
@@ -756,6 +763,7 @@
         "rust"
       ],
       "gc": 8,
+      "hot": true,
       "lines": 927
     },
     {
@@ -770,6 +778,50 @@
       "line": 70
     },
     {
+      "id": "cbv_entry",
+      "k": "fn",
+      "p": "cb_variants",
+      "l": "encode_variants",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The simplest public entry: (rgba, width, height, source, hq_override) → VariantSet. Pure forwarder — fills in ProgressiveOpts::default() and delegates to encode_variants_progressive_opts. The call most native/test sites use when they don't need progressive or cancellation.",
+      "line": 70
+    },
+    {
+      "id": "cbv_prog",
+      "k": "fn",
+      "p": "cb_variants",
+      "l": "encode_variants_with_progressive",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Adds two loose integers — progressive_dc and group_order — and packs them into a ProgressiveOpts (center None) before delegating to encode_variants_progressive_opts. The streaming/zoom viewer path that wants coarse-DC passes and importance-ordered groups on the full variant.",
+      "line": 80
+    },
+    {
+      "id": "cbv_progopts",
+      "k": "fn",
+      "p": "cb_variants",
+      "l": "encode_variants_progressive_opts",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Accepts a full ProgressiveOpts struct (incl. an optional focal center) and delegates to encode_variants_cancellable with a never-set AtomicBool. The non-cancellable funnel layer — everything above it is sugar, everything it calls is the real work.",
+      "line": 96
+    },
+    {
+      "id": "cbv_cancel",
+      "k": "fn",
+      "p": "cb_variants",
+      "l": "encode_variants_cancellable ★",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The workhorse all four overloads funnel into. Validates the buffer with a checked width·height·4 multiply (guards 32-bit/wasm overflow), detects alpha once via has_meaningful_alpha (RAW → 3-channel fast path), picks full_quality from SourceType (Raw 90 / hq 95 / else 85), then cascades the resize full → preview (1080px, Lanczos3) → thumb (300px, Triangle). Encodes the three levels concurrently via rayon::join under the `parallel` feature (fresh Encoder per branch) or sequentially through one reused Encoder otherwise. Checks the &AtomicBool before each resize and each encode, returning EncodeError::Cancelled. Populates and returns the VariantSet.",
+      "line": 107
+    },
+    {
       "id": "cb_from16",
       "k": "fn",
       "p": "casabio",
@@ -781,6 +833,28 @@
       "line": 353
     },
     {
+      "id": "cbf_entry",
+      "k": "fn",
+      "p": "cb_from16",
+      "l": "encode_variants_from_rgb16",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The RGB16→JXL bridge. Takes interleaved linear RGB16 + &PipelineParams (the develop look) and, in one call, runs the tone pipeline then encodes. If params.texture or params.clarity is non-zero it clones the RGB16 and runs pipeline::apply_unsharp_masks in place (must precede tone on linear data); otherwise it skips the clone. Then pipeline::process_rgba applies WB / camera matrix / saturation / tone curve / sRGB EOTF → RGBA8, handed to encode_variants_with_progressive. Thin wrapper over the _with_progressive form (passes 0/0).",
+      "line": 353
+    },
+    {
+      "id": "cbf_prog",
+      "k": "fn",
+      "p": "cb_from16",
+      "l": "encode_variants_from_rgb16_with_progressive",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The actual implementation behind the RGB16 bridge: identical develop-then-encode flow as encode_variants_from_rgb16, but forwards explicit progressive_dc / group_order to encode_variants_with_progressive so the full variant can be progressive. The look is baked into the JXL here — ingest-final, not re-editable from the bytes.",
+      "line": 365
+    },
+    {
       "id": "cb_pyramid",
       "k": "fn",
       "p": "casabio",
@@ -790,6 +864,28 @@
         "rust"
       ],
       "line": 576
+    },
+    {
+      "id": "cbp_entry",
+      "k": "fn",
+      "p": "cb_pyramid",
+      "l": "encode_rgba8_pyramid",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Builds the native sidecar pyramid (PR-6b: per-level distances, no 1.5 floor, box cascade). Takes RGBA8 + full_distance + parallel sidecar_sizes / sidecar_distances arrays + effort (clamped 1..=10). Reuses one Encoder across all levels. Walks sidecars largest→smallest: box_downscale_rgba8 the *current* (previous, larger) buffer into a thumb, encode_distance_into at that level's distance, push a PyramidLevel, make the thumb the new current — a true cascade. Reverses to ascending, then encodes the full image at full_distance as the last level. Skips any requested size ≥ original long edge (no upscaling), so the returned Vec may be shorter than sidecar_sizes.",
+      "line": 576
+    },
+    {
+      "id": "cbp_from16",
+      "k": "fn",
+      "p": "cb_pyramid",
+      "l": "encode_rgba8_pyramid_from_rgb16",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The RGB16 entry to the pyramid path: runs pipeline::process_rgba on linear RGB16 + params to produce RGBA8, then defers to encode_rgba8_pyramid. The pyramid analogue of encode_variants_from_rgb16 — used by native pyramid-ingest that holds pre-tone develop buffers.",
+      "line": 702
     },
     {
       "id": "cb_variantset",
@@ -812,6 +908,19 @@
         "rust"
       ],
       "line": 17
+    },
+    {
+      "id": "rd_root",
+      "k": "file",
+      "p": "rawdec",
+      "l": "lib.rs (crate root)",
+      "path": "crates/raw-pipeline/src/lib.rs",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The raw-pipeline crate root — the wiring hub, not pixel logic. It declares the whole module tree (tiff / dng / cr2 / exif / ljpeg / decompress / demosaic / pipeline / tone_simd / perceptual / frame_stats / casabio_encode / jxl_casaencoder / jxl_casadecoder) and defines the public surface every other crate, plus the wasm and Tauri builds, import. It also publishes the convenience alias `pub use jxl_casadecoder as jxl_decode`. Everything a consumer can reach from this crate is re-exported here; the file itself contains no decode or encode work, only the module graph and feature gates that decide which parts compile (e.g. the jxl-codec / parallel features).",
+      "gc": 12,
+      "lines": 129
     },
     {
       "id": "e_encoder",
@@ -903,6 +1012,7 @@
         "rust"
       ],
       "gc": 13,
+      "hot": true,
       "lines": 1989
     },
     {
@@ -1058,7 +1168,7 @@
       "tech": [
         "rust"
       ],
-      "gc": 4,
+      "gc": 5,
       "lines": 379
     },
     {
@@ -1079,12 +1189,93 @@
       "k": "component",
       "p": "ffi",
       "l": "external/libjxl (BSD)",
-      "desc": "`external/libjxl` is the vendored copy of libjxl — the reference JPEG XL codec library, the actual C/C++ code that performs the heavy lifting of compressing pixels into a `.jxl` codestream and decompressing them back into pixels. Everything upstream of it in the native pipeline (the RAW decoder, the tone pipeline, the `Encoder` and `Decoder` Rust objects) ultimately exists to feed bytes into, or pull pixels out of, this one component. It is the engine room: the genuinely complex, mathematically dense image-compression implementation that the project chooses to depend on rather than reinvent.\n\nThe specific version is libjxl v0.11.2, licensed under BSD-3 (a permissive open-source licence that, unlike the GPL, imposes no copyleft obligation on the surrounding application), plus a local refactor of `encode.cc` by the project author. Vendoring it — keeping a full source copy inside the repository at `external/libjxl` rather than depending on a system-installed package or a crate from the registry — is itself the design decision. It guarantees a known, pinned, BSD-clean codec that the build can compile from scratch with the project's own optimisation flags, removing both the GPL licensing risk of the old binding crates and the version-skew risk of relying on whatever libjxl a given machine happens to have installed.\n\nThis component does not run as a separate process or shared library: the build script compiles it into *static* archives and links them directly into the Rust native binary. So at runtime there is no `libjxl.dll` or `libjxl.so` — the codec's machine code lives inside the Tauri app or CLI executable itself. The pieces actually linked are the core `jxl` library, `jxl_cms` (colour management), `jxl_threads` (the thread-pool parallel runner), plus its bundled dependencies `hwy` (Google Highway SIMD primitives that vectorise the inner pixel loops) and the Brotli trio (`brotlidec`/`brotlienc`/`brotlicommon`, the entropy coder JXL uses internally). The project's own author-supplied CMakeLists carries the `/O2 /Ob2` optimisation fix that resolved the once-misdiagnosed \"0.11 30× regression\" — meaning the speed of this whole codec layer depends on libjxl being compiled with those flags, not on any change to its algorithms.\n\nIn the graph, `ffi_libjxl` is reached two ways. The build script builds and links it (`ffi_build → ffi_libjxl`, \"cmake static\"), and the generated bindings in `ffi_lib` resolve their `extern \"C\"` symbols against it at link time (`ffi_lib → ffi_libjxl`, \"link\"). Every Rust call such as `JxlEncoderProcessOutput` or `JxlDecoderSetImageOutBuffer` is, after linking, a direct call into compiled code from this directory. The data crossing the boundary is exactly what JXL is about: raw pixel buffers in one direction, compressed JXL codestream bytes in the other.\n\nThe sharp edges a maintainer must respect: first, this is C++ underneath despite being driven through a pure-C interface, which is why the build links the platform C++ standard library (`stdc++` on Linux, `c++` on Apple/FreeBSD) — forgetting that produces undefined-symbol link failures. Second, it is native-only; there is a completely separate browser JXL codec built from `bridge.cpp` into `web/pkg`, and the two must not be confused — the browser never touches `external/libjxl`. Third, because it is vendored and pinned at 0.11.2 with a local `encode.cc` patch, upgrading libjxl is not a one-line version bump: it risks reintroducing the optimisation-flag regression and re-applying the author's encode refactor, and the bindgen-generated surface in `bindings.rs` would need to be regenerated against the new headers.",
+      "desc": "`external/libjxl` is the vendored copy of libjxl — the reference JPEG XL codec library, the actual C/C++ code that performs the heavy lifting of compressing pixels into a `.jxl` codestream and decompressing them back into pixels. Everything upstream of it in the native pipeline (the RAW decoder, the tone pipeline, the `Encoder` and `Decoder` Rust objects) ultimately exists to feed bytes into, or pull pixels out of, this one component. It is the engine room: the genuinely complex, mathematically dense image-compression implementation that the project chooses to depend on rather than reinvent.\n\nThe build now defaults to libjxl 0.12.0-dev — the in-repo `external/libjxl-012` tree, selected through the `LIBJXL_SOURCE_DIR` variable in `.cargo/config` — while the original BSD-3 pin, libjxl v0.11.2, is kept alongside as the prior base. BSD-3 is a permissive open-source licence that, unlike the GPL, imposes no copyleft obligation on the surrounding application; both trees carry a local refactor of `encode.cc` by the project author. Vendoring it — keeping a full source copy inside the repository at `external/libjxl` rather than depending on a system-installed package or a crate from the registry — is itself the design decision. It guarantees a known, pinned, BSD-clean codec that the build can compile from scratch with the project's own optimisation flags, removing both the GPL licensing risk of the old binding crates and the version-skew risk of relying on whatever libjxl a given machine happens to have installed.\n\nThis component does not run as a separate process or shared library: the build script compiles it into *static* archives and links them directly into the Rust native binary. So at runtime there is no `libjxl.dll` or `libjxl.so` — the codec's machine code lives inside the Tauri app or CLI executable itself. The pieces actually linked are the core `jxl` library, `jxl_cms` (colour management), `jxl_threads` (the thread-pool parallel runner), plus its bundled dependencies `hwy` (Google Highway SIMD primitives that vectorise the inner pixel loops) and the Brotli trio (`brotlidec`/`brotlienc`/`brotlicommon`, the entropy coder JXL uses internally). The project's own author-supplied CMakeLists carries the `/O2 /Ob2` optimisation fix that resolved the once-misdiagnosed \"0.11 30× regression\" — meaning the speed of this whole codec layer depends on libjxl being compiled with those flags, not on any change to its algorithms.\n\nIn the graph, `ffi_libjxl` is reached two ways. The build script builds and links it (`ffi_build → ffi_libjxl`, \"cmake static\"), and the generated bindings in `ffi_lib` resolve their `extern \"C\"` symbols against it at link time (`ffi_lib → ffi_libjxl`, \"link\"). Every Rust call such as `JxlEncoderProcessOutput` or `JxlDecoderSetImageOutBuffer` is, after linking, a direct call into compiled code from this directory. The data crossing the boundary is exactly what JXL is about: raw pixel buffers in one direction, compressed JXL codestream bytes in the other.\n\nThe sharp edges a maintainer must respect: first, this is C++ underneath despite being driven through a pure-C interface, which is why the build links the platform C++ standard library (`stdc++` on Linux, `c++` on Apple/FreeBSD) — forgetting that produces undefined-symbol link failures. Second, it is native-only; there is a completely separate browser JXL codec built from `bridge.cpp` into `web/pkg`, and the two must not be confused — the browser never touches `external/libjxl`. Third, because it is vendored and pinned (0.11.2 historically, now 0.12.0-dev by default via the `external/libjxl-012` tree) with a local `encode.cc` patch, upgrading libjxl is not a one-line version bump: it risks reintroducing the optimisation-flag regression and re-applying the author's encode refactor, and the bindgen-generated surface in `bindings.rs` would need to be regenerated against the new headers.",
       "tech": [
         "rust"
       ],
-      "path": "external/libjxl",
-      "lines": 578071
+      "path": "external/libjxl-012",
+      "hot": true,
+      "lines": 693518
+    },
+    {
+      "id": "lj_core",
+      "k": "component",
+      "p": "ffi_libjxl",
+      "l": "jxl (core codec)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The `jxl` static archive built from `lib/jxl` — the actual JPEG XL codec, and by far the largest of the linked libraries. It holds both coding modes (VarDCT, the DCT/JPEG-recompression path used for photographs, and Modular, the lossless/integer path used for low-effort and lossless), the ANS range/entropy coder, the colour and frame headers, and the progressive/group machinery the pyramid viewer depends on. Every `JxlEncoder*`/`JxlDecoder*` symbol that `ffi_lib` resolves at link time ultimately calls into compiled code from here. It links the platform C++ standard library (`stdc++` on Linux, `c++` on Apple/FreeBSD) because it is C++ underneath the pure-C public interface."
+    },
+    {
+      "id": "lj_cms",
+      "k": "component",
+      "p": "ffi_libjxl",
+      "l": "jxl_cms (colour management)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The `jxl_cms` static archive (built from `lib/jxl_cms.cmake`, backed by the vendored `third_party/skcms`). Colour Management System: it parses ICC profiles and performs the colour-space transforms libjxl needs to map between the encoded colour encoding and the caller's pixel space. Split into its own archive so the core codec can be linked without dragging in CMS when an embedder supplies its own. In this project the Rust encoder drives colour via `SetColorEncoding` and lets this CMS do the conversions."
+    },
+    {
+      "id": "lj_threads",
+      "k": "component",
+      "p": "ffi_libjxl",
+      "l": "jxl_threads (parallel runner)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The `jxl_threads` static archive (from `lib/threads`). It supplies the two parallel-runner implementations whose headers `wrapper.h` includes: `JxlThreadParallelRunner` (a fixed-size thread pool) and `JxlResizableParallelRunner` (a pool that resizes to the image). libjxl itself is runner-agnostic — it calls back into whatever runner you register — so this archive is the concrete pool the encoder/decoder attach via `SetParallelRunner`. It is what makes a single encode fan out across cores (Amdahl-capped at ~1.87x per encode in this codebase's measurements)."
+    },
+    {
+      "id": "lj_hwy",
+      "k": "component",
+      "p": "ffi_libjxl",
+      "l": "hwy (Highway SIMD)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "Google Highway (`third_party/highway`), the portable SIMD library that vectorises libjxl's inner pixel loops. Highway compiles each hot routine once per instruction set and dispatches to the best one the CPU actually has at runtime (SSE4 / AVX2 / AVX3 / NEON). `build.rs` controls this surface with `HWY_DISABLED_TARGETS` and an optional AVX-512 fat-dispatch toggle (HWY_AVX3 family) — compiled in but only taken when the silicon exists, so a binary stays portable while a Zen4/SPR machine still gets the wide path."
+    },
+    {
+      "id": "lj_brotli",
+      "k": "component",
+      "p": "ffi_libjxl",
+      "l": "brotli (dec / enc / common)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The three Brotli static archives (`brotlidec`, `brotlienc`, `brotlicommon`) from `third_party/brotli`. Brotli is the dictionary+entropy compressor JXL uses internally for the non-pixel parts of the stream — compressed ICC profiles, metadata boxes, and the JPEG-reconstruction data that makes lossless JPEG→JXL transcoding bit-exact. They are separate archives so an embedder linking only the decoder doesn't pull in the encoder half; this project links all three because it both encodes and decodes."
+    },
+    {
+      "id": "lj_encode",
+      "k": "component",
+      "p": "ffi_libjxl",
+      "l": "encode.cc (local refactor)",
+      "tech": [
+        "rust"
+      ],
+      "desc": "`lib/jxl/encode.cc` — the public encoder C API implementation, carrying the project author's local refactor on top of stock libjxl. This is the single file that makes the vendored copy a *patched* fork rather than a clean upstream checkout, and it is the reason upgrading libjxl is not a one-line version bump: the refactor must be re-applied (and `bindings.rs` regenerated) against any new release. It is also the surface the BSD `jxl_casaencoder` wrapper exercises — `InitBasicInfo`/`SetBasicInfo`/`AddImageFrame`/`ProcessOutput` all land here."
+    },
+    {
+      "id": "lj_o2",
+      "k": "component",
+      "p": "ffi_libjxl",
+      "l": "/O2 /Ob2 build fix",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The optimisation-flag fix that lives in `build.rs` (and the author CMakeLists), not in any algorithm. cmake-rs silently drops MSVC's default `/O2` under the ClangCL multi-config generator, which built libjxl unoptimised — the cause of the notorious \"0.11 ~30x regression\" (an unoptimised compile, mis-read as an algorithm change). `build.rs` force-injects `/O2 /Ob2` and always builds the vendored library optimised (RelWithDebInfo) regardless of Cargo's profile, since it is third-party code the project never steps into. The whole codec layer's speed depends on this flag surviving, so it must not be removed."
+    },
+    {
+      "id": "lj_pin",
+      "k": "component",
+      "p": "ffi_libjxl",
+      "l": "BSD-3 vendored pin",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The vendoring decision itself: a full BSD-3 source copy kept in-repo and pinned, rather than a system package or registry crate. BSD-3 is permissive (no copyleft), so this replaced the old GPL bindings (jpegxl-rs/sys) and made the whole codec statically linkable into the Tauri app / CLI with no licensing risk. The pinned base is v0.11.2, but the build now defaults to the `external/libjxl-012` tree (libjxl 0.12.0-dev) via `LIBJXL_SOURCE_DIR` in `.cargo/config` — vendoring is what makes that swap a config edit instead of a dependency renegotiation. It also kills version-skew: the codec is exactly the source in the tree, not whatever libjxl a given machine happens to have."
     },
     {
       "id": "pc_mod",
@@ -1098,7 +1289,35 @@
         "wasm"
       ],
       "gc": 27,
+      "hot": true,
       "lines": 558
+    },
+    {
+      "id": "pc_telemetry",
+      "k": "file",
+      "p": "perc",
+      "l": "telemetry.rs",
+      "path": "crates/raw-pipeline/src/perceptual/telemetry.rs",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "desc": "A fused telemetry kernel: in a single RGBA8 traversal it produces both TelemetryMetrics (L26 — luma mean/variance plus alpha range) and an RgbHistogram (L34), instead of two separate passes. Fusing the two reductions cuts memory bandwidth roughly 70% versus computing stats and the histogram independently — the measured Task-1 traversal-fusion win (~1.36× at 24MP). analyze_fused_scalar (L57) is the parity oracle; analyze_fused (L268) runtime-dispatches to the SIMD path, which is bit-identical to scalar on every input. Feeds exposure/contrast telemetry and the histogram-driven UI without a second walk over the pixels.",
+      "gc": 6,
+      "lines": 337
+    },
+    {
+      "id": "pc_framestats",
+      "k": "file",
+      "p": "perc",
+      "l": "frame_stats.rs",
+      "path": "crates/raw-pipeline/src/frame_stats.rs",
+      "tech": [
+        "rust"
+      ],
+      "desc": "The native frame-stats telemetry kernel for the batch / time-lapse path (server-side, AVX2-capable). One single-pass RGBA8 reduction fills a FrameStats (L28): alpha min/max and alpha-zero count, an rgb-nonzero count, luma mean/variance accumulators, and an 8-lane word-hash that acts as a content-change id for near-duplicate detection. analyze_scalar (L76) is the oracle; analyze (L239) dispatches to a 256-bit AVX2 implementation on the server that is bit-identical to scalar. It mirrors the wasm `frame_stats` kernel in the top-level src/lib.rs. Used for time-lapse triage: frameHash (change / near-duplicate detection), mean_luma (exposure and lighting trajectory), and luma_variance (detail/contrast over time).",
+      "gc": 7,
+      "lines": 329
     },
     {
       "id": "pc_xyb",
@@ -1112,6 +1331,7 @@
         "wasm"
       ],
       "gc": 4,
+      "hot": true,
       "lines": 69
     },
     {
@@ -1126,6 +1346,7 @@
         "wasm"
       ],
       "gc": 6,
+      "hot": true,
       "lines": 108
     },
     {
@@ -1140,6 +1361,7 @@
         "wasm"
       ],
       "gc": 3,
+      "hot": true,
       "lines": 167
     },
     {
@@ -1154,6 +1376,7 @@
         "wasm"
       ],
       "gc": 2,
+      "hot": true,
       "lines": 47
     },
     {
@@ -1168,6 +1391,7 @@
         "wasm"
       ],
       "gc": 4,
+      "hot": true,
       "lines": 106
     },
     {
@@ -1180,7 +1404,8 @@
       "tech": [
         "rust",
         "wasm"
-      ]
+      ],
+      "hot": true
     },
     {
       "id": "m_comparer",
@@ -1231,6 +1456,7 @@
         "wasm"
       ],
       "gc": 9,
+      "hot": true,
       "lines": 548
     },
     {
@@ -1269,6 +1495,7 @@
         "wasm"
       ],
       "gc": 6,
+      "hot": true,
       "lines": 73
     },
     {
@@ -1283,6 +1510,7 @@
         "wasm"
       ],
       "gc": 10,
+      "hot": true,
       "lines": 568
     },
     {
@@ -1297,6 +1525,7 @@
         "wasm"
       ],
       "gc": 6,
+      "hot": true,
       "lines": 337
     },
     {
@@ -1311,6 +1540,7 @@
         "wasm"
       ],
       "gc": 8,
+      "hot": true,
       "lines": 297
     },
     {
@@ -1325,6 +1555,7 @@
         "wasm"
       ],
       "gc": 2,
+      "hot": true,
       "lines": 72
     },
     {
@@ -1348,8 +1579,8 @@
         "wasm"
       ],
       "desc": "This file (src/lib.rs at the repository root, NOT the one under crates/) is the front door the web browser uses to reach the RAW image pipeline. Everything else in the Rust codebase is a library; this file is the thin \"glue\" layer that takes that library and exposes a handful of functions to JavaScript by tagging them with #[wasm_bindgen]. wasm-bindgen is the tool that compiles Rust to WebAssembly (\"wasm\" — a fast, portable binary that runs inside a web page like a tiny CPU-native module) and auto-generates the JavaScript bindings so the browser can call Rust functions and pass byte arrays back and forth. At the top of the file you can see it pulls in the same four core modules the native build uses — decompress, demosaic, pipeline, tiff (lines 11-14) — so the browser runs byte-for-byte the SAME decoding science as the desktop app, just compiled for a different target.\n\nWhy it exists: a camera RAW file is not a viewable image. It is a sensor dump — millions of single-colour brightness readings behind a coloured grid — wrapped in a manufacturer-specific container. To show it on screen the browser would otherwise need to reimplement all of that parsing and colour maths in slow JavaScript. Instead, this entry point lets the heavy lifting happen in compiled Rust at near-native speed inside the page, while JavaScript stays in charge of the user interface. The module-level doc comment spells out the contract: parse an ORF blob, decompress the 12-bit predictive stream, demosaic (reconstruct full colour from the single-colour-per-pixel mosaic), apply white balance and the sRGB tone curve, fix orientation, and hand back an interleaved pixel buffer plus its dimensions. Notably it deliberately leaves JXL/WebP *encoding* to a separate component to keep this wasm module small.\n\nHow it works: the file is organised around a few exported #[wasm_bindgen] surfaces. The core is the process_orf family (around line 905) which returns a ProcessResult struct — a bundle holding the finished RGB8 pixels plus a large set of read-only fields: timing for each stage (decompress_ms, demosaic_ms, tonemap_ms, orient_ms), the white balance actually used, the colour matrix, and a full set of EXIF facts (lens, ISO, GPS, exposure) for the gallery's info panel. It also carries pre-downscaled \"lightbox\" (1800 px) and \"thumb\" (360 px) buffers so the gallery never has to re-decode. To move large pixel buffers to JavaScript cheaply it uses take_* methods (e.g. take_rgb, take_rgba at lines 264-298) that std::mem::take the Vec out of the struct — transferring ownership rather than copying twice. There is also an OUT_* output-flags bitmask (lines 548-556) so a caller doing batch JXL encoding can ask for only the full-resolution buffer and skip generating previews, and an OUT_NO_ORIENT flag that lets the encoder store rotation as metadata instead of paying a 60-200 MB physical rotate.\n\nConnections: on the JavaScript side this module is invoked from the browser progressive-paint loop (web_paint) which calls process_orf to turn camera bytes into pixels. On the Rust side, every exported function ultimately delegates into the shared raw-pipeline crate — for example process_orf calls decode_orf_raw (line 601), which runs tiff::parse, decompress::decompress, demosaic::demosaic_rggb_mhc / demosaic_rggb_planar, and pipeline::process_into_auto. The data that crosses the wasm boundary is always plain byte arrays (Uint8Array in JS): file bytes in, RGBA8/RGB8 pixels out, plus scalar metadata. Critically, the browser does NOT use this file for JXL compression — that is a separate wasm codec (bridge) — so this entry point is purely the RAW-to-pixels half of the picture.\n\nGotchas a maintainer must know: WebAssembly has no wall clock, so timing here calls into the browser's performance.now() via now_ms() (line 311), which caches the Performance object and even falls back through window → WorkerGlobalScope → Date.now so it works inside web workers, not just the main page. The take_* methods transfer ownership: calling take_rgb twice returns an empty buffer the second time — a deliberate one-shot to avoid double-copies. Multithreading (rayon) only activates if the crate is built with the parallel-wasm feature AND JavaScript first calls init_thread_pool (line 19-20), which in turn requires the page to be served with COOP/COEP security headers so SharedArrayBuffer is allowed. Several large blocks near the top (demosaic_bench_*, fstats_*) are bench-only A/B harnesses driven by tooling scripts, not part of the production path — they exist to time SIMD vs scalar kernels and should not be mistaken for the real pipeline.",
-      "gc": 58,
-      "lines": 3248
+      "gc": 59,
+      "lines": 3333
     },
     {
       "id": "we_process",
@@ -1407,6 +1638,7 @@
       ],
       "desc": "bridge is the browser's JXL codec — and it is a completely different thing from the native Rust JXL encoder/decoder used on the desktop. It is C++ that wraps libjxl (the reference JPEG XL library) and is compiled to WebAssembly, shipped as the prebuilt web package and driven from JavaScript. The architecture model and CLAUDE.md make the split explicit: in the browser, the RAW-to-pixels half is the Rust pipeline compiled to wasm (wasm_entry), but the JXL compression/decompression half is THIS separate C++/libjxl wasm module. The native Rust codecs (jxl_casaencoder / jxl_casadecoder, which go through jxl-ffi) run only in the Tauri desktop app and CLI — the browser never touches them. So bridge is where JXL codestream bytes get turned into pixels (decode) and where pixels get turned into JXL bytes (encode) inside a web page.\n\nWhy it exists: JPEG XL is a sophisticated modern codec; reimplementing it would be enormous and error-prone, so both the desktop and the browser ultimately lean on the same upstream libjxl. But the desktop reaches libjxl through a Rust FFI (foreign-function interface) layer, which is the natural fit for a native binary, whereas a web page cannot load a native .dll/.so — it needs a wasm module. bridge.cpp is the answer: it presents libjxl's decode/encode capability through a small C++ surface that compiles cleanly to wasm and is callable from JavaScript. Per CLAUDE.md it manages the wasm heap with grow-only realloc buffers (it reuses and only ever grows its scratch memory rather than reallocating per call), which keeps the hot decode/encode loop allocation-light. The build notes record that this module's symbol surface (including a JPEG-to-JXL transcode entry) is exported in the shipped dist/jxl-core.simd.js artifact.\n\nHow it works (architecturally — the C++ source lives in packages/jxl-wasm/src/bridge.cpp, which is the browser codec, parallel to the Rust path): the surrounding TypeScript facade (packages/jxl-wasm/src/facade.ts in the layer map) handles wasm heap allocation, zero-copy writes of input bytes into wasm memory, and a capability cache; bridge.cpp itself is the C++ FFI that calls into libjxl to run the actual decode (producing pixels, optionally progressively as more bytes arrive) and encode (producing a JXL codestream). The decode-handler in the worker package drives it as a session state machine — feeding chunks of compressed bytes in and pulling decoded pixel frames out. Because decode_pause/decode_resume preemption is handled a layer up, bridge's own push of bytes into libjxl runs synchronously to completion per chunk.\n\nConnections: bridge sits at the bottom of the browser JXL stack. Above it, the worker's decode-handler (jxl_worker) calls into it to decode incoming JXL bytes into pixels; the scheduler (jxl_sched) routes work to that worker; the public session (jxl_session) hides all of this from the app; and the progressive paint loop (web_paint) ultimately consumes the decoded frames. The representation crossing into bridge is compressed JXL codestream bytes (and, for encode, raw pixels); what comes back is decoded pixel buffers (or, for encode, JXL bytes). It is the browser's single C boundary into libjxl, exactly analogous to what jxl-ffi is for the native build — but the two never mix.\n\nGotchas: the most important one is the identity confusion this node exists to dispel — the browser uses bridge, NOT the native Rust jxl_casaencoder/jxl_casadecoder. Treating them as interchangeable leads to wrong conclusions about which code path runs where. Because libjxl multithreading and SharedArrayBuffer both require COOP/COEP cross-origin-isolation headers, bridge's threaded decode only works on a properly-isolated page. CLAUDE.md also notes that an experimental decoder/encoder split (jxl-core.dec.* artifacts) is not built yet, so test helpers must fall back to the monolithic jxl-core.simd.js — a sharp edge for anyone wiring up tests against this module.",
       "gc": 71,
+      "hot": true,
       "lines": 3925
     },
     {
@@ -1419,8 +1651,8 @@
         "js"
       ],
       "desc": "jxl-session (packages/jxl-session/src/decode-session.ts) is the public, app-facing front door for JXL decoding in the browser. Its whole job is to hide complexity: the application code that wants to display a streaming JXL image should not have to know that under the hood there is a worker pool, a preemptive scheduler, backpressure, and a wasm codec. The session presents a clean interface — acquire a decode slot, push compressed chunks in as they arrive over the network, and receive decoded frames out as an event stream. In the layer map it is the DecodeSession that sits directly below the UI and above the scheduler. What flows in is JXL codestream bytes (often arriving progressively from a fetch/ReadableStream); what flows out is a sequence of decoded pixel frames, each one a sharper version of the image as more bytes are decoded.\n\nWhy it exists: streaming, cancellable, progressive image decoding is genuinely intricate — you must manage concurrency across workers, deduplicate identical requests, apply backpressure when decoding can't keep up with the network, and handle budget/timeout and cancellation gracefully. If every call site had to orchestrate that, the code would be unmaintainable and inconsistent. The session is the encapsulation boundary: per CLAUDE.md, \"Session protocol knowledge (event types, handler lifecycle) must not leak into jxl-cache or jxl-stream,\" and conversely the session hides workers/scheduler from the app. It turns a thorny distributed-systems problem into a simple \"give me frames\" API and emits an AsyncEventStream of frames.\n\nHow it works (architecturally): a DecodeSession asks the scheduler to acquire a worker slot, then pushes incoming byte chunks down to that slot; as the worker decodes, the session receives frame events and re-emits them to the consumer. It carries the budget concept — a session-level elapsed-time limit measured from construction (stageStartMs), NOT a per-stage timer — and on a budget-exceeded event it ends the frame stream gracefully so the consumer still receives the last partial frame, while the done() promise rejects with a BudgetExceeded error. CLAUDE.md flags this as the finishWithError() path, deliberately distinct from fail() which tears the stream down immediately. The memory notes also record fixes here: done() must not hang on header-only or single-pass decodes, and the slot must be released correctly even if the session is aborted before the async scheduler picks it up.\n\nConnections: above, the app and the progressive paint loop (web_paint) talk to the session to drive decode and receive frames. Below, the session calls into jxl_sched (the scheduler) to acquire slots and route messages; it never talks to the worker or the wasm codec directly. The cache (jxl-cache) sits beside the pipeline, not inside the session — the session must stay content-agnostic about persistence. The data crossing these edges is compressed JXL bytes downward and decoded pixel frames (plus folded per-frame metrics) upward.\n\nGotchas: the layer invariants are strict and have been re-litigated repeatedly. Do not add a cache-aware wrapper around DecodeSession — an event-driven session cannot be faithfully faked from a static cached buffer (rejected as G2-7). Do not add backpressure/drain callbacks here — backpressure belongs at the scheduler/worker boundary, not the session. Budget is session-level and must never be reset per stage (that silently turns the limit into budget×N_stages). And the distinction between finishWithError (graceful, keep the partial frame) and fail (immediate teardown) is a behavioural contract consumers depend on — conflating them changes what the user sees on a timed-out image.",
-      "gc": 17,
-      "lines": 491
+      "gc": 18,
+      "lines": 497
     },
     {
       "id": "jxl_sched",
@@ -1432,7 +1664,7 @@
         "js"
       ],
       "desc": "jxl-scheduler (packages/jxl-scheduler/src/scheduler.ts) is the brain of the browser decode system — the layer the architecture map calls \"intelligence.\" Where the session presents a simple API and the worker does the raw decoding, the scheduler is what makes many concurrent image decodes behave well: it manages a pool of web workers, decides which work runs where, preempts low-priority decodes when something more urgent arrives, deduplicates requests for the same image, and applies backpressure so a fast network can't drown a slower decoder. In the layer map it sits between jxl-session above and the worker(s) below. What flows through it is control and routing: session requests and byte chunks come down from sessions, and it dispatches them to workers and routes worker messages (frames, metrics, acks) back up.\n\nWhy it exists: a biodiversity image gallery (or any image-heavy app) can have dozens of decodes in flight — thumbnails, the lightbox, prefetches — competing for a handful of CPU cores. Without coordination you get thrashing, duplicated work, unbounded memory growth, and an unresponsive UI when the user navigates away from an image that is still decoding. The scheduler centralises all those concerns into one place so the policies are consistent and testable. CLAUDE.md is emphatic that certain responsibilities live HERE and nowhere else: deduplication (the DedupeRegistry — so two requests for the same source share one decode and fan out the result), preemption, batching, and adaptive high-water-mark backpressure. Putting any of these in the session, facade, or cache is explicitly a rejected anti-pattern.\n\nHow it works (architecturally): the scheduler owns a worker pool (the sibling pool.ts handles worker lifecycle, prewarming and idle reaping) and a queue. A DedupeRegistry collapses identical in-flight requests so the result fans out to all waiters. Preemption is implemented strictly at the scheduler level using a pause/resume protocol — it sends decode_pause to a worker, waits for the decode_paused acknowledgement, and later sends decode_resume; there is no \"soft yield,\" because the wasm decoder's push() runs synchronously and cannot be interrupted mid-chunk, so hard cancel between chunks is already effectively soft. Backpressure uses an adaptive high-water-mark (HWM) on queued bytes so producers wait (waitForDrain) when the decoder falls behind. CLAUDE.md pins down its method contracts: onMessage(sessionId, handler) returns void (there is no unsubscribe), and send() is fire-and-forget — it does not throw even if the target session is already dead.\n\nConnections: above, jxl_session calls the scheduler to acquire a slot and to send chunks; the scheduler calls the session's handlers back with frames/metrics. Below, it dispatches to jxl_worker (the decode-handler running in a web worker), which in turn drives the bridge wasm codec. The data crossing these edges is byte chunks and control messages down, and decoded-frame and metric messages up. It also coordinates with pool.ts for worker supply. Pixel buffers transferred up from workers arrive as transferred ArrayBuffers, which detach on postMessage.\n\nGotchas, all from hard-won experience: because transferred pixel ArrayBuffers detach, you cannot recycle them into a pool — a repeatedly-rejected idea. Preemption must stay scheduler-only; a \"yield message\" soft-preemption is impossible given synchronous wasm push. Adaptive/heuristic tunables here require benchmark evidence before being added — CLAUDE.md forbids adding knobs without data. And the terminal-acknowledgement matching matters: when cancelling, the scheduler must match the worker's terminal ack to the right session, and must not release a pool slot on a non-terminal (mid-decode) event — past bugs (S1/S2/S3) came from exactly these races. Workers are stateless between sessions, so the scheduler must not assume any decoder state carries across a recycle().",
-      "gc": 27,
+      "gc": 28,
       "lines": 1469
     },
     {
@@ -2596,6 +2828,465 @@
         "rust"
       ],
       "desc": "thiserror enum: Jxl(String) for a libjxl failure, Channels(String) for invalid channel/option config (also used by validate()), Size{expected,got} for a pixel-count mismatch, and Create when JxlEncoderCreate returns null."
+    },
+    {
+      "id": "lj_prepare",
+      "k": "fn",
+      "p": "ljpeg",
+      "l": "LjpegPlan::prepare",
+      "desc": "Parses the SOF3 lossless-JPEG header — precision, components-per-sample (cps), dimensions, restart interval — and builds the Huffman decode tables, returning a reusable LjpegPlan. The plan is what lets the hot loop be monomorphised: it captures cps and precision as the constants the kernel specialises on. Header math is bounds-checked because tile geometry can be attacker-controlled.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 335
+    },
+    {
+      "id": "lj_execute",
+      "k": "fn",
+      "p": "ljpeg",
+      "l": "execute<COLLECT_STATS>",
+      "desc": "The monomorphised dispatch core: given a prepared plan it selects the specialised kernel — decode_c1 (cps=1), decode_c2 (cps=2), or decode_generic — and runs it. Const-generic over a COLLECT_STATS flag so the diagnostic-histogram build and the production build share one source but compile to two branch-free kernels.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 588
+    },
+    {
+      "id": "lj_c1",
+      "k": "fn",
+      "p": "ljpeg",
+      "l": "decode_c1<PRECISION,STATS>",
+      "desc": "The components-per-sample = 1 specialised kernel (single-channel predictor). Const-generic on PRECISION so the bit width is a compile-time constant, letting LLVM drop runtime shifts. The serial left+above predictor with a per-pixel Huffman-coded residual is the latency-bound inner loop of DNG/CR2 decode.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 690
+    },
+    {
+      "id": "lj_c2",
+      "k": "fn",
+      "p": "ljpeg",
+      "l": "decode_c2<PRECISION,STATS> ★",
+      "desc": "The cps=2 specialised kernel — the measured win (23–28% on Pixel DNG and CR2, both of which are cps=2, not cps=1). Two interleaved component predictors decoded in lockstep; monomorphising cps and precision removed the per-pixel dispatch and bit-width branches. Parity is exact versus decode_generic (the l17 test).",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 775
+    },
+    {
+      "id": "lj_generic",
+      "k": "fn",
+      "p": "ljpeg",
+      "l": "decode_generic<STATS>",
+      "desc": "The general fallback kernel handling any cps/precision combination the specialised c1/c2 paths don't cover. Slower (runtime cps loop) but the correctness oracle the specialised kernels are tested bit-for-bit against.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 882
+    },
+    {
+      "id": "lj_probe",
+      "k": "fn",
+      "p": "ljpeg",
+      "l": "probe_tile",
+      "desc": "Reads just a tile's SOF3 geometry (width, height, precision, components) into a TileInfo without decoding any pixels — used to size buffers and plan parallel tile ranges before committing to the full entropy decode.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 1056
+    },
+    {
+      "id": "dc_rows",
+      "k": "fn",
+      "p": "decompress",
+      "l": "decompress_rows",
+      "desc": "Decodes the first max_rows scanlines of an Olympus packed-bit stream into a fresh Vec<u16> — the truncated-decode entry used when only the top of the frame is needed (e.g. a quick preview). Wraps decompress_rows_into with an owned buffer.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 17
+    },
+    {
+      "id": "dc_rows_into",
+      "k": "fn",
+      "p": "decompress",
+      "l": "decompress_rows_into",
+      "desc": "Zero-copy variant: decodes into a caller-supplied &mut [u16] and reports how many rows were actually written, erroring if the output is too short. The allocation-free path the batch pipeline uses to reuse one scratch buffer across frames.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 42
+    },
+    {
+      "id": "dc_bitreader",
+      "k": "component",
+      "p": "decompress",
+      "l": "BitReader (fill / read_bits / read_huff)",
+      "desc": "The bit pump behind the decoder: a small buffered reader that fill()s a word, peeks/consumes n bits (read_bits), and walks the 4096-entry flattened Huffman table (read_huff) to pull one symbol. The 12-bit table is the hot lookup; the D-series flip tests guard its exactness.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 195
+    },
+    {
+      "id": "ex_fromorf",
+      "k": "fn",
+      "p": "exif",
+      "l": "ExifData::from_orf_info",
+      "desc": "Maps a parsed Olympus OrfInfo (MakerNote-derived) into the public ExifData: f-number, exposure, ISO, focal length, GPS, orientation and raw dimensions — as ExifRatio rationals, deliberately skipping zero denominators so a missing tag becomes None rather than a divide-by-zero. The one real function in this otherwise struct-only file.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 17
+    },
+    {
+      "id": "ex_types",
+      "k": "component",
+      "p": "exif",
+      "l": "ExifData / GpsData / ExifRatio",
+      "desc": "The plain metadata carriers: ExifRatio (signed numerator/denominator rational), GpsData (lat/long/alt), and ExifData bundling the camera-settings fields surfaced to the UI and written into the JXL/sidecar.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 17
+    },
+    {
+      "id": "xy_topxyb",
+      "k": "fn",
+      "p": "pc_xyb",
+      "l": "pixels_to_xyb",
+      "desc": "The hot conversion: interleaved RGBA8 → three XYB opponent f32 planes, three LUT reads and a few adds/muls per pixel, no transcendentals. The first transform of every Butteraugli comparison; alpha is deliberately ignored.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 32
+    },
+    {
+      "id": "xy_lut",
+      "k": "fn",
+      "p": "pc_xyb",
+      "l": "sqrt_lin_lut",
+      "desc": "Builds (once, via OnceLock) the 256-entry table holding sqrt(sRGB_decode(i/255)) — computed in f64, stored f32 to track the original JS table within parity tolerance. Collapses a per-pixel powf+sqrt into a single table read.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 7
+    },
+    {
+      "id": "xy_lutptr",
+      "k": "fn",
+      "p": "pc_xyb",
+      "l": "sqrt_lin_lut_ptr",
+      "desc": "Exposes the raw LUT pointer (x86 only) so the AVX2/AVX-512 XYB kernels can hardware-gather 8 or 16 table entries at once — the gather that is the main reason the wide path exists.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 27
+    },
+    {
+      "id": "ss_refmom",
+      "k": "fn",
+      "p": "pc_ssim",
+      "l": "ref_moments",
+      "desc": "Precomputes the reference image's per-channel sum and sum-of-squares as exact u64 integers — the half of SSIM that never changes across a comparison loop, computed once in Comparer::new.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 9
+    },
+    {
+      "id": "ss_withref",
+      "k": "fn",
+      "p": "pc_ssim",
+      "l": "ssim_with_ref",
+      "desc": "Per-test scalar path: accumulates the test image's sums plus the cross term sum(test·ref) in u64, then calls finalize_ssim. Exact integer accumulation means no float drift regardless of image size.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 35
+    },
+    {
+      "id": "ss_finalize",
+      "k": "fn",
+      "p": "pc_ssim",
+      "l": "finalize_ssim",
+      "desc": "The single place the SSIM formula lives: turns the five accumulated sums into means/variances/covariance and evaluates (2·mua·mub+C1)(2·cov+C2)/((mua²+mub²+C1)(va+vb+C2)) per channel, averaged. Shared by the scalar and SIMD paths so they can never disagree on the maths.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 74
+    },
+    {
+      "id": "ss_chanmom",
+      "k": "fn",
+      "p": "pc_ssim",
+      "l": "channel_moments",
+      "desc": "Side-output: per-channel mean and variance surfaced through Comparer::all as feature telemetry — not part of the SSIM score itself.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 107
+    },
+    {
+      "id": "ps_psnr",
+      "k": "fn",
+      "p": "pc_psnr",
+      "l": "psnr",
+      "desc": "u64 MSE over the full RGBA buffer (alpha included, for JS parity) → 10·log10(255²/mse), returning ∞ for byte-identical images. Exact integer accumulation; NaN on length mismatch. The parity oracle the SIMD ssd kernels must match.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 5
+    },
+    {
+      "id": "bl_box",
+      "k": "fn",
+      "p": "pc_blur",
+      "l": "box_blur",
+      "desc": "O(n) separable box blur (horizontal then vertical sliding-sum, cost independent of radius) producing Butteraugli's attention mask from the reference luminance plane. Clamp-to-edge addressing; scalar on all targets since it runs only a few times per comparison.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 4
+    },
+    {
+      "id": "sm_native",
+      "k": "fn",
+      "p": "ps_mod",
+      "l": "detect_native",
+      "desc": "Probes the CPU with is_x86_feature_detected! and returns the fastest Backend — AVX-512, then AVX2+FMA, then scalar — optionally preferring the rsqrt-approximation variant. Run once; the choice is cached on the Comparer.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 38
+    },
+    {
+      "id": "sm_wasm",
+      "k": "fn",
+      "p": "ps_mod",
+      "l": "detect_wasm",
+      "desc": "Compile-time feature gate: returns WasmSimd when built with simd128, else Scalar. The browser counterpart of detect_native.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 24
+    },
+    {
+      "id": "sc_serrtail",
+      "k": "fn",
+      "p": "ps_scalar",
+      "l": "scale_err_tail",
+      "desc": "The remainder loop for Butteraugli's p-norm: finishes the pixels that don't fill a full SIMD vector. Every backend calls this same tail, so odd-sized images stay bit-identical across scalar/AVX2/AVX-512/WASM.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 11
+    },
+    {
+      "id": "sc_xybtail",
+      "k": "fn",
+      "p": "ps_scalar",
+      "l": "xyb_tail",
+      "desc": "Shared scalar remainder for the RGBA8→XYB conversion — the leftover pixels after the wide kernel processes its full chunks.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 38
+    },
+    {
+      "id": "sc_dstail",
+      "k": "fn",
+      "p": "ps_scalar",
+      "l": "downsample_row_tail",
+      "desc": "Shared scalar remainder for the 2× pyramid downsample row, keeping edge columns exact across all backends.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 56
+    },
+    {
+      "id": "a2_serr",
+      "k": "fn",
+      "p": "ps_avx2",
+      "l": "scale_err_avx2",
+      "desc": "8-wide AVX2+FMA Butteraugli per-scale error; f32 lane accumulators drained to an f64 sum every 4096 iters for precision, tail finished by scale_err_tail. Optional rsqrt path for the reciprocal/sqrt.",
+      "tech": [
+        "rust"
+      ],
+      "line": 24
+    },
+    {
+      "id": "a2_ssd",
+      "k": "fn",
+      "p": "ps_avx2",
+      "l": "ssd_avx2",
+      "desc": "AVX2 sum-of-squared-differences over RGBA bytes — the integer kernel behind PSNR; drains to a wide accumulator every ~16000 iters to avoid i32 overflow.",
+      "tech": [
+        "rust"
+      ],
+      "line": 122
+    },
+    {
+      "id": "a2_ssim",
+      "k": "fn",
+      "p": "ps_avx2",
+      "l": "ssim_moments_avx2",
+      "desc": "Gathers SSIM's five moment sums for the AVX2 path (and is reused by the AVX-512 SSIM path), then hands them to the shared finalize_ssim. Kept as a near-scalar loop — vectorising the deinterleave gave no measured win.",
+      "tech": [
+        "rust"
+      ],
+      "line": 264
+    },
+    {
+      "id": "a2_xyb",
+      "k": "fn",
+      "p": "ps_avx2",
+      "l": "pixels_to_xyb_avx2",
+      "desc": "AVX2 RGBA8→XYB using i32gather to read 8 LUT entries at once — the gather is the whole reason this kernel beats scalar.",
+      "tech": [
+        "rust"
+      ],
+      "line": 294
+    },
+    {
+      "id": "a2_ds",
+      "k": "fn",
+      "p": "ps_avx2",
+      "l": "downsample_avx2",
+      "desc": "AVX2 2× box downsample building the test-side Butteraugli pyramid level.",
+      "tech": [
+        "rust"
+      ],
+      "line": 352
+    },
+    {
+      "id": "a5_serr",
+      "k": "fn",
+      "p": "ps_avx512",
+      "l": "scale_err_avx512",
+      "desc": "16-wide AVX-512 Butteraugli error kernel; shipped but unbenchmarked on the dev box (no AVX-512 silicon), correctness resting on the self-skipping parity tests.",
+      "tech": [
+        "rust"
+      ],
+      "line": 31
+    },
+    {
+      "id": "a5_xyb",
+      "k": "fn",
+      "p": "ps_avx512",
+      "l": "pixels_to_xyb_avx512",
+      "desc": "AVX-512 RGBA8→XYB using vgatherdps to pull 16 LUT entries per instruction — the fast gather that justifies the AVX-512 path existing at all.",
+      "tech": [
+        "rust"
+      ],
+      "line": 112
+    },
+    {
+      "id": "a5_ds",
+      "k": "fn",
+      "p": "ps_avx512",
+      "l": "downsample_avx512",
+      "desc": "16-wide AVX-512 2× pyramid downsample.",
+      "tech": [
+        "rust"
+      ],
+      "line": 149
+    },
+    {
+      "id": "a5_ssim",
+      "k": "fn",
+      "p": "ps_avx512",
+      "l": "ssim_moments_avx512",
+      "desc": "AVX-512 SSIM moment accumulation feeding the shared finalize_ssim.",
+      "tech": [
+        "rust"
+      ],
+      "line": 193
+    },
+    {
+      "id": "w_serr",
+      "k": "fn",
+      "p": "ps_wasm",
+      "l": "scale_err_wasm",
+      "desc": "wasm128 (v128, 4-wide) Butteraugli per-scale error for the browser build; ~2× scalar (the WASM case is bandwidth-bound so SIMD headroom is limited). Tail via scale_err_tail.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 20
+    },
+    {
+      "id": "w_ssd",
+      "k": "fn",
+      "p": "ps_wasm",
+      "l": "ssd_wasm",
+      "desc": "wasm128 sum-of-squared-differences behind the browser PSNR.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 102
+    },
+    {
+      "id": "w_ssim",
+      "k": "fn",
+      "p": "ps_wasm",
+      "l": "ssim_moments_wasm",
+      "desc": "wasm128 SSIM moment gather → shared finalize_ssim.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 164
+    },
+    {
+      "id": "w_xyb",
+      "k": "fn",
+      "p": "ps_wasm",
+      "l": "pixels_to_xyb_wasm",
+      "desc": "wasm128 RGBA8→XYB; no hardware gather in WASM SIMD, so it loads the LUT entries individually then vectorises the arithmetic.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 216
+    },
+    {
+      "id": "w_ds",
+      "k": "fn",
+      "p": "ps_wasm",
+      "l": "downsample_wasm",
+      "desc": "wasm128 2× pyramid downsample for the browser comparer.",
+      "tech": [
+        "rust",
+        "wasm"
+      ],
+      "line": 257
     }
   ],
   "edges": [
@@ -3452,7 +4143,7 @@
       "k": "uses"
     }
   ],
-  "generated": "2026-06-21",
+  "generated": "2026-06-22",
   "tech": {
     "rust": {
       "c": "#e9b73e",
