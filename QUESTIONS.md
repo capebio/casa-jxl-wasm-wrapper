@@ -2240,3 +2240,41 @@ so.
 - Reason for deferral: same root cause as 006-correctness-worker-protocol-mismatch above and the Section 003 entry — the unspecified contract is the documented tiled-decode-worker↔pool mismatch (003.B, QUESTIONS.md ~L1944). Specifying/aligning the contract is a cross-file change in tiled-decode-worker.js + tiled-decode-pool.js, outside this two-file local scope. The local seam now at least forwards the same fields as the session branch (signal/format/priority/sourceKey) and returns the matching `{pixels,width,height}` shape.
 - Suggested resolution: as part of the Section 003 003.B fix, document the worker message protocol at the pool boundary; no further edit needed in pyramid-decode.js once the contract is settled.
 - Reversible: yes
+
+## Multi-format (EXR/TIFF) ingest — colour-fidelity note (2026-06-22, feature landed)
+
+Full EXR/TIFF ingest now lands in the live app: `web/worker.js` routes by
+`detectFormat()`, decodes via `decode_exr`/`decode_tiff` to a `DecodedImage`, and
+emits the same thumb / lightbox / live-edit / `encode_request` messages as RAW.
+Live slider editing IS wired (not build-gated) — `LookRenderer.new_with_options`
+is fully JS-constructible from an arbitrary packed RGB16-LE buffer, so EXR/TIFF
+reuse the identical RAW live-edit engine. sdr/jxl/unknown are rejected with a
+clear error instead of being misrouted to the Olympus decoder.
+
+- **Colour-fidelity caveat (not build-gated, no fix required to ship):** the
+  shared `LookRenderer.render()` runs the RAW tone pipeline, which expects
+  *linear* RGB16 input and applies a baseline picture-mode S-curve + sRGB OETF.
+  EXR (linear f32) maps cleanly. For TIFF (already-display-referred sRGB u8/u16)
+  the worker linearizes via an sRGB→linear EOTF (`decodedToLinearRgb16` in
+  worker.js) before feeding the renderer, so look=0 ≈ the clean
+  `to_display_rgba8` preview. The remaining gap: the baseline S-curve is tuned
+  for RAW scene-linear data, so a developed TIFF/EXR at look=0 gets a mild
+  RAW-style contrast curve rather than a strict 1:1 passthrough. This is
+  visually acceptable and consistent with "behaves like RAW", but is not a
+  colour-managed identity transform.
+- **Optional future WASM improvement (would remove the caveat):** add a
+  wasm_bindgen entry that constructs a `LookRenderer` (or a sibling
+  `ImageLookRenderer`) which skips black-subtraction + the baseline S-curve and
+  treats the input as already display-referred — e.g.
+  `LookRenderer::from_display_rgb16(rgb16_le, w, h)` with a `passthrough_tone:
+  bool` flag on `new_with_options`. Build: `wasm-pack build --target web
+  --out-dir web/pkg --release` (threaded build needs the manual
+  cargo+nightly+wasm-bindgen recipe per CLAUDE.md). Until then the JS-side
+  linearization is the correct-enough path and requires no rebuild.
+- **Live verification gap:** `web/multi-format-roundtrip.test.mjs` (the
+  designated browser proof) needs Playwright, which is not installed in this
+  worktree's junctioned `node_modules` (no-new-deps constraint) — so the
+  in-browser decode+render path was not executed here. The routing contract is
+  covered by new vitest cases in `web/format-detect.test.js` (12 pass). RAW
+  routing is unchanged (worker RAW branch is byte-identical; only `opts`/`look`
+  were hoisted above the new route switch).

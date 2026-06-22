@@ -1623,6 +1623,10 @@ function startConvert(file, existingCard) {
             const bytes = new Uint8Array(buf);
             const opts = currentOptions();
             opts.userRotation = userRotations[file.name] || 0;
+            // Carry the filename so the worker's detectFormat can disambiguate
+            // TIFF-magic RAW (orf/dng/cr2) from developed TIFF. Detection still
+            // works on magic bytes alone if name is absent (e.g. EXR/CR2).
+            opts.name = file.name || '';
             const initialPriority = card._pendingPriority || 'normal';
             card._pendingPriority = null;
             const taskId = pool.submit(bytes, opts, {
@@ -1793,10 +1797,12 @@ async function handleFileList(fileList) {
     for (const f of orfs) startConvert(f);
 }
 
-// Supported RAW formats: Olympus ORF, Canon CR2, Adobe/Pixel DNG. (Name kept `isOrf`
-// for the many existing call sites; predicate now matches all three.)
+// Supported pipeline formats: RAW (Olympus ORF, Canon CR2, Adobe/Pixel DNG) plus
+// developed high-bit images (EXR, TIFF) which the worker decodes via decode_exr/
+// decode_tiff and renders through the same LookRenderer live-edit engine. (Name
+// kept `isOrf` for the many existing call sites.)
 function isOrf(file) {
-    return /\.(orf|cr2|dng)$/i.test(file.name);
+    return /\.(orf|cr2|dng|exr|tif|tiff)$/i.test(file.name);
 }
 
 // Walk a DataTransfer entry tree (only available on `drop` via
