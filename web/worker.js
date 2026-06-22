@@ -318,8 +318,12 @@ self.addEventListener('message', async (ev) => {
         let fullRgb = result.take_rgb();
 
         // A3: send RGB8 directly — skip the ~210ms rgb_to_rgba conversion and 25% larger transfer.
-        const rgbBuf = fullRgb.buffer.slice(fullRgb.byteOffset, fullRgb.byteOffset + fullRgb.byteLength);
-        fullRgb = null; // allow GC
+        // P0 (a44e6a96): take_rgb() = std::mem::take → an OWNED buffer (byteOffset 0), so the old
+        // re-slice was a redundant full-buffer memcpy (~40ms + 50MB GC per 4096² file —
+        // flipflopdom-measured: .flipflop/dom-tests/bridge-p0-slice.mjs). Transfer .buffer directly;
+        // fullRgb is nulled immediately below and never reused, so detaching it is safe.
+        const rgbBuf = fullRgb.buffer;
+        fullRgb = null; // allow GC (the transfer detaches the buffer anyway)
         self.postMessage(
             { id, type: 'encode_request', pixels: rgbBuf, format: 'rgb8', width: w, height: h,
               quality: options.lossless ? 100 : options.quality,
