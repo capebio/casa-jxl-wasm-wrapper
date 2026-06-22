@@ -19,7 +19,21 @@ if (typeof globalThis.ImageData !== 'function') {
 }
 
 if (!globalThis._icodec_ImageData) {
-    globalThis._icodec_ImageData = (data, width, height, depth) => {
+    globalThis._icodec_ImageData = (data, width, height, depth = 8) => {
+        // Defensive: icodec always packs width*height*4 channel elements (RGBA),
+        // at 1 byte/element for depth 8 and 2 bytes/element above. Validate the
+        // buffer covers that before wrapping it, so a short/garbage buffer fails
+        // loudly here instead of producing an ImageData that reads OOB downstream.
+        const bytesPerElement = depth === 8 ? 1 : 2;
+        const expectedBytes = width * height * 4 * bytesPerElement;
+        if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+            throw new RangeError(`_icodec_ImageData: invalid dimensions ${width}x${height}`);
+        }
+        if (typeof data?.byteLength !== 'number' || data.byteLength < expectedBytes) {
+            throw new RangeError(
+                `_icodec_ImageData: data.byteLength (${data?.byteLength}) < expected ${expectedBytes} for ${width}x${height}@${depth}bpc`,
+            );
+        }
         if (depth === 8 && typeof ImageData === 'function') {
             return new ImageData(data, width, height);
         }

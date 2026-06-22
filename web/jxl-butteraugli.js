@@ -21,6 +21,12 @@ const _sqrtLin = (() => {
 // Convert RGBA uint8 pixels → XYB float32 channels (allocation-free variant).
 // outX, outY, outB must be pre-allocated Float32Arrays of size n.
 export function pixelsToXybInto(pixels, n, outX, outY, outB) {
+    // Guard the stride invariant: the loop reads pixels[j..j+2] up to j=(n-1)*4,
+    // so pixels must hold at least n*4 bytes (RGBA stride). Reading past the end
+    // would silently yield undefined → NaN channels.
+    if (pixels.length < n * 4) {
+        throw new RangeError(`pixelsToXyb: pixels.length (${pixels.length}) < n*4 (${n * 4})`);
+    }
     for (let i = 0, j = 0; i < n; i++, j += 4) {
         const r = _sqrtLin[pixels[j]];
         const g = _sqrtLin[pixels[j + 1]];
@@ -254,11 +260,15 @@ export function computeInformationField(image, width, height) {
 // Returns a non-negative float; 0 = identical, ~0.5 = excellent, >1.5 = visible.
 // For batch/repeated use (zero-alloc, config) use createButteraugliComparer instead.
 export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
+    // Validate dimensions BEFORE dispatching to either backend so the WASM path
+    // is guarded identically to the JS path (was previously unchecked, passing
+    // mismatched buffers straight into native code).
+    const n = width * height;
+    if (!n || testPixels.length !== n * 4) return NaN;
+
     if (_backend.score) {
         return _backend.score(refXyb, testPixels, width, height);
     }
-    const n = width * height;
-    if (!n || testPixels.length !== n * 4) return NaN;
 
     const ref = prepRef(refXyb, width, height);
     let [tX, tY, tB] = pixelsToXyb(testPixels, n);

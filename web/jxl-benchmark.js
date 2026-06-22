@@ -203,6 +203,18 @@ function saveSettings() {
 
 function loadSettings(settings) {
     try {
+        // Local tool, but settings can come from an imported JSON file — guard the
+        // top-level shape and coerce numerics so a malformed file can't crash or
+        // inject bad DOM values.
+        if (!settings || typeof settings !== 'object') {
+            dbgLog('Ignoring settings: not an object', '', 'warn');
+            return;
+        }
+        const toPosInt = v => {
+            const n = Number(v);
+            return Number.isFinite(n) && n > 0 ? n : null;
+        };
+
         // Load sizes
         if (settings.sizes && Array.isArray(settings.sizes)) {
             document.querySelectorAll('input[name="benchmark-size"]').forEach(cb => {
@@ -225,11 +237,13 @@ function loadSettings(settings) {
         }
 
         // Load iterations and maxFiles
-        if (settings.iterations) iterationsInput.value = settings.iterations;
-        if (settings.maxFiles) maxFilesInput.value = settings.maxFiles;
+        const iterations = toPosInt(settings.iterations);
+        if (iterations !== null) iterationsInput.value = iterations;
+        const maxFiles = toPosInt(settings.maxFiles);
+        if (maxFiles !== null) maxFilesInput.value = maxFiles;
 
         // Load options
-        if (settings.options) {
+        if (settings.options && typeof settings.options === 'object') {
             if (settings.options.simd !== undefined) document.getElementById('opt-simd').checked = settings.options.simd;
             if (settings.options.threading !== undefined) document.getElementById('opt-threading').checked = settings.options.threading;
             if (settings.options.progressive !== undefined) document.getElementById('opt-progressive').checked = settings.options.progressive;
@@ -743,6 +757,23 @@ async function loadFiles(files) {
     dbgLog(`Loaded ${selectedSources.length}/${limited.length} images`);
 }
 
+// Named wrapper over the positional process_orf(data, exposure_ev, contrast, ...)
+// WASM signature so the benchmark's "neutral decode, no look applied" intent is
+// readable instead of 14 bare 0/NaN literals. wb_r/wb_b default to NaN = "use the
+// camera/auto white balance"; all tone params default to 0 = no adjustment.
+const ORF_NEUTRAL = {
+    exposureEv: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
+    saturation: 0, vibrance: 0, temp: 0, tint: 0,
+    wbROverride: NaN, wbBOverride: NaN, texture: 0, clarity: 0,
+};
+function processOrfNamed(data, opts = ORF_NEUTRAL) {
+    const o = { ...ORF_NEUTRAL, ...opts };
+    return process_orf(
+        data, o.exposureEv, o.contrast, o.highlights, o.shadows, o.whites, o.blacks,
+        o.saturation, o.vibrance, o.temp, o.tint, o.wbROverride, o.wbBOverride, o.texture, o.clarity,
+    );
+}
+
 async function processImageFile(file, arrayBuffer) {
     const name = file.name.toLowerCase();
     const type = file.type;
@@ -754,7 +785,7 @@ async function processImageFile(file, arrayBuffer) {
         if (route === 'raw') {
             if (!wasmReady) { dbgLog('WASM not ready'); console.error('WASM not ready'); return null; }
             console.log('Processing RAW:', name, 'bytes:', arrayBuffer.byteLength);
-            const result = process_orf(new Uint8Array(arrayBuffer), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NaN, NaN, 0, 0);
+            const result = processOrfNamed(new Uint8Array(arrayBuffer));
             try {
                 return { pixels: result.take_rgb(), format: 'rgb8', width: result.width, height: result.height };
             } finally {
@@ -1251,11 +1282,16 @@ async function runBenchmark() {
                         const resizeStart = performance.now();
                         const resized = await resizePixels(source.pixels, source.width, source.height, size, source.format);
                         const resizeMs = performance.now() - resizeStart;
+                        // Cancellation can only be observed at await boundaries; if a Stop
+                        // landed during the resize, discard this in-flight result rather
+                        // than recording stale timings.
+                        if (benchmarkId !== activeBenchmarkId) { dbgLog('❌ BENCHMARK CANCELLED'); setRunningState(false); return; }
 
                         // Encode
                         const encStart = performance.now();
                         const encResult = await encodeJxl(resized.pixels, resized.width, resized.height, quality, effort, source.format);
                         const encMs = encResult.encodeMs;
+                        if (benchmarkId !== activeBenchmarkId) { dbgLog('❌ BENCHMARK CANCELLED'); setRunningState(false); return; }
 
                         recordTiming(benchmarkResults.resizeMs, key, resizeMs);
                         recordTiming(benchmarkResults.encodeMs, key, encMs);
@@ -1267,6 +1303,7 @@ async function runBenchmark() {
                         // Decode
                         const decResult = await decodeJxl(encResult.bytes);
                         const decMs = decResult.decodeMs;
+                        if (benchmarkId !== activeBenchmarkId) { dbgLog('❌ BENCHMARK CANCELLED'); setRunningState(false); return; }
 
                         if (decResult.success) {
                             recordTiming(benchmarkResults.decodeMs, key, decMs);

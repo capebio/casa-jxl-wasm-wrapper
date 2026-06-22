@@ -24,6 +24,11 @@
 const DB_NAME = 'jxl-file-picker-memory';
 const DB_STORE = 'lastFiles';
 
+// Cap how many bytes we persist for a single selection so multi-MB RAW blobs
+// don't accumulate unbounded in IndexedDB. Files past the budget are stored as
+// metadata only (no `bytes`) and are not reconstructed on load.
+const MAX_PERSIST_BYTES = 32 * 1024 * 1024; // 32 MB per key
+
 let _dbPromise = null;
 
 function openMemoryDb() {
@@ -49,16 +54,22 @@ async function saveLastFiles(key, files) {
     const tx = db.transaction(DB_STORE, 'readwrite');
     const store = tx.objectStore(DB_STORE);
 
-    // Store metadata + actual bytes for the most recent selection
+    // Store metadata + actual bytes for the most recent selection, but bound
+    // total persisted bytes so large RAW blobs don't grow IDB without limit.
+    // Once the budget is exhausted, remaining files keep metadata only.
+    let budget = MAX_PERSIST_BYTES;
     const records = await Promise.all(files.map(async (f) => {
-      const buf = await f.arrayBuffer();
-      return {
+      const rec = {
         name: f.name,
         size: f.size,
         type: f.type,
         lastUsed: Date.now(),
-        bytes: buf
       };
+      if (f.size <= budget) {
+        rec.bytes = await f.arrayBuffer();
+        budget -= f.size;
+      }
+      return rec;
     }));
 
     store.put(records, key);
@@ -80,15 +91,46 @@ async function loadLastFiles(key) {
     });
     if (!records?.length) return null;
 
-    // Reconstruct File objects
-    return records.map(rec => {
-      const blob = new Blob([rec.bytes], { type: rec.type || 'application/octet-stream' });
-      return new File([blob], rec.name, { type: rec.type, lastModified: rec.lastUsed });
-    });
+    // Reconstruct File objects. Records persisted as metadata-only (over the
+    // byte budget) have no `bytes` and cannot be reconstructed — skip them.
+    return records
+      .filter(rec => rec && rec.bytes)
+      .map(rec => {
+        const blob = new Blob([rec.bytes], { type: rec.type || 'application/octet-stream' });
+        return new File([blob], rec.name, { type: rec.type, lastModified: rec.lastUsed });
+      });
   } catch (e) {
     console.warn('[jxl-file-picker] Failed to load persisted files:', e);
     return null;
   }
+}
+
+/**
+ * Match a File against an HTML `accept` string the way the spec intends:
+ *   - ".ext"      -> filename ends with that exact extension (dot-anchored)
+ *   - "type/*"    -> MIME type prefix match (e.g. image/*)
+ *   - "type/sub"  -> exact MIME type equality
+ * Avoids the loose substring matching that both over- and under-matches
+ * (e.g. "foo.notorf" for "orf", or type.includes('jxl')).
+ */
+export function fileMatchesAccept(file, accept) {
+  if (!accept) return true;
+  const name = (file.name || '').toLowerCase();
+  const type = (file.type || '').toLowerCase();
+  const tokens = accept.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+  return tokens.some(tok => {
+    if (tok.startsWith('.')) {
+      // Extension token: dot-anchored suffix match so ".orf" does not match
+      // "foo.notorf" and multi-dot extensions (".tar.gz") work.
+      return name.endsWith(tok);
+    }
+    if (tok.endsWith('/*')) {
+      const prefix = tok.slice(0, -1); // keep trailing slash, e.g. "image/"
+      return type.startsWith(prefix);
+    }
+    // Exact MIME type.
+    return type === tok;
+  });
 }
 
 /**
@@ -128,10 +170,7 @@ export function createFilePicker({
     if (!files.length) return;
 
     const filtered = accept
-      ? files.filter(f => {
-          const exts = accept.toLowerCase().split(',').map(s => s.trim().replace('*', ''));
-          return exts.some(ext => f.name.toLowerCase().endsWith(ext.replace('.', '')) || f.type.includes(ext.replace('.', '')));
-        })
+      ? files.filter(f => fileMatchesAccept(f, accept))
       : files;
 
     if (!filtered.length) {

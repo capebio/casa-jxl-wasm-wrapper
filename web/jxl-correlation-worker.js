@@ -111,6 +111,7 @@ self.onmessage = async (event) => {
 
     const start = performance.now();
     let status = 'ok';
+    let errorMessage = null;
     let encodeMs = null;
     let bytes = null;
     let progressEvents = null;
@@ -198,8 +199,11 @@ self.onmessage = async (event) => {
           })();
           for (const ch of chunks) {
             const len = ch.byteLength || ch.length || 0;
-            fed += len;
             await decoder.push(exactBuffer(ch));
+            // Count bytes AFTER the push that consumed them: incrementing before
+            // push over-counted firstProgressBytes by one chunk when the very
+            // first progress event surfaced from this push.
+            fed += len;
           }
           await decoder.close();
           await drain;
@@ -231,13 +235,14 @@ self.onmessage = async (event) => {
       }
     } catch (e) {
       status = 'error';
+      errorMessage = String(e?.message || e);
       // Don't spam the console from every worker on every error during sweeps
     }
 
     // Send result back (no need to transfer anything heavy)
     self.postMessage({
       type: 'result',
-      payload: { id, encodeMs, bytes, status, progressEvents, firstProgressMs, firstProgressBytes, minBytesToFirstProgress }
+      payload: { id, encodeMs, bytes, status, errorMessage, progressEvents, firstProgressMs, firstProgressBytes, minBytesToFirstProgress }
     });
     return;
   }

@@ -27,11 +27,15 @@ export function getContext() {
 }
 
 export async function resetContext() {
-    if (_ctx?.shutdown) {
+    // Capture and detach the old context BEFORE awaiting its shutdown so a
+    // concurrent getContext() can never observe the mid-shutdown instance —
+    // it will create a fresh one instead.
+    const old = _ctx;
+    _ctx = null;
+    if (old?.shutdown) {
         try {
-            await _ctx.shutdown();
+            await old.shutdown();
         } catch {}
     }
-    _ctx = null;
     return getContext();
 }

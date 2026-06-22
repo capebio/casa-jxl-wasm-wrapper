@@ -70,6 +70,12 @@ function prepareReference(id, pixels, width, height) {
         return referenceCache;
     }
     const refPx = asUint8Array(pixels);
+    // Free the prior reference's WASM comparer before dropping it; PerceptualComparer
+    // owns WASM-heap memory that is not reclaimed by GC, so a bare reassign leaks it
+    // across every chart-batch reference change.
+    if (referenceCache.wcmp && typeof referenceCache.wcmp.free === 'function') {
+        try { referenceCache.wcmp.free(); } catch {}
+    }
     // wcmp / cmp built below in handle; cache holds them after first use in request.
     const cache = {
         id,

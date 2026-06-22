@@ -195,6 +195,12 @@ async function runFormatRaceAtSize(source, longEdge, tier, effort, thisRunId) {
         ? { width: source.width, height: source.height }
         : sizeForLongEdge(source.width, source.height, Number(longEdge));
 
+    // If a newer run already superseded this one, bail before doing the
+    // expensive downscale + first encode. (In-flight codec calls themselves
+    // still cannot be aborted — that would need a signal threaded into
+    // encodeAsJxl/decodeJxl/encodeViaToBlob.)
+    if (thisRunId !== runId) return null;
+
     // Prepare RGBA at target size
     let rgba;
     if (dims.width === source.width && dims.height === source.height) {
@@ -203,6 +209,9 @@ async function runFormatRaceAtSize(source, longEdge, tier, effort, thisRunId) {
         const downRgb = downscale_rgb(source.rgb, source.width, source.height, dims.width, dims.height);
         rgba = rgb_to_rgba(downRgb);
     }
+
+    // Re-check after the (potentially heavy) downscale, before the first encode.
+    if (thisRunId !== runId) return null;
 
     const { jxlQ, jpegQ, webpQ } = TIER[tier];
     const results = {};

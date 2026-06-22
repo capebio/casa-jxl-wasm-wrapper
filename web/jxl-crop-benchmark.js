@@ -72,6 +72,19 @@ function resetDecodePixelMetrics() {
   Object.keys(decodePixelMetrics).forEach(k => decodePixelMetrics[k] = []);
 }
 
+// Average the currently-accumulated decode pixel metrics into a plain snapshot
+// object. Used to separate the tile-region and JXTC-region samples (which both
+// log into the shared decodePixelMetrics arrays) so a snapshot does not blend
+// two codecs under one "region" label.
+function snapshotDecodePixelMetrics() {
+  const avg = (vals) => vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  return {
+    decode_buffer_extract_ms: avg(decodePixelMetrics.decode_buffer_extract_ms),
+    decode_region_downsample_ms: avg(decodePixelMetrics.decode_region_downsample_ms),
+    decode_toarraybuffer_ms: avg(decodePixelMetrics.decode_toarraybuffer_ms),
+  };
+}
+
 function summarizeDecodePixelMetrics(label = '') {
   const summary = {};
   Object.keys(decodePixelMetrics).forEach(key => {
@@ -128,16 +141,23 @@ function setStatusFolder(text)   { statusFolder.textContent   = text; }
 function recordCropTiming(fileName, size, tileMs, jxtcMs = null, fullMs = null, decodeMetrics = {}) {
     if (!lastCropRun) return;
     const region = decodeMetrics.region || {};
+    const jxtc = decodeMetrics.jxtc || {};
     const fullM = decodeMetrics.full || {};
-    lastCropRun.records.push({ 
-        file: fileName, 
-        size, 
-        tileMs, 
-        jxtcMs, 
+    lastCropRun.records.push({
+        file: fileName,
+        size,
+        tileMs,
+        jxtcMs,
         fullMs,
+        // Tile-region decode handoff (the "region" path) — kept separate from JXTC.
         decode_buffer_extract_ms: region.decode_buffer_extract_ms ?? fullM.decode_buffer_extract_ms ?? null,
         decode_region_downsample_ms: region.decode_region_downsample_ms ?? fullM.decode_region_downsample_ms ?? null,
         decode_toarraybuffer_ms: region.decode_toarraybuffer_ms ?? fullM.decode_toarraybuffer_ms ?? null,
+        // JXTC-region decode handoff, recorded under its own keys so it is not
+        // conflated with the tile-region numbers above.
+        jxtc_decode_buffer_extract_ms: jxtc.decode_buffer_extract_ms ?? null,
+        jxtc_decode_region_downsample_ms: jxtc.decode_region_downsample_ms ?? null,
+        jxtc_decode_toarraybuffer_ms: jxtc.decode_toarraybuffer_ms ?? null,
     });
 }
 
@@ -753,11 +773,21 @@ async function runBenchmark() {
                 continue;
             }
             const tileMs = performance.now() - t0;
+            // decodeTileRegion above cannot be interrupted; if Stop was pressed
+            // while it ran, abandon this stale size rather than recording it.
+            if (signal.aborted) break;
 
             paintCrop(cards[size], decoded.pixels, decoded.width, decoded.height, tileMs, size, size);
 
+            // Snapshot the TILE region decode handoff metrics before the JXTC
+            // decode runs, then reset, so the two codecs do not blend into one
+            // "region" label in the shared decodePixelMetrics arrays.
+            const regionDecodeMetrics = snapshotDecodePixelMetrics();
+            resetDecodePixelMetrics();
+
             // JXTC container ROI decode comparison
             let jxtcMs = null;
+            let jxtcDecodeMetrics = null;
             if (jxtcBytes) {
                 setStatusStage(`JXTC region ${size}px…`);
                 const tJ = performance.now();
@@ -772,23 +802,13 @@ async function runBenchmark() {
                         }
                     });
                     jxtcMs = performance.now() - tJ;
+                    jxtcDecodeMetrics = snapshotDecodePixelMetrics();
                 } catch (err) {
                     console.warn(`  ${size}px JXTC region failed:`, err.message || err);
                 }
             }
-
-            // Snapshot region decode handoff metrics (tile + JXTC for this size)
-            const regionDecodeMetrics = {
-                decode_buffer_extract_ms: decodePixelMetrics.decode_buffer_extract_ms.length 
-                    ? decodePixelMetrics.decode_buffer_extract_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_buffer_extract_ms.length 
-                    : null,
-                decode_region_downsample_ms: decodePixelMetrics.decode_region_downsample_ms.length 
-                    ? decodePixelMetrics.decode_region_downsample_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_region_downsample_ms.length 
-                    : null,
-                decode_toarraybuffer_ms: decodePixelMetrics.decode_toarraybuffer_ms.length 
-                    ? decodePixelMetrics.decode_toarraybuffer_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_toarraybuffer_ms.length 
-                    : null,
-            };
+            // decodeContainerRegion above cannot be interrupted; honour Stop now.
+            if (signal.aborted) break;
 
             // Reset for full decode baseline
             resetDecodePixelMetrics();
@@ -821,21 +841,12 @@ async function runBenchmark() {
             }
 
             // Snapshot full decode handoff (the whole full decode time as extract cost)
-            const fullDecodeMetrics = {
-                decode_buffer_extract_ms: decodePixelMetrics.decode_buffer_extract_ms.length 
-                    ? decodePixelMetrics.decode_buffer_extract_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_buffer_extract_ms.length 
-                    : null,
-                decode_region_downsample_ms: decodePixelMetrics.decode_region_downsample_ms.length 
-                    ? decodePixelMetrics.decode_region_downsample_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_region_downsample_ms.length 
-                    : null,
-                decode_toarraybuffer_ms: decodePixelMetrics.decode_toarraybuffer_ms.length 
-                    ? decodePixelMetrics.decode_toarraybuffer_ms.reduce((a,b)=>a+b,0) / decodePixelMetrics.decode_toarraybuffer_ms.length 
-                    : null,
-            };
+            const fullDecodeMetrics = snapshotDecodePixelMetrics();
 
-            // Record with separate region and full handoff metrics
+            // Record with separate region (tile), jxtc, and full handoff metrics
             recordCropTiming(file.name, size, tileMs, jxtcMs, fullMsForRecord, {
                 region: regionDecodeMetrics,
+                jxtc: jxtcDecodeMetrics,
                 full: fullDecodeMetrics
             });
 

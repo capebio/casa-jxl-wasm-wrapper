@@ -1367,3 +1367,114 @@ defer the eviction to a microtask) if this path is ever enabled in production.
 `loadLevel` always runs a single-pass scheduler decode (`ctx.decode({format, sourceKey, priority:'visible', emitEveryPass:false, progressionTarget:'final'})`, L500-508) and never inspects `entry.tiled`. Large tiled levels therefore fully decode rather than decoding only the viewport. The grid path routes correctly: `web/pyramid-gallery/pyramid-decode.js` `decodePyramidLevel(ctx, bytes, {tiled, region})` (L12-16) branches on `opts.tiled` and calls the pooled **`decodeTiledViewportPooled`** (dynamic import from `packages/jxl-pyramid/dist/tiled-decode-pool.js`), using the worker at `web/lightbox/tiled-decode-worker.js`.
 **Why deferred (build-unverified):** Behavioral fix exercised only by real WASM tiled decode in a real browser (worker/OPFS/canvas) — not unit-testable here (skill 5b). Also, the lightbox currently assumes `levelPixels` covers the whole level (`offscreen.width = levelInfo.w`, crossfade/pan/`reapplyToOffscreen` all full-level); switching to viewport-region pixels changes the offscreen/crossfade model and risks regressing the non-tiled path — beyond a minimal local edit.
 **Recommended fix:** When `entry.tiled`, compute the current viewport region from `zoom`/pan against `entry.w`/`entry.h` and route through `decodePyramidLevel(ctx, bytes, {tiled:true, region, format, priority:'visible'})` (i.e. the pooled `decodeTiledViewportPooled`), adapting the offscreen/crossfade to region-sized pixels; fall back to the existing single-pass decode when not tiled. Verify visually on a large tiled pyramid level. See ADR/strategic-map context.
+
+---
+
+## Run `epiccodereview/20260622T113415Z` — web worker fixers (deferred)
+
+### `web/jxl-correlation-worker.js` (c) — prefix-probe O(steps²) re-feed (PERF, DEFER)
+**File:** `web/jxl-correlation-worker.js` `probeMinBytesToFirstProgress` (L32-80).
+For each of up to 50 cut points the probe builds a fresh `'passes'` decoder and re-feeds `full.subarray(0, cut)` from byte 0. Because each `decoder.push` decodes the whole prefix, total work is O(steps²) in bytes decoded (~50 full re-decodes of growing prefixes). For ref-sized images this is tolerable, but it dominates the post-encode metrics pass for larger streams.
+**Why deferred:** Pure perf; correctness is fine. A correct rewrite (single incremental decoder fed once, sampling fed-bytes at each progress event — like the natural-chunk loop already does) changes the probe's semantics (natural-chunk boundaries vs uniform % cut points) and needs measurement to confirm the win and that it still reports the *minimum* prefix. Runtime-only; not unit-testable in this harness (skill 5b).
+**Measurement command a human should run (browser/worker):** wire `probeMinBytesToFirstProgress` into `flipflopdom` against a real progressive JXL codestream and compare decoded-bytes + wall-time for (A) current per-cut re-feed vs (B) single incremental decoder; e.g. `flipflopdom` test feeding a 200KB–2MB progressive stream at the 50-step grid.
+
+### `web/jxl-decode-worker.js` (a) — extractEmbeddedJpegs per-byte JS scan (PERF, DEFER)
+**File:** `web/jxl-decode-worker.js` `extractEmbeddedJpegs` (L43-62).
+Two nested per-byte JS loops scan the whole container for SOI/EOI markers. Only runs for JXTC reconstruction containers, but is O(n) byte-at-a-time JS over potentially multi-MB buffers.
+**Why deferred:** Low-value perf; not trivial to speed up correctly (marker scan must stay byte-exact for FFD8FF / FFD9). Runtime-only (skill 5b).
+**Measurement command:** `flipflopdom` A/B the scan (current byte loop vs e.g. `indexOf`-on-typed-array marker search) over a real JXTC container in a worker.
+
+### `web/jxl-decode-worker.js` (b) — progressive header+partial but never 'final' (NO CHANGE)
+**File:** `web/jxl-decode-worker.js` `decodeProgressive` events loop (L196-219).
+The "never reaches final" case is **already guarded**: the events drain throws `new Error('No final JXL frame decoded')` when `!sawFinal` (L218), which propagates out of `decodeProgressive` and triggers the jsquash fallback in `onmessage` (L244-248). No additional safe local guard adds value without changing the fallback contract.
+**Disposition:** No change; existing guard is correct.
+
+### `web/jxl-byte-cutoff-probe.js` (a) — TRANSPORT_PROFILES fork vs jxl-byte-utils.js (DEFER, cross-file)
+**File:** `web/jxl-byte-cutoff-probe.js` L15-20 / `resolveTransportProfile` L127-139, vs `web/jxl-byte-utils.js` L3-23.
+The two `TRANSPORT_PROFILES` maps have **divergent shapes**: byte-utils adds a `name` field and renames the diagnostic preset key `'diagnostic'` → `'diagnostic-passes'`. The probe's own test (`jxl-byte-cutoff-probe.test.js` L107-110) asserts `Object.keys(TRANSPORT_PROFILES).sort() === ['3g','diagnostic','lte','wifi']` — i.e. it requires the key `'diagnostic'`, which byte-utils does NOT export. Importing byte-utils' map would break this test.
+**Why deferred:** Reconciling cannot be done within this file alone — it requires editing `jxl-byte-utils.js` (restoring a `'diagnostic'` alias / aligning shapes) and/or updating the test, both cross-file. Out of scope per fixer rules (cross-file → DEFER).
+**Recommended fix:** Decide the canonical shape (likely byte-utils with `name`), add a `'diagnostic'` alias key there, then have the probe `import { TRANSPORT_PROFILES, resolveTransportProfile } from './jxl-byte-utils.js'` and update the probe test's diagnostic expectation. Single-owner module reconciliation.
+
+---
+
+## 000-structure-crop-sidecar-save-swallow (residual) — web/crop.js
+**Section:** 000  **File:** `web/crop.js` `triggerSidecarSave` (L312-320)  **Finding:** `structure-crop-sidecar-save-swallow`.
+**Applied (local/safe):** Replaced the empty `.catch(() => {})` with `console.error('[crop] sidecar save failed', ...)` so a failed persist after Apply is no longer entirely invisible.
+**Deferred (runtime/cross-file):** A genuine *user-visible* signal (toast/inline error / re-enable of the Apply affordance) requires a UI notification facility that lives outside crop.js (e.g. a shared toast helper / panels.js). Surfacing it would mean editing another file — deferred per one-writer/own-files rule.
+**Recommended:** On save rejection, route through the app's existing notification mechanism (whatever panels.js/main.js use) to tell the user the crop/subject edits were NOT persisted, and optionally keep the editor open.
+
+## 000-structure-crop-subjectthumb-async-unmount (residual) — web/crop.js
+**Section:** 000  **File:** `web/crop.js` `renderSubjectThumb` (L730-775) + call site (L687-692).  **Finding:** `structure-crop-subjectthumb-async-unmount`.
+**Applied (local/safe):** (a) Added `if (!parentCard.isConnected) return;` after the unabortable `await window.decodeFullJxlFor(parentCard)` so we don't paint into a torn-down card. (b) Replaced the call-site `.catch(() => {})` with `console.error(...)` so a decode rejection no longer silently yields a blank thumbnail.
+**Deferred (runtime, browser-gated):** The rapid re-entry race — a decode resolving against a *freshly rebuilt* sibling set with the same `cardId` — is only observable against real WASM JXL decode + DOM teardown timing (skill 5b). A robust fix needs a per-render generation token / AbortController threaded through `decodeFullJxlFor`, which is owned elsewhere (main.js exposes `window.decodeFullJxlFor`). Cross-file + browser-verifiable → deferred.
+**Recommended:** Stamp `parentCard._subjectRenderToken = Symbol()` at rebuild, capture it before the await, and bail if it changed after the await; and/or make `decodeFullJxlFor` cancellable.
+
+## 000-structure-filepicker-bytes-in-idb (residual) — web/jxl-file-picker.js
+**Section:** 000  **File:** `web/jxl-file-picker.js` `saveLastFiles` (L51-78) / `loadLastFiles`.  **Finding:** `structure-filepicker-bytes-in-idb`.
+**Applied (local/safe):** Added a `MAX_PERSIST_BYTES` (32 MB) per-selection budget: files within budget persist `bytes`, the rest store metadata only; `loadLastFiles` filters out byte-less records. This bounds per-key growth (the unbounded multi-MB-RAW accumulation in the finding).
+**Deferred (runtime, browser-gated):** True *eviction* across keys / global IDB quota management (LRU over the whole store, `QuotaExceededError` recovery, reacting to `navigator.storage.estimate()`) needs real IndexedDB + storage-quota behavior to verify (skill 5b), and the 32 MB threshold is a heuristic without measurement. Left as a single-selection cap only.
+**Recommended:** Add cross-key LRU eviction keyed by `lastUsed`, handle `QuotaExceededError` on `store.put` by dropping oldest keys, and consider a configurable budget.
+
+---
+
+## 000-structure-compare-race-cancel-inflight (residual) — web/jxl-compare.js
+**Section:** 000  **File:** `web/jxl-compare.js` `runFormatRaceAtSize` (L193-262).  **Finding:** `structure-compare-race-cancel-inflight`.
+**Applied (local/safe):** Added two within-file `thisRunId !== runId` stale-run guards — one at function entry (before the heavy downscale) and one after the downscale (before the first encode) — so a superseded run bails before starting heavy work. The post-await checks after each codec already existed.
+**Deferred (cross-file):** Truly *aborting* the in-flight `encodeAsJxl` / `decodeJxl` / `encodeViaToBlob` / `decodeNative` calls needs an `AbortSignal` threaded into those helpers (and into the session decode path / `toBlob` / `createImageBitmap`, which live in other modules). Per the one-file rule this is deferred. The same unabortable-codec posture remains for the in-flight cell in `web/jxl-encode-space.js` (`runSweep`) and the in-flight region/full decodes in `web/jxl-crop-benchmark.js` (`decodeTileRegion` / `decodeContainerRegion` / `decodeFullThenCrop`); both got within-file post-await `signal.aborted` re-checks that discard the stale result, but the running op itself cannot be interrupted without signal-threading into the decode helpers.
+**Recommended:** Thread a shared `AbortSignal` from the run/sweep controller through the encode/decode helpers; for browser codecs (`toBlob`/`createImageBitmap`) wrap in a cancellable promise that rejects on abort.
+
+## ADR DRAFT from task 000-structure-benchmark-results-map-per-metric
+- Topic: benchmarkResults is six parallel per-metric Maps all keyed by one shared composite string (AoS→SoA layout)
+- File: web/jxl-benchmark.js:327-334
+- ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/benchmark-results-aos-to-soa.md
+- Recommends: Collapse the six per-metric Maps into one Map<compositeKey, ResultRecord> so each tuple is addressed/keyed once instead of six times (flipflop-gated if claimed as perf).
+- Reversible: yes
+
+## ADR DRAFT from task 000-structure-benchmark-downscale-rgb-double-alloc
+- Topic: downscaleRgbCanvas fallback allocates a full RGBA expansion in and an RGB contraction out around the canvas (two full-frame copies)
+- File: web/jxl-benchmark.js:905-924
+- ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/benchmark-downscale-rgb-double-alloc.md
+- Recommends: Reuse scratch buffers or use createImageBitmap resize to drop the RGB↔RGBA bridge copies on the WASM-absent fallback path (flipflopdom-gated, output parity).
+- Reversible: partial
+
+## ADR DRAFT from task 000-hacker-xyb-sqrt-recompute
+- Topic: computeButteraugliRegion recomputes the s=0 reference-Y mask box-blur twice per call (max-error pass + multi-scale s=0)
+- File: web/jxl-butteraugli.js:334-390 (dup blur at :369 vs :309)
+- ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/butteraugli-region-redundant-mask-blur.md
+- Recommends: Pass the precomputed full-scale mask into _multiScaleScore's s=0 branch to remove one separable box-blur (flipflop-gated, score/maxError/location parity).
+- Reversible: yes
+
+## ADR DRAFT from task 000-hacker-probefullbuf
+- Topic: probeMinBytesToFirstProgress re-creates a fresh decoder and re-decodes a growing prefix from byte 0 per cut point (O(steps²) decode work)
+- File: web/jxl-correlation-worker.js:32-80 (related re-feed at :171-231)
+- ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/correlation-worker-probe-quadratic-redecode.md
+- Recommends: Fold the probe into a single incremental decode (reuse the existing first-event byte count) instead of re-decoding from 0 per cut (flipflopdom-gated, minBytes parity; verify decoder continuation semantics).
+- Reversible: partial
+
+## ADR DRAFT from task 000-hacker-jpegscan
+- Topic: extractEmbeddedJpegs does a per-byte JS scan over the whole container to find SOI/EOI markers on the decode hot path
+- File: web/jxl-decode-worker.js:43-62
+- ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/decodeworker-jpegscan-perbyte.md
+- Recommends: Replace hand loops with indexOf/lastIndexOf (memchr) marker search, preserving exact blob output (flipflop-gated, byte-identical blobs over a JXTC corpus).
+- Reversible: yes
+
+## ADR DRAFT from task 000-structure-decodeworker-finalcopy
+- Topic: final progressive frame is fully copied so jxl_progress and jxl_decoded each transfer (detach) their own buffer
+- File: web/jxl-decode-worker.js:187-193
+- ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/decodeworker-final-frame-double-buffer.md
+- Recommends: Determine whether both consumers truly transfer; if not, send one transferred + one structured-cloned to drop the explicit copy — else document the copy as the intentional minimum for two detaching consumers (flipflopdom-gated, event+pixel parity). May be intentional.
+- Reversible: partial
+
+## ADR DRAFT from task 000-hacker-recolor-querysel
+- Topic: recolorMatrixCells re-scans the whole cache and does an attribute querySelector per cell on every cell completion (O(N²) DOM lookups)
+- File: web/jxl-encode-space.js:575-592
+- ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/encodespace-recolor-quadratic-dom.md
+- Recommends: Cache cell element refs + maintain min/max incrementally so the common completion is O(1) and full recolor (cached refs, no querySelector) runs only on a new extreme (flipflopdom-gated, final color parity).
+- Reversible: yes
+
+## ADR DRAFT from task 000-hacker-presetdummybuf
+- Topic: createProgressiveWebPreset allocates two 1MB dummy buffers + a cursor loop to reproduce a static power-of-2 cutoff sequence
+- File: web/jxl-progressive-best-preset.js:97-119
+- ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/bestpreset-dummy-buffer-simulation.md
+- Recommends: Replace the simulation with the closed-form `for (t=1024; t<500K; t*=2) push(t)` and drop the 2MB throwaway allocations (cutoffs element-identical). Note: a sibling direct_fix may already remove this; ADR captures the why-closed-form-is-correct rationale.
+- Reversible: yes

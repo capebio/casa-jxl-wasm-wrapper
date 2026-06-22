@@ -22,6 +22,15 @@ test('avif by ftyp brand', () => {
   expect(detectFormat(avif, 'x.avif')).toBe('sdr');
 });
 
+test('webp fourCC matches full WEBP, not partial WE', () => {
+  // RIFF....WEBP -> sdr
+  const webp = bytes(0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50);
+  expect(detectFormat(webp, 'x.webp')).toBe('sdr');
+  // RIFF....WE.. (e.g. a non-WebP RIFF whose byte9 is 'E') must NOT classify as sdr
+  const notWebp = bytes(0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x00, 0x00);
+  expect(detectFormat(notWebp, 'x.bin')).toBe('unknown');
+});
+
 test('unknown', () => {
   expect(detectFormat(bytes(1, 2, 3, 4), 'x.bin')).toBe('unknown');
 });
