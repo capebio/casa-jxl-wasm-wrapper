@@ -2215,3 +2215,28 @@ so.
 - Reason for deferral: No clear/trivial local fix. Repo-wide grep confirms `_internal` has NO consumer anywhere (no test, no other module reads it) — the empty stub breaks nothing, so there is no test-gated reason to populate it. Deciding what to expose (and resolving the dead ditherFloatToU8 / dead-redraw question it points at) is entangled with the deferred WIP cluster: duplicate redraw()/clampPan() declarations, the dead inline WebGL render path, and the loadLevel/tiled-decode bypass. Populating _internal in isolation would be guesswork and could mask the real structural issue.
 - Suggested resolution: handle together with the redraw/clampPan-dup + dead-GL-path writeup (003-correctness-plb-dup-redraw, 003-structure-plb-redraw-dup, 003-structure-plb-ignores-tiled, 003-structure-two-gl-pipelines) so the live 16-bit path is settled first; then expose the genuinely-live internals (or drop _internal entirely).
 - Reversible: yes
+
+## ADR DRAFT from task 006-hacker-paint-clamped-copy
+- Topic: paintCanvas copies the whole rgba8 buffer into a fresh Uint8ClampedArray per painted/upgraded tile (web/pyramid-gallery/grid-controller.js:69) on the scroll/IO paint hot path; grid path is always rgba8 + putImageData consumes synchronously, so the buffer can be wrapped zero-copy
+- File: .epiccodereview/20260622T113415Z/sections/006/adr_draft/grid-paintcanvas-zerocopy-imagedata.md
+- Recommends: `new Uint8ClampedArray(decoded.pixels.buffer, byteOffset, w*h*4)` zero-copy view behind a `byteLength === w*h*4` guard (falls back to copy for non-rgba8/rgba16 stride-8); removes one full-frame alloc+memcpy per paint. PERF → gated on flipflopdom (browser/canvas): ≥5% speed + byte-identical read-back pixel parity. Pairs with the rgba16-tiled bpp guard (006-correctness-tiled-region-bpp-mismatch).
+- Reversible: yes
+
+## ADR DRAFT from task 006-correctness-manifest-cache-poisoning-validate-order
+- Topic: getManifest caches only the resolved manifest (set after fetch+json+validate), not the in-flight fetch promise, so concurrent first-callers for the same imageId double-fetch and double-validate (web/pyramid-gallery/image-store.js:46-56)
+- File: .epiccodereview/20260622T113415Z/sections/006/adr_draft/image-store-getmanifest-inflight-dedup.md
+- Recommends: cache the in-flight promise (set before the first await) with evict-on-reject (`p.catch(() => manifestCache.delete(imageId))`) to preserve retry-after-failure; small low-risk dedup-cache addition, info-severity. Pairs with 006-correctness-getlevelbytes-cache-set-unawaited (same gap for level bytes) and 006-structure-manifestcache-unbounded.
+- Reversible: yes
+- UPDATE (006 fixer pass, 2026-06-22): IMPLEMENTED in image-store.js. getManifest now caches the in-flight promise (`manifestInflight` Map, evicted in `finally`) so concurrent first-callers share one fetch+validate; getLevelBytes got the mirrored `levelInflight` dedup. Done-result cache is now a bounded LRU (`MANIFEST_CACHE_MAX = 64`, evict-oldest in `manifestCacheSet`). ADR closed by the direct fix.
+
+## DEFERRED from task 006-correctness-worker-protocol-mismatch (pyramid-decode.js, CRITICAL)
+- Finding: the pooled tiled path in `decodePyramidLevel` (web/pyramid-gallery/pyramid-decode.js:13-23) wires `decodeTiledViewportPooled(... workerFactory: () => new Worker('../lightbox/tiled-decode-worker.js'))`, but the worker speaks a different message protocol than the pool that drives it — so the tiled viewport path is effectively dead / falls back.
+- Reason for deferral: this is the **pool-side confirmation of the already-documented tiled-decode-worker protocol mismatch** in Section 003 (see "## 003.B — web/lightbox/tiled-decode-worker.js (protocol mismatch → tiled pool is dead)", QUESTIONS.md ~L1944, and the root-cause summary at ~L1854). The actual fix lives in `web/lightbox/tiled-decode-worker.js` + the pool contract in `packages/jxl-pyramid/dist/tiled-decode-pool.js` — a cross-file feature-completion + browser-verified change, outside this fixer's two-file (pyramid-decode.js / image-store.js) local-fix scope. Section 006's local dropped-options defects (signal/format/priority/contenthash forwarding, return-shape alignment) were fixed in this pass; the protocol wiring itself is deferred to the Section 003 cluster.
+- Suggested resolution: complete it together with the Section 003 tiled cluster (003.B) — settle the worker↔pool message protocol there, then re-verify the now-options-forwarding tiled branch in pyramid-decode.js end-to-end in-browser (flipflopdom).
+- Reversible: yes
+
+## DEFERRED from task 006-structure-worker-contract (pyramid-decode.js)
+- Finding: the tiled decode delegates to an external worker pool whose message protocol/contract is unspecified at the `decodePyramidLevel` seam (web/pyramid-gallery/pyramid-decode.js:13-23).
+- Reason for deferral: same root cause as 006-correctness-worker-protocol-mismatch above and the Section 003 entry — the unspecified contract is the documented tiled-decode-worker↔pool mismatch (003.B, QUESTIONS.md ~L1944). Specifying/aligning the contract is a cross-file change in tiled-decode-worker.js + tiled-decode-pool.js, outside this two-file local scope. The local seam now at least forwards the same fields as the session branch (signal/format/priority/sourceKey) and returns the matching `{pixels,width,height}` shape.
+- Suggested resolution: as part of the Section 003 003.B fix, document the worker message protocol at the pool boundary; no further edit needed in pyramid-decode.js once the contract is settled.
+- Reversible: yes

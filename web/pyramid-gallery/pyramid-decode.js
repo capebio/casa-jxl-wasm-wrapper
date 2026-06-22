@@ -13,13 +13,21 @@ export async function decodePyramidLevel(ctx, bytes, opts) {
   if (opts.tiled) {
     if (!opts.region) throw new Error('tiled decode requires a viewport region');
     const { decodeTiledViewportPooled } = await import('../../packages/jxl-pyramid/dist/tiled-decode-pool.js');
-    return decodeTiledViewportPooled(bytes, opts.region, {
+    // Forward the same contract fields as the non-tiled session branch so the tiled path
+    // is cancellable (signal), format-correct (rgba8/rgba16), and dedupe/priority-aware.
+    const tiled = await decodeTiledViewportPooled(bytes, opts.region, {
       parallel: true,
+      format: opts.format ?? 'rgba8',
+      priority: opts.priority ?? 'visible',
+      sourceKey: opts.contenthash,
+      signal: opts.signal ?? undefined,
       workerFactory: () => new Worker(
         new URL('../lightbox/tiled-decode-worker.js', import.meta.url),
         { type: 'module' },
       ),
     });
+    // Align to the session branch shape ({ pixels, width, height }).
+    return { pixels: tiled.pixels, width: tiled.width, height: tiled.height };
   }
 
   const session = ctx.decode({
@@ -101,10 +109,18 @@ export async function decodePyramidRegion(bytes, opts) {
     }
   })();
 
-  await decoder.push(view);
-  await decoder.close();
-  await drain;
-  await decoder.dispose();
+  // dispose() must always run (handle leak otherwise); the drain rejection must always be
+  // awaited so push/close failures don't leave an unhandled rejection on the drain promise.
+  try {
+    await decoder.push(view);
+    await decoder.close();
+    await drain;
+  } finally {
+    // Swallow a late drain rejection here only to avoid an unhandledrejection; the original
+    // error (if any) still propagates from the awaited statements above.
+    drain.catch(() => {});
+    await decoder.dispose();
+  }
   if (!pixels) throw new Error('region decode produced no final frame');
   return { pixels, width, height };
 }
