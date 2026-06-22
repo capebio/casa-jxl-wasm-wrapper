@@ -1349,3 +1349,21 @@ defer the eviction to a microtask) if this path is ever enabled in production.
 - `as`-casts to reach `sessionId`/`metric`/`stage` on the protocol union — pervasive and
   deliberate for discriminated-union narrowing on the hot path.
 - `dist-test/` was NOT review-scoped (generated TS output of `src/`).
+
+---
+
+## EpicCodeReview 20260622T113415Z — deferred direct fixes (global/architecture)
+
+### Q (high, forked-pipeline, cross-file + build-gated) — multi-format detector not wired into the live worker
+**Finding:** `architecture-multiformat-not-wired-live` (`G-architecture-multiformat-not-wired-live`).
+**File:** `web/format-detect.js` (target) + `web/worker.js` (the real fix site).
+`web/format-detect.js` exports `detectFormat(bytes, name)` -> `'raw'|'jxl'|'sdr'|'tiff'|'exr'|'unknown'` and is imported only by `web/jxl-benchmark.js`. The live app worker (`web/worker.js:41-51`, `pickRawDecoderWithFlags`) re-implements its own magic-byte-only RAW sniffer (ORF/CR2/DNG, ORF fallback) and never imports the detector. They diverge on `.arw/.nef/.rw2/.raw` (extension-only in `format-detect.js`) and on EXR/TIFF/SDR.
+**Why deferred:** Wiring requires editing `web/worker.js` (out of single-file task scope) AND WASM multi-format support — `detectFormat` routes `tiff -> decode_tiff` / `exr -> decode_exr`, entry points the shipped raw-WASM does not export, so the routes would dead-end at runtime. Behavioral + cross-file + build-gated.
+**Recommended fix:** Make `format-detect.js` the single source of truth (add `pickRawDecoder(bytes,name)` reproducing the worker's magic verdicts), wire `worker.js` to call it behind a parity test, decide the unrecognized-RAW fallback policy, and enable `tiff/exr` only once the WASM exports them. See ADR draft `raw-magic-byte-classification-...` and `strategic-map-...`.
+
+### Q (high, missing-route, build-unverified) — lightbox full-decodes large tiled pyramid levels instead of pooled tiled decode
+**Finding:** `architecture-lightbox-no-tiled-decode` (`G-architecture-lightbox-no-tiled-decode`).
+**File:** `web/lightbox/pyramid-lightbox.js` `loadLevel` (L491-556).
+`loadLevel` always runs a single-pass scheduler decode (`ctx.decode({format, sourceKey, priority:'visible', emitEveryPass:false, progressionTarget:'final'})`, L500-508) and never inspects `entry.tiled`. Large tiled levels therefore fully decode rather than decoding only the viewport. The grid path routes correctly: `web/pyramid-gallery/pyramid-decode.js` `decodePyramidLevel(ctx, bytes, {tiled, region})` (L12-16) branches on `opts.tiled` and calls the pooled **`decodeTiledViewportPooled`** (dynamic import from `packages/jxl-pyramid/dist/tiled-decode-pool.js`), using the worker at `web/lightbox/tiled-decode-worker.js`.
+**Why deferred (build-unverified):** Behavioral fix exercised only by real WASM tiled decode in a real browser (worker/OPFS/canvas) — not unit-testable here (skill 5b). Also, the lightbox currently assumes `levelPixels` covers the whole level (`offscreen.width = levelInfo.w`, crossfade/pan/`reapplyToOffscreen` all full-level); switching to viewport-region pixels changes the offscreen/crossfade model and risks regressing the non-tiled path — beyond a minimal local edit.
+**Recommended fix:** When `entry.tiled`, compute the current viewport region from `zoom`/pan against `entry.w`/`entry.h` and route through `decodePyramidLevel(ctx, bytes, {tiled:true, region, format, priority:'visible'})` (i.e. the pooled `decodeTiledViewportPooled`), adapting the offscreen/crossfade to region-sized pixels; fall back to the existing single-pass decode when not tiled. Verify visually on a large tiled pyramid level. See ADR/strategic-map context.

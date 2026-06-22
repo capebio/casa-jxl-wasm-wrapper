@@ -13,13 +13,14 @@ export function getContext() {
             _ctx = createBrowserContext();
         } catch (err) {
             console.error('[jxl-browser-context] Failed to create JxlContext:', err);
-            // No-op context so callers don't hard-crash on import map misconfiguration.
-            _ctx = {
-                decode() { throw new Error('[jxl-browser-context] Context unavailable'); },
-                encode() { throw new Error('[jxl-browser-context] Context unavailable'); },
-                capabilities() { return {}; },
-                async shutdown() {},
-            };
+            // Surface the real failure immediately rather than installing a no-op
+            // stub that defers it to first decode/encode with a generic message
+            // (and whose capabilities() === {} reads as "feature absent"). Leave
+            // _ctx null so a later call can retry once the misconfiguration is fixed.
+            throw new Error(
+                '[jxl-browser-context] Failed to create JxlContext: ' + (err?.message ?? String(err)),
+                { cause: err },
+            );
         }
     }
     return _ctx;
