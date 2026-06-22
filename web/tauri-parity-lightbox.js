@@ -204,7 +204,9 @@ export function createTauriParityLightbox(opts) {
       const level = await pick16Level(id);
       if (!level) return null;
       const ch = level.contenthash;
-      const cached = state.rgb16Lru.get(ch);
+      // Single LRU key scheme: `${id}:${suffix}` (here suffix = contenthash).
+      const key = `${id}:${ch}`;
+      const cached = state.rgb16Lru.get(key);
       if (cached) return cached;
       const buf = await invoke('decode_jxl_level_for_id', {
         id,
@@ -212,21 +214,29 @@ export function createTauriParityLightbox(opts) {
         format: 'rgba16',
       });
       const { w, h, body } = parsePackedResponse(buf);
-      const rec = { key: `${id}:${ch}`, id, w, h, body, level };
-      state.rgb16Lru.set(ch, rec);
+      const rec = { key, id, w, h, body, level };
+      state.rgb16Lru.set(key, rec);
       return rec;
     }
 
-    const idKey = String(id);
-    let cached = state.rgb16Lru.get(idKey);
-    if (cached && cached.id === id) return cached;
+    // Same `${id}:${suffix}` key scheme; the full-res (non-pyramid) record uses
+    // a fixed suffix so it never collides with the per-contenthash records.
+    const key = `${id}:full`;
+    const cached = state.rgb16Lru.get(key);
+    if (cached) return cached;
     const buf = await invoke('get_rgb16_for_id', { id });
-    const view = new DataView(buf instanceof ArrayBuffer ? buf : buf);
-    const w = view.getUint16(0, true);
-    const h = view.getUint16(2, true);
-    const body = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf, 4);
-    const rec = { key: idKey, id, w, h, body, level: null };
-    state.rgb16Lru.set(idKey, rec);
+    // invoke() may return either an ArrayBuffer or a typed array; normalize to a
+    // Uint8Array view first (respecting any byteOffset/byteLength), matching the
+    // sibling parsePackedResponse normalizer.
+    const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    if (u8.length < 4) {
+      throw new Error(`fetchRgb16: buffer too short (${u8.length} bytes, need >= 4)`);
+    }
+    const w = u8[0] | (u8[1] << 8);
+    const h = u8[2] | (u8[3] << 8);
+    const body = u8.subarray(4);
+    const rec = { key, id, w, h, body, level: null };
+    state.rgb16Lru.set(key, rec);
     return rec;
   }
 

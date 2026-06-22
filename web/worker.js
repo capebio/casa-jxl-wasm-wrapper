@@ -215,7 +215,8 @@ self.addEventListener('message', async (ev) => {
         await ensureWasm();
 
         const pT0 = performance.now();
-        const look = options.look || {};
+        const opts = options || {};
+        const look = opts.look || {};
         // OUT_NO_ORIENT: skip apply_orientation on the full RGB8 — JXL records
         // rotation as metadata, so pixels stay sensor-native and we avoid the
         // 60–200 MB intermediate buffer + cache-hostile transpose at encode prep.
@@ -233,8 +234,8 @@ self.addEventListener('message', async (ev) => {
             look.vibrance   ?? 0,
             look.temp       ?? 0,
             look.tint       ?? 0,
-            Number.isFinite(options.wbR) ? options.wbR : NaN,
-            Number.isFinite(options.wbB) ? options.wbB : NaN,
+            Number.isFinite(opts.wbR) ? opts.wbR : NaN,
+            Number.isFinite(opts.wbB) ? opts.wbB : NaN,
             look.texture ?? 0,
             look.clarity ?? 0,
         );
@@ -313,7 +314,7 @@ self.addEventListener('message', async (ev) => {
         // JXL records orientation as metadata — no pixel rotation needed for the
         // EXIF tag. User rotation (90° turns from the UI) composes into the
         // same tag, so userTurns also never triggers a CPU rotate.
-        const userTurns = Math.round(((options.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
+        const userTurns = Math.round(((opts.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
         const encodeOrientation = composeOrientation(ori, userTurns);
         let fullRgb = result.take_rgb();
 
@@ -322,9 +323,9 @@ self.addEventListener('message', async (ev) => {
         fullRgb = null; // allow GC
         self.postMessage(
             { id, type: 'encode_request', pixels: rgbBuf, format: 'rgb8', width: w, height: h,
-              quality: options.lossless ? 100 : options.quality,
-              effort: options.effort ?? 3,
-              lossless: !!options.lossless,
+              quality: opts.lossless ? 100 : opts.quality,
+              effort: opts.effort ?? 3,
+              lossless: !!opts.lossless,
               orientation: encodeOrientation },
             [rgbBuf],
         );

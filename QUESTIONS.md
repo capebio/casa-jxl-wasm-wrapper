@@ -1535,3 +1535,305 @@ The two `TRANSPORT_PROFILES` maps have **divergent shapes**: byte-utils adds a `
 - `bun test web/jxl-progressive-gallery.test.js` reports 9 pass / 1 fail on a CLEAN baseline (verified via git stash) — NOT introduced by this run's edits.
 - The failing test asserts stale source strings the current file no longer contains: `progressionTarget: 'final'`, `emitEveryPass: true`, `const chosenDetail = getGalleryProgressiveDetail();`, `progressiveDetail: chosenDetail === 'auto' ? null : chosenDetail`. The file now derives decode opts from `basePreset.decode` + `getGalleryProgressiveDetail()`.
 - Action: update the test to match the current preset-based source (or remove the brittle source-string assertions). Not a code bug.
+
+---
+
+## Section 002 — web/main.js (run `epiccodereview/20260622T113415Z`)
+
+Two correct-by-construction fixes were applied directly (varianceBench div-by-zero
+guard; `.time` querySelector null-guard). The items below are architectural /
+cross-cutting and per the no-go list (do not restructure public state/APIs) are
+deferred as design questions rather than unilateral edits.
+
+### QUESTION: startBatchTauri fires loadSidecar() without awaiting before queueing encodes
+- `web/main.js` ~3697-3787. The card-creation loop kicks off `loadSidecar(path).then(...)`
+  fire-and-forget, then a separate `Promise.allSettled` encode loop runs independently.
+  Crop/subject/look sidecar metadata can land **after** `onFileDoneTauri`, so any
+  done-time consumer that assumes `card._crop/_subjects`/look is present can race.
+- Why deferred: a correct fix must gate encode dispatch on sidecar load+apply, which
+  re-sequences batch timing (first-pixel latency, progress UI) — a behavioral change
+  needing in-browser verification, not a local correct-by-construction edit.
+- Decision needed: should sidecar load block the per-file encode, or should
+  `onFileDoneTauri` defensively re-read/merge sidecar state when it arrives late?
+
+### QUESTION: WorkerPool task lifecycle is ad-hoc mutable flags with no cancellation
+- `web/main.js` ~668-778. `submit`/`_releaseWorker`/`_release` manage tasks via mutable
+  fields (`t.released`, `workerForTask` map, `worker._taskIds` Set) with no state enum,
+  no `cancel()` path, and no propagation of UI-level cancel (lightbox close / card delete)
+  into the worker. Re-submitting a card does not first clear its prior taskId; ordering of
+  `workerForTask` delete vs `_releaseWorker` is fragile under late `done`/`error_live`.
+- Why deferred: redesigning the task lifecycle into an explicit FSM + cancel propagation
+  changes the public WorkerPool API and shared state shape — out of scope for a local fix.
+- Decision needed: introduce an explicit task-state enum + `cancel(id)` that tears down
+  worker assignment and propagates from lightbox-close / card-delete?
+
+### QUESTION: _jxlDecodeCallbacks listener arrays grow without per-listener removal
+- `web/main.js` ~561-626, ~814-829. `_jxlDecodeCallbacks: Map<decodeId,{url,listeners:[]}>`;
+  dedupe pushes a new listener onto an existing entry and the entry is dropped only on the
+  terminal message. There is no API to remove a single listener when its card unloads or
+  its lightbox closes, so a `guard()`-rejected listener lingers for the entry's lifetime.
+- Why deferred: adding an unsubscribe path touches the decode dedupe protocol / public
+  listener contract — cross-cutting, not a local guard.
+- Decision needed: add a per-listener unsubscribe (returned from the register call) tied to
+  card/lightbox teardown?
+
+### QUESTION: Lightbox live-update in-flight flag + pending decodes not cancelled on close
+- `web/main.js` ~911-967, `closeLightbox` ~2757. `closeLightbox` sets `lightboxIndex=-1`
+  but does not reset `liveInFlight`/`livePendingLook` nor cancel queued JXL decodes; pending
+  callbacks only `guard()`-filter at the consumer, so the worker still does (wasted) work and
+  a stale `liveInFlight` can defeat debounce on the next open.
+- Why deferred: correct cancellation must propagate into the scheduler (not filter at the
+  consumer) — a state-machine/protocol change requiring browser verification.
+- Decision needed: have `closeLightbox` reset live-update state and cancel in-flight/queued
+  live decodes at the scheduler?
+
+### QUESTION: Per-file state stored as ~30 dynamically-added _-prefixed fields on the card DOM element
+- `web/main.js` ~1013-1091, ~1666-1672, plus writes from `tauri-pyramid-client.js`,
+  `tauri-parity-lightbox.js`, reads from `panels.js`. The card `HTMLElement` doubles as the
+  untyped per-file model (`_file`, `_taskId`, `_lightbox`, `_thumb*`, `_wb`, `_crop`,
+  `_subjects`, `_tauriResult`, `_sensorW/H`, …) with no schema and DOM lifetime == model lifetime.
+- Why deferred: extracting a typed per-file model and migrating all cross-file readers is a
+  large refactor that changes the shared data contract.
+- Decision needed: introduce a `FileState` record keyed off the card (e.g. a WeakMap or a
+  single `card._state` object) as the single source of truth?
+
+### QUESTION: card._lightbox is an untagged union across WASM / Tauri / embedded-JPEG modes
+- `web/main.js` ~1666-1672 (WASM `{rgb,w,h,nativeW,nativeH,orientation}`) vs ~3620-3626
+  (Tauri `{rgb:null,w,h,id,fetching}`). Consumers branch on `_lightbox.rgb` truthiness
+  (e.g. ~2313, ~2667) rather than a variant tag, so the Tauri lazy-fetch path is
+  distinguished only by a null-pixel check and is easy to mis-branch.
+- Why deferred: adding a discriminant and gating every consumer on it is a state-shape change
+  across the lightbox paint paths (`sourceMode` exists separately and could seed it).
+- Decision needed: add a `kind` discriminant to `_lightbox` and switch consumers to it?
+
+### QUESTION: cardByFilename keyed on basename-only collides across folders
+- `web/main.js` ~3536-3541 (used ~3698/3702/3717/3734/3788). Tauri-mode card index keys on
+  `path.split(/[\\/]/).pop()` (basename), so same-named files in different directories collide
+  and overwrite. It is a second, mode-specific index alongside `cardByTaskId` (~974); neither
+  is cleaned when a card is removed from the DOM (stale-entry leak).
+- Why deferred: switching the key to the full path (and unifying with `cardByTaskId`) changes
+  the lookup contract used by multiple Tauri handlers — cross-cutting, not a local guard.
+- Decision needed: key `cardByFilename` on the full path, and add removal on card teardown for
+  both indices?
+
+### QUESTION: peepCache stores decoded RGBA + JXL bytes per photo × per quality tier with no eviction
+- `web/main.js` ~4391-4410, fills at ~4407/4481-4487, cleared only on exit (~4620). Over a
+  session of N photos × ~11 PEEP_PRIORITY tiers the retained decoded-RGBA can reach hundreds
+  of MB. No LRU/size bound (Tauri-only benchmark/diagnostic feature, so session-bounded).
+- Why deferred: adding eviction requires choosing a bound/policy and threading it through the
+  pixel-peep flow — a design choice, not a correct-by-construction edit.
+- Decision needed: add an LRU or byte-budget cap to `peepCache` (and drop decoded frames once
+  their tier is no longer on screen)?
+
+## EpicCodeReview 20260622T113415Z — section 002 (web/pyramid-gallery*.js) deferrals
+
+### QUESTION: web/pyramid-gallery-grid.js is dead/broken — delete or revive?
+- `web/pyramid-gallery-grid.js` is loaded as the SOLE `<script type="module">` on
+  `web/pyramid-gallery-grid.html:25`. It **throws ReferenceError at module-evaluation time**:
+  line 333 `const origLoadLb = loadIndexAndSeed;` reads an undeclared/unimported binding
+  (`loadIndexAndSeed` is neither imported nor declared in the file), so the whole module fails
+  to load before any interaction. Its body (lines 22-330: changeZoom/clampPan/
+  maybeAutoUpgradeLevel/loadLightboxLevel/openLightbox/prefetchNeighbors/closeLightbox) is the
+  OLD inline M2 lightbox already extracted into `web/lightbox/pyramid-lightbox.js` (header note
+  line 20: "old duplicate M2 lightbox code removed - see extracted pyramid-lightbox.js"). It
+  references ~14 never-declared symbols (`ctx`, `lbZoom`, `lbPanX/Y`, `lbViewW/H`, `lbLevelInfo`,
+  `lightboxItem`, `getManifest`, `getLevelBytes`, `lbLRUGet/Set`, `items`, `orderedIds`,
+  `getPyramidLightbox`, `log`, `chooseLevelForTarget`, `loadIndexAndSeed`).
+- On the "3-arg chooseLevelForTarget" sub-finding: the 3-arg signature `(levels, currentSize,
+  targetLong)` is the **intended** one (matches `pyramid-gallery-grid.test.js:6-17` and the live
+  `web/lightbox/pyramid-lightbox.js` injected helper used at lines 432/485/657/734). The 2-arg
+  `packages/jxl-pyramid/dist/choose-level.js` is a *different* function used by other modules.
+  So there is no "fix to 2 args"; the only real defect is the dead/broken module itself.
+- The working grid + lightbox today are `web/pyramid-gallery/grid-controller.js` +
+  `web/pyramid-gallery/pyramid-gallery.js` + `web/lightbox/pyramid-lightbox.js`.
+- Why deferred: a clean local fix is not possible — either **delete** the file (deletion is on
+  the no-go list, so a human must approve) or **revive** it (import/declare ~14 symbols and
+  reconcile against the already-extracted lightbox = cross-file architectural revival).
+- Decision needed: delete `web/pyramid-gallery-grid.js` (+ its `.html` + test if the demo page is
+  retired), or revive it by wiring the extracted `createPyramidLightbox` and removing the dead
+  inline body?
+
+### QUESTION (ADR): web/pyramid-gallery.js is a third forked lightbox + window-coupled wiring
+- `web/pyramid-gallery.js:296-649` embeds a self-contained M2 lightbox on
+  `./pyramid-filter-engine.js` (`createFilterEngine`), duplicating `tauri-parity-lightbox.js`
+  which implements the same feature set on a DIFFERENT engine (`./lightbox/filter-engine.js`:
+  `buildColorMatrix`/`applyColorMatrixInPlace`/`applyToneMapInPlace`). `pyramid-filter-engine.js`
+  (lines 51-53) admits its matrices are "photographic approximations ... Real CasaBio matrices
+  would be bit-identical port", so the two engines render the same preset/slider differently.
+  (A third look vocabulary also lives in `panels.js`.) The grid->lightbox wiring is via window
+  globals + `setTimeout(800)` + basename-string id recovery (`~631-648`).
+- Why deferred: design fork — unifying onto one filter engine / one lightbox and one color-math
+  source of truth is an architecture decision spanning multiple files, not a safe unilateral edit.
+- Decision needed (ADR): which engine/lightbox is canonical (tauri-parity vs pyramid-gallery), and
+  collapse the other? Resolve the panels.js look vocabulary into the same model.
+
+### QUESTION (ADR/perf): renderLightboxAdjusted re-filters full image + allocs temp canvas per frame
+- `web/pyramid-gallery.js:409-440` (`renderLightboxAdjusted`) re-runs the full-image filter and
+  allocates a temp canvas on every pan/zoom/slider tick instead of caching the adjusted full-res
+  buffer and only re-filtering when the look changes (pan/zoom should just re-blit).
+- Why deferred: perf change requiring benchmark evidence (CLAUDE.md). Cost is real-canvas
+  paint/alloc — must be measured with **flipflopdom** (browser harness), not Node.
+- Decision needed: cache the adjusted full-res canvas; re-filter only on look change; pan/zoom
+  re-draw from cache. Validate the win with flipflopdom before applying.
+
+## EpicCodeReview 20260622T113415Z — section 002 (web/worker.js) deferrals
+
+These worker.js findings were intentionally deferred by the fixer (cross-file /
+WASM-runtime / branch-intent — not safe unilateral local edits). The local
+`002-correctness-worker-options-undefined` null-guard WAS applied.
+
+### QUESTION: pickRawDecoderWithFlags misroutes non-ORF/CR2/DNG buffers to the ORF decoder
+- `web/worker.js` ~41-51. Recognizes only Olympus ORF (`IIR`), Canon CR2 (`II*\0`+`CR`@8),
+  and TIFF-like (`II*\0`/`MM..*` → DNG); the final `return process_orf_with_flags` fallback
+  feeds every other input (Sony ARW / Nikon NEF / Panasonic RW2 land on DNG; non-TIFF, EXR,
+  JPEG land on ORF) to the Olympus decoder → garbage/throw. No allowlist/reject.
+- Why deferred: this is the open work of the `feat/multi-format-ingest` branch — a correct fix
+  needs WASM multi-format decode support + a real format-detect/dispatch layer wired in. Cannot
+  be fixed correctly inside worker.js alone.
+- Decision needed: which formats does the WASM build actually support now, and should unknown
+  magic bytes hard-error rather than silently route to ORF?
+
+### QUESTION: worker inbound/outbound protocol is untyped string tags with silent fall-through
+- `web/worker.js` ~148-213. Dispatch on `ev.data.type` string tags; unknown types ignored
+  silently; `ev.data` is not validated as an object before dereference.
+- Why deferred: introducing a typed/validated message protocol is a cross-file contract change
+  shared with main.js — not a local guard.
+- Decision needed: adopt a discriminated message schema (and validate `ev.data` shape) across
+  the worker ↔ main boundary?
+
+### QUESTION: RAW decode FFI invoked with 17 positional args (13 interchangeable look floats)
+- `web/worker.js` ~223-240. `pickRawDecoderWithFlags(bytes)(bytes, flags, exposureEv, contrast,
+  highlights, …, clarity)` — 13 same-typed float look params passed positionally; one
+  reordering silently corrupts the look with no diagnostic.
+- Why deferred: changing the ABI means editing the Rust/WASM export signature too — cross-file.
+- Decision needed: pass the look as a single struct/object (or a typed Float32Array with a
+  documented layout) across the FFI boundary?
+
+### QUESTION: take_rgb16_lb/thumb/take_rgb hand out views into WASM memory with implicit lifetime
+- `web/worker.js` ~281-321. Views aliased into WASM linear memory; their validity vs subsequent
+  WASM calls (which may grow/realloc the heap) is undocumented.
+- Why deferred: ownership/lifetime semantics are defined by the WASM module, not worker.js;
+  verifying/altering them is a WASM-runtime concern.
+- Decision needed: document (or copy-out) the ownership contract for take_* return views.
+
+### NOTE (info): thumbStateMap set-then-get is redundant but correct
+- `web/worker.js` ~285-291. `thumbStateMap.set(id, …)` immediately followed by
+  `thumbStateMap.get(id)`. Harmless; left as-is (info-severity, no behaviour change warranted).
+
+### QUESTION: exportRoi marshals 16-bit ROI via Array.from(adjusted) across the Tauri IPC boundary (perf → ADR)
+- `web/tauri-parity-lightbox.js` ~348-354 (post-fix line numbers). `encode_rgba16_jxl` is invoked
+  with `pixels: Array.from(adjusted)` where `adjusted` is a packed rgba16 `Uint8Array` of
+  `w*h*8` bytes. `Array.from` boxes every byte into a JS number[] and the IPC bridge then
+  serializes that array — a large transient alloc + slow serialize for multi-MP ROIs, where the
+  rest of the file passes ArrayBuffers/typed arrays directly.
+- Why deferred (this section): perf change requiring a measured ADR, and likely a coordinated
+  change to the Rust `encode_rgba16_jxl` command's argument type (cross-file). Not a local fix.
+- Decision needed: accept the typed array / ArrayBuffer directly on the Rust side and drop the
+  `Array.from` boxing; benchmark before/after.
+
+### QUESTION: packed [u16 w][u16 h][body] Tauri framing re-parsed in 4+ sites with no shared decoder
+- `web/tauri-parity-lightbox.js` (`parsePackedResponse`, `fetchRgb16`), `web/tauri-pyramid-client.js`
+  (`parseRgbResponse`), and `web/main.js` apply_look path all hand-decode the same positional
+  little-endian `[u16 w][u16 h][body]` framing. Length guards were added locally in the two tauri-*
+  files in this pass; `main.js` and the absence of a single shared decoder / magic+version byte
+  remain.
+- Why deferred: a true consolidation spans multiple files (incl. main.js) and would change a shared
+  helper signature — outside the local, single-file fix mandate for this section.
+- Decision needed: extract one `decodePackedRgb(buf)` decoder (with length validation + optional
+  version byte) and route all sites through it.
+
+### QUESTION: panels.js ↔ main.js contract is a large untyped window.* handshake
+- `web/panels.js` ~246-263. panels.js (plain script after main.js) talks to main.js exclusively via
+  `window.*` globals in both directions (reads `window.currentLook/lightboxCard/levelsState/...`,
+  exports `window.saveSidecar/loadSidecar/mergedLook/...`), each call defensively wrapped in
+  `typeof window.X === 'function'` so a renamed/absent global silently no-ops instead of erroring.
+- Why deferred (architectural → ADR): the seam spans panels.js and main.js and concerns module
+  boundary design, not a local correctness fix.
+- Decision needed: formalize the contract (ES module export/import, or a single typed namespace
+  object) so missing/renamed members fail loudly.
+
+### QUESTION: panels.js defines a third look/preset model disjoint from the two FilterEngines
+- `web/panels.js` ~442-470. `BUILTIN_PROFILES` + `PIPELINE_FILTERS` are `LOOK_PARAMS` deltas merged
+  additively in `window.mergedLook`, feeding the WASM LookRenderer slider pipeline — a third
+  adjustment vocabulary alongside `pyramid-filter-engine.js` (LightboxPreset matrices) and
+  `./lightbox/filter-engine.js` (buildColorMatrix), with no shared source of truth.
+- Why deferred (architectural → ADR): reconciling three look models is a cross-file design decision.
+- Decision needed: choose a single canonical look/preset representation and adapt the others to it.
+
+---
+
+## ADR DRAFTs — Section 002 (run 20260622T113415Z, adr_draft fixer)
+
+All paths relative to repo root. All are perf/structure opportunities; each requires the mandatory flipflop (node, CPU) or flipflopdom (browser/canvas/WASM) measurement — ≥5% gate plus output parity (bit-identical where a pure repacking) — before implementation.
+
+## ADR DRAFT from task 002-structure-orientation-transform-fivefold
+- Topic: EXIF orientation→canvas transform implemented 5× across two conventions in web/main.js (drawSensorWithOrientation/drawRotatedCanvas/drawOrientedThumb/drawBitmapOriented/drawJpegToTargetDims)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/orientation-transform-shared-helper.md
+- Recommends: Extract one pure orientationTransform(ori,w,h)->{outW,outH,apply(ctx)} helper and route all five call sites through it; parity-gate all 8 orientations (incl. mirrors 2/4/5/7).
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-rgbtorgbaarr-bytewise
+- Topic: rgbToRgbaArr (web/main.js:3528) writes RGBA byte-by-byte while sibling rgbToRgba (:1163) already uses 4×-fewer Uint32 stores
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/rgbtorgbaarr-uint32-packing.md
+- Recommends: Rewrite rgbToRgbaArr to the Uint32-packing idiom (one store/pixel); bit-identical, ≥5% on the paint path; make it the fast form the dedup ADR consolidates to.
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-base64-fromcharcode
+- Topic: JXL→base64 build via per-byte += String.fromCharCode over the whole buffer (web/main.js:1075-1076)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/jxl-base64-chunked-encode.md
+- Recommends: Chunked String.fromCharCode.apply (or TextDecoder('latin1')) then btoa; byte-identical base64, ≥5%, removes the large-encode UI stall.
+- Reversible: yes
+
+## ADR DRAFT from task 002-structure-rgb-to-rgba-triplicated
+- Topic: RGB→RGBA packing reimplemented 3× with divergent idioms (web/main.js:1163 rgbToRgba, :3528 rgbToRgbaArr, web/tauri-pyramid-client.js:34 rgbToRgbaArr)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/rgb-to-rgba-shared-helper.md
+- Recommends: Collapse to one shared Uint32 helper (optional w/h) in a shared module; route all three sites through it; bit-identical, dedup after the bytewise perf rewrite lands.
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-overlay-uint32-pack
+- Topic: Selection-overlay loop writes 4 bytes/pixel via imgData.data and recomputes i*4 (web/main.js:2078-2091)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/selection-overlay-uint32-pack.md
+- Recommends: Hoist imgData.data + Uint32 view, precompute the two packed RGBA32 constants, single u32 store per set pixel; bit-identical imgData, ≥5% on each mask update.
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-applylens-alloc
+- Topic: applyLens per-pixel transform chain allocates ~8 short-lived arrays/objects per pixel (web/perceptual-color.mjs:154-165)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/applylens-inline-scalar-pixel-loop.md
+- Recommends: Inline the matrix chain to scalar locals (no array literals), hoist loop-invariant sceneWhite/Lstats/sigma; math-preserving, bit-exact target (≤1 LSB if reassociated), ≥5%.
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-normlab-alloc-fuse
+- Topic: normalizedLabBuffer per-pixel alloc chain; sigma=1 makes von Kries factors loop-invariant (web/perceptual-color.mjs:170-178)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/normlab-fuse-vonkries-matrix.md
+- Recommends: Precompute one fused 3×3 (diag(gains)·xyzToLms·linToXyz), inline lmsToXyz/xyzToLab to scalars; bit-exact target (≤1 LSB), ≥5%.
+- Reversible: yes
+
+## ADR DRAFT from task 002-structure-perceptual-aos-and-sort
+- Topic: estimateSceneWhiteLms builds a per-pixel boxed index Array; module-wide AoS [r,g,b]/xyz/lms/lab arrays in hot loops (web/perceptual-color.mjs:76-105)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/perceptual-soa-and-index-array.md
+- Recommends: Drop the boxed index Array (threshold + SoA single-pass mean) and keep color in Float32 lanes through the hot loop; parity-gated, ≥5%. Pairs with scenewhite-fullsort (same loop).
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-scenewhite-fullsort
+- Topic: estimateSceneWhiteLms does a full O(n log n) sort of all pixels to find the top 2% brightest (web/perceptual-color.mjs:91-97)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/scenewhite-selection-not-fullsort.md
+- Recommends: Replace the sort with O(n) selection (quickselect threshold + single-pass mean), reuse the already-computed clipped mask; identical scene-white (≤1 LSB), ≥5% (grows with size).
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-selectbycolour-phi
+- Topic: selectByColour allocates a lab array per pixel and computes phi(log) per pixel against a fixed tolerance (web/perceptual-color.mjs:181-188)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/selectbycolour-precompute-threshold.md
+- Recommends: Precompute dThresh=cKnee*(exp(tol/cKnee)-1) once (phi is monotonic), compare squared distance on scalar locals; drops per-pixel log+sqrt+alloc; mask identical (≤1-px boundary), ≥5%.
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-lightnessstats-copy-sort
+- Topic: estimateLightnessStats copies the whole Float32Array via Array.from before sorting for two percentiles (web/perceptual-color.mjs:142-144)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/lightnessstats-typedarray-sort.md
+- Recommends: Sort Ls in place with Float32Array.sort() (numeric, no comparator); drops the boxed copy + comparator; bit-identical percentiles, ≥5%.
+- Reversible: yes
+
+## ADR DRAFT from task 002-hacker-export-arrayfrom-typedarray
+- Topic: exportRoi passes Array.from(adjusted) (boxed JS array) across the Tauri invoke boundary (web/tauri-parity-lightbox.js:348-354)
+- File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/exportroi-typedarray-ipc.md
+- Recommends: Pass the typed array (or its ArrayBuffer) directly + add a ROI size guard; identical JXL output, ≥5% marshalling/memory. Blocking unknown: confirm the Rust encode_rgba16_jxl command accepts a byte buffer.
+- Reversible: partial

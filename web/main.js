@@ -3802,7 +3802,11 @@ async function startBatchTauri(paths) {
             onFileDoneTauri(filename, result);
         } catch (err) {
             const card = cardByFilename.get(filename);
-            if (card) { card.classList.add('error'); card.querySelector('.time').textContent = String(err); }
+            if (card) {
+                card.classList.add('error');
+                const meta = card.querySelector('.time');
+                if (meta) meta.textContent = String(err);
+            }
         }
     }));
 
@@ -4150,8 +4154,8 @@ async function runVarianceBench() {
         matrix.push({ effort: e, ...r });
         const ok = r.perFile.filter(p => !p.error);
         const totalKB = ok.reduce((s, p) => s + p.jxl_bytes, 0) / 1024;
-        const avgKB   = totalKB / ok.length;
-        const avgEnc  = ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length;
+        const avgKB   = ok.length ? totalKB / ok.length : 0;
+        const avgEnc  = ok.length ? ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length : 0;
         pushStat(`[var] e=${e}  wall ${(r.wallMs/1000).toFixed(2)}s  enc ${avgEnc.toFixed(0)} ms/f  avg ${avgKB.toFixed(0)} KB  total ${totalKB.toFixed(0)} KB`);
     }
 

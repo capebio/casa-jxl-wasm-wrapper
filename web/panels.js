@@ -238,8 +238,21 @@ function initFilters() {
 // ── Sidecar ───────────────────────────────────────────────────────
 const SIDECAR_PREFIX = 'raw-sidecar:';
 
+// Short, stable FNV-1a hash of the full filename so two long paths that share
+// the same first 255 chars do not collide onto one localStorage key. Read and
+// write both go through this single function, so keying stays consistent.
+function sidecarHash(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(36);
+}
+
 function getSidecarKey(filename) {
-  return SIDECAR_PREFIX + filename.slice(0, 255);
+  // Truncated prefix stays human-readable; the full-name hash disambiguates collisions.
+  return SIDECAR_PREFIX + sidecarHash(filename) + ':' + filename.slice(0, 255);
 }
 
 function buildSidecarData(filename) {

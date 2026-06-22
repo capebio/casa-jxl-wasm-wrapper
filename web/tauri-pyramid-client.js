@@ -25,6 +25,13 @@ export function createTauriPyramidClient({ invoke, devicePixelRatio = 1 }) {
 
   function parseRgbResponse(buf) {
     const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    // Wire format is fixed: little-endian u16 width @0, u16 height @2, body @4.
+    // u16 caps each dimension at 65535; surface an explicit error instead of
+    // silently wrapping if a level ever exceeds that. (If the protocol grows a
+    // wider field, update both this reader and the Rust writer together.)
+    if (u8.length < 4) {
+      throw new Error(`parseRgbResponse: buffer too short (${u8.length} bytes, need >= 4)`);
+    }
     const w = u8[0] | (u8[1] << 8);
     const h = u8[2] | (u8[3] << 8);
     const rgb = u8.subarray(4);
@@ -62,7 +69,9 @@ export function createTauriPyramidClient({ invoke, devicePixelRatio = 1 }) {
     const buf = await invoke('decode_jxl_level_for_id', {
       id,
       contenthash,
-      format: format === 'rgba16' ? 'rgba16' : undefined,
+      // Explicit mapping so the wire value does not silently depend on the Rust
+      // default if that default ever changes.
+      format: format === 'rgba16' ? 'rgba16' : 'rgba8',
     });
     return parseRgbResponse(buf);
   }
