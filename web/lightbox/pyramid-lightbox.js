@@ -640,16 +640,6 @@ void main() {
     updateReadouts();
   }
 
-  function clampPan() { /* same as above, inlined for module */ 
-    if (!levelInfo || zoom <= 0) return;
-    const iw = (levelInfo.w || VIEW_W) * zoom;
-    const ih = (levelInfo.h || VIEW_H) * zoom;
-    const sl = 80;
-    const mx = Math.max(0, (iw - VIEW_W)/2 + sl);
-    const my = Math.max(0, (ih - VIEW_H)/2 + sl);
-    panX = Math.max(-mx, Math.min(mx, panX));
-    panY = Math.max(-my, Math.min(my, panY));
-  }
 
   async function upgradeLevel() {
     if (!item?.levels?.length || !levelInfo) return;
@@ -786,52 +776,6 @@ void main() {
   function close() {
     if (modal) modal.style.display = 'none';
     // keep LRU and last state for monotonicity on re-open
-  }
-
-  function redraw() { /* the redraw impl from before, using module state */ 
-    // (implementation identical to previous inline version, using the closed-over vars)
-    if (!canvas || !eng || !histC) return;
-    const c2d = canvas.getContext('2d', {alpha:true});
-    c2d.fillStyle = '#111';
-    c2d.fillRect(0,0,VIEW_W, VIEW_H);
-
-    if (offscreen && levelPixels) {
-      c2d.save();
-      c2d.translate(panX, panY);
-      c2d.scale(zoom, zoom);
-      if (crossfade > 0) c2d.globalAlpha = 1 - crossfade;
-      c2d.drawImage(offscreen, 0, 0);
-      c2d.restore();
-    }
-
-    // visible hist
-    const h2 = histC.getContext('2d');
-    h2.fillStyle = '#111'; h2.fillRect(0,0,256,70);
-    try {
-      const vd = c2d.getImageData(0,0,VIEW_W,VIEW_H);
-      const hs = eng.computeHistogram(vd.data);
-      const mv = Math.max(1, ...hs.l);
-      h2.strokeStyle = '#0f0'; h2.beginPath();
-      for (let x=0; x<256; x++) {
-        const y = (hs.l[x]/mv)*68;
-        if (x===0) h2.moveTo(x,69-y); else h2.lineTo(x,69-y);
-      }
-      h2.stroke();
-    } catch(e) {
-      if (offscreen) {
-        const o2 = offscreen.getContext('2d');
-        const id = o2.getImageData(0,0,offscreen.width,offscreen.height);
-        const hs = eng.computeHistogram(id.data);
-        const mv = Math.max(1, ...hs.l);
-        h2.strokeStyle = '#0f0'; h2.beginPath();
-        for (let x=0; x<256; x++) {
-          const y = (hs.l[x]/mv)*68;
-          if (x===0) h2.moveTo(x,69-y); else h2.lineTo(x,69-y);
-        }
-        h2.stroke();
-      }
-    }
-    updateReadouts();
   }
 
   // expose minimal API
