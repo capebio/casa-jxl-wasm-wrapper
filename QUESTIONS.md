@@ -1478,3 +1478,60 @@ The two `TRANSPORT_PROFILES` maps have **divergent shapes**: byte-utils adds a `
 - ADR: .epiccodereview/20260622T113415Z/sections/000/adr_draft/bestpreset-dummy-buffer-simulation.md
 - Recommends: Replace the simulation with the closed-form `for (t=1024; t<500K; t*=2) push(t)` and drop the 2MB throwaway allocations (cutoffs element-identical). Note: a sibling direct_fix may already remove this; ADR captures the why-closed-form-is-correct rationale.
 - Reversible: yes
+
+## ADR DRAFT from task 001-structure-coordinator-double-filter
+- Topic: getVisibleCount materializes the Map then filters twice and spreads Math.min/max over arrays (3 intermediate arrays per dirty recompute)
+- File: web/jxl-progressive-gallery-coordinator.js:15-46
+- ADR: .epiccodereview/20260622T113415Z/sections/001/adr_draft/coordinator-getvisiblecount-double-filter.md
+- Recommends: Replace with a single-pass accumulator (openCount/minOpen/maxClosed), preserving the exact output branches and dirty cache (flipflopdom-gated, >=5% with count parity).
+- Reversible: yes
+
+## ADR DRAFT from task 001-structure-session-encode-decode-decoupled
+- Topic: setBackend/setEncodeBackend/setDecodeBackend allow silently divergent encode vs decode backends; `backend` getter silently aliases the encode side
+- File: web/jxl-progressive-session.js:38-47
+- ADR: .epiccodereview/20260622T113415Z/sections/001/adr_draft/session-encode-decode-backend-invariant.md
+- Recommends: Make the encode/decode coupling explicit — document the split + clarify/rename the `backend` getter (no runtime "compatibility guard": JXL bytes are backend-agnostic, so no real incompatible pairing exists).
+- Reversible: partial
+
+## ADR DRAFT from task 001-structure-prog-card-mixed-concerns
+- Topic: card object conflates immutable DOM bindings with ~16 dynamically-attached per-run mutable fields; resetCard clears them manually (with redundant double-clears)
+- File: web/jxl-progressive.js:63-78 (reset 247-280)
+- ADR: .epiccodereview/20260622T113415Z/sections/001/adr_draft/progressive-card-state-separation.md
+- Recommends: Move transient fields into one RunState sub-object (freshRunState() factory) or a WeakMap keyed by card.el so reset is a single reassignment and "forgot to reset field X" is structurally impossible.
+- Reversible: yes
+
+## ADR DRAFT from task 001-structure-single-pass-pixels-retention
+- Topic: all pass RGBA buffers retained until post-decode thinning (64MB budget); ~220MB transient peak on long high-res runs (P7 memory budget)
+- File: web/jxl-single-progressive.js:1514-1532
+- ADR: .epiccodereview/20260622T113415Z/sections/001/adr_draft/single-progressive-pass-pixel-retention.md
+- Recommends: Stream stats-then-release per pass to cap peak live bytes, preserving the retained-pass set + per-pass frameHash/stats + all CSV/JSON/TOON/MD exports (flipflop/flipflopdom-gated, memory win with full export parity). Diagnostic-only path.
+- Reversible: partial
+
+## ADR DRAFT from task 001-hacker-dsnearest-colhoist
+- Topic: downsampleRgbaNearest recomputes the row-invariant source-X (div/floor/min) map for every output row
+- File: web/jxl-single-progressive.js:1792-1809
+- ADR: .epiccodereview/20260622T113415Z/sections/001/adr_draft/downsamplergbanearest-column-lut-hoist.md
+- Recommends: Precompute an Int32Array sxOff[targetWidth] (sx*4) once before the y loop; inner loop becomes table read + 4 copies (flipflopdom-gated, >=5%, MUST be byte-identical).
+- Reversible: yes
+
+## ADR DRAFT from task 001-structure-wrapper-buffer-helper-naming
+- Topic: exactBuffer and transferableBuffer are identical contiguous-copy helpers; neither transfers, so the "transferable" name is a false boundary signal
+- File: web/jxl-wrapper-lab.js:714-723
+- ADR: .epiccodereview/20260622T113415Z/sections/001/adr_draft/wrapper-buffer-helper-naming.md
+- Recommends: Collapse to one honestly-named helper (e.g. contiguousBuffer) keeping the ArrayBuffer fast-path; reserve "transferable" for sites that actually add the buffer to a postMessage transfer list.
+- Reversible: yes
+
+---
+
+## Section 001 — fixer deferrals (run 20260622T113415Z)
+
+### Frame-store unification (web/jxl-progressive-gallery.js)
+- Finding: 001-structure-coordinator-frames-sparse-vs-push
+- Two parallel frame stores: `framesByFile` (arrival-order push, read by lightbox as `frames[frameIndex]`) vs coordinator `entry.frames[frameIndex] =` (sparse). Consistent only by the per-file monotone `frameIndex` counter pushed in lockstep.
+- LANDED: a local defensive guard at the register site that logs a `[gallery] frame-store desync` error if push-position !== frameIndex (documents + enforces the invariant; no happy-path behavior change).
+- DEFERRED: collapsing to a single store. A real fix removes one of the two stores and routes the lightbox through the coordinator (or vice versa) — cross-file restructuring of jxl-progressive-gallery.js + jxl-progressive-gallery-coordinator.js + lightbox. Out of single-file fixer scope.
+
+### Pre-existing unrelated test failure (web/jxl-progressive-gallery.test.js)
+- `bun test web/jxl-progressive-gallery.test.js` reports 9 pass / 1 fail on a CLEAN baseline (verified via git stash) — NOT introduced by this run's edits.
+- The failing test asserts stale source strings the current file no longer contains: `progressionTarget: 'final'`, `emitEveryPass: true`, `const chosenDetail = getGalleryProgressiveDetail();`, `progressiveDetail: chosenDetail === 'auto' ? null : chosenDetail`. The file now derives decode opts from `basePreset.decode` + `getGalleryProgressiveDetail()`.
+- Action: update the test to match the current preset-based source (or remove the brittle source-string assertions). Not a code bug.

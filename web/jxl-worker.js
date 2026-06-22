@@ -95,14 +95,21 @@ self.onmessage = async ({ data }) => {
       chunked: false,
     });
 
-    encoder.pushPixels(new Uint8Array(rgba));
-    encoder.finish();
-
-    // Collect all chunks
+    // Collect all chunks. Start the chunks() drain in a separate task BEFORE
+    // pushing/finishing, then await pushPixels()/finish() — pushPixels() is async
+    // (see facade.ts EncoderImpl.pushPixels) and must be awaited so a push error
+    // surfaces here rather than only via chunks(). Matches the sibling encode call
+    // sites (e.g. encodeToProgressiveJxl in jxl-progressive-gallery.js).
     const jxlChunks = [];
-    for await (const chunk of encoder.chunks()) {
-      jxlChunks.push(chunk);
-    }
+    const chunksTask = (async () => {
+      for await (const chunk of encoder.chunks()) {
+        jxlChunks.push(chunk);
+      }
+    })();
+
+    await encoder.pushPixels(new Uint8Array(rgba));
+    await encoder.finish();
+    await chunksTask;
 
     const stats = encoder.getStats();
     await encoder.dispose();
@@ -127,7 +134,9 @@ self.onmessage = async ({ data }) => {
         w: width,
         h: height,
         effortUsed: effortLevel,
-        effortRequested: effortLevel,
+        // Surface the caller-requested effort (may be undefined → defaulted via
+        // recommendedEffort()); effortUsed is what the encoder actually applied.
+        effortRequested: effort ?? effortLevel,
         ratio: stats?.ratio ?? (jxl.byteLength / (width * height * 4)),
       },
       [jxl.buffer],

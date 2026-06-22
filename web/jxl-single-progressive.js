@@ -4,7 +4,7 @@ import { createBrowserContext } from '@casabio/jxl-session';
 import { getCapabilities } from '@casabio/jxl-capabilities';
 import { initDebugConsole, dbgLog } from './jxl-debug-console.js';
 import { createSneyersPreset } from './jxl-progressive-best-preset.js';
-import { computePsnrVsFinal, computeSsimVsFinal, detectMonotone } from './jxl-progressive-quality.js';
+import { computePsnrVsFinal, computeSsimVsFinal } from './jxl-progressive-quality.js';
 import { computeButteraugliVsFinal, createButteraugliComparer } from './jxl-butteraugli.js';
 import { buildSeries } from './jxl-progressive-byte-metrics.js';  // connectedness for unified series in cutoff (R1)
 import { analyzeProgressiveFrame, formatFrameStatsCompact } from './jxl-progressive-frame-stats.js';
@@ -251,6 +251,7 @@ const DEFAULT_WORKER_TIER = 'auto';
 const WORKER_TIERS = new Set(['auto', 'relaxed-simd-mt', 'simd-mt', 'simd', 'scalar']);
 
 const PERCEPTUAL_CUTOFF_PSNR_DELTA_DB = 0.5;
+const PERCEPTUAL_CUTOFF_BUTTER_DELTA = 0.05; // Butteraugli plateau epsilon: stop when |Δbutter| between passes falls below this
 const PERCEPTUAL_CUTOFF_LOW_KBPS = 1.0;
 const CHART_MAX_PIXELS = 1_000_000;    // cap quality-metric computation at ~1 MP; keeps Butteraugli sub-second/pass even at Display/Original res
 const PASS_BORDER_RES_MAX = 4_000_000; // skip block-border overlay above this pixel count (meaningless at hi-res)
@@ -1319,7 +1320,11 @@ async function decodeProgressivelyViaWorker({ jxlBytes, width, height, throttleK
                 throw e;
             });
             await frameTask.catch((e) => {
-                if (stoppedEarlyReason || /cancel|Cancel|closed/i.test(String(e && (e.message || e)))) {
+                // Only induced cancellation is expected here, and the code always sets
+                // stoppedEarlyReason before cancelling the session (cutoff verdict or timeout).
+                // A loose cancel/closed regex would also swallow genuine decode/render failures
+                // whose message happens to contain those words — so gate on the explicit flag only.
+                if (stoppedEarlyReason) {
                     return;
                 }
                 throw e;
@@ -1457,14 +1462,15 @@ function shouldStopAtPass(passes, targetRgba) {
             last.psnrDelta = Math.abs(psnrLast - psnrPrev);
             last.buttDelta = Math.abs(buttLast - buttPrev);
 
-            const smallSeries = [
-                { bytes: 0, psnr: psnrPrev, butter: buttPrev },
-                { bytes: 1, psnr: psnrLast, butter: buttLast },
-            ];
-            const monoPsnr = detectMonotone(smallSeries);
-            const monoButter = detectMonotone(smallSeries, 0.05, { valueKey: 'butter', lowerIsBetter: true });
+            // Plateau = improvement has flattened, not "did not regress". detectMonotone's
+            // `monotone` means "no regression beyond tolerance", which is TRUE for normal
+            // improving frames — so it must NOT gate the cutoff. The correct butter plateau
+            // test is symmetric with the PSNR one: the butter delta fell below epsilon
+            // (Butteraugli stopped improving), using the same 0.05 epsilon as before.
+            const butterPlateau = Number.isFinite(buttLast) && Number.isFinite(buttPrev)
+                && Math.abs(buttLast - buttPrev) < PERCEPTUAL_CUTOFF_BUTTER_DELTA;
             if ((Number.isFinite(psnrLast) && Number.isFinite(psnrPrev) && Math.abs(psnrLast - psnrPrev) < PERCEPTUAL_CUTOFF_PSNR_DELTA_DB)
-                || monoButter.monotone) {
+                || butterPlateau) {
                 return { reason: 'psnr-butter-plateau', last: last.pass, deltaDb: last.psnrDelta, buttDelta: last.buttDelta, changedPixels };
             }
         }

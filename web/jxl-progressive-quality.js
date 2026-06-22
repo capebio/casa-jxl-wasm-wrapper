@@ -159,7 +159,10 @@ export function detectMonotone(series, toleranceDb = MONOTONE_TOLERANCE_DB, opts
     if (prev !== (lowerIsBetter ? Infinity : -Infinity) && worse) {
       regressions.push({ bytes: entry.bytes, dropDb: Number(Math.abs(prev - v).toFixed(2)) });
     }
-    if (lowerIsBetter ? (v < prev) : (v > prev)) prev = v;
+    // Track the immediate predecessor, not the running best — a regression must be
+    // measured against the value that preceded it, otherwise a dip after a peak is
+    // compared to the peak (overstating the drop) and an intermediate recovery is hidden.
+    prev = v;
   }
   return { monotone: regressions.length === 0, regressions };
 }

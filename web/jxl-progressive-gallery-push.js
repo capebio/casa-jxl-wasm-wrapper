@@ -10,7 +10,10 @@ export function buildPushBatches(buffer, { mode = 'all-chunks', chunkSize = 6553
   const u8 = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : (buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer));
 
   if (normalizedMode === 'full-file') {
-    return [[u8.buffer]];
+    // Respect the view's offset/length (a sub-view file must not leak/transfer the
+    // whole backing store). subarray is a zero-copy view, consistent with the
+    // chunk paths below ("move the pointer").
+    return [[u8.subarray(0, u8.byteLength)]];
   }
 
   const n = u8.byteLength > 0 ? Math.ceil(u8.byteLength / chunkSize) : 0;

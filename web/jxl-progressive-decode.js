@@ -109,9 +109,15 @@ export function createProgressiveDecodeRequest({
             const frame = normalizeFrame(data);
             if (data.info) lastInfo = data.info;
             currentStage = 'final';
-            if (onFrame && !callUser(onFrame, frame, 'DecodeFrameCallbackFailed')) return;
-            if (onFinal && !callUser(onFinal, frame, 'DecodeFinalCallbackFailed')) return;
-            finish(frame);
+            // The final frame is already produced — its terminal lifecycle (onFinal/finish)
+            // must run even if a consumer's onFrame throws. A throwing onFrame still records
+            // the failure via callUser, but we do not skip onFinal/finish for it.
+            try {
+                if (onFrame) callUser(onFrame, frame, 'DecodeFrameCallbackFailed');
+            } finally {
+                if (onFinal) callUser(onFinal, frame, 'DecodeFinalCallbackFailed');
+                finish(frame);
+            }
             return;
         }
 

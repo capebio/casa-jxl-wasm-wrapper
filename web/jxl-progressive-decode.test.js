@@ -58,6 +58,35 @@ test('progressive decode helper sends session messages and resolves final frame'
     expect(worker.listenerCount()).toBe(0);
 });
 
+test('decode_final still runs onFinal/finish when onFrame throws', async () => {
+    const worker = new FakeWorker();
+    let onFinalCalls = 0;
+    const request = createProgressiveDecodeRequest({
+        worker,
+        sessionId: 'decode-2',
+        onFrame: () => { throw new Error('consumer onFrame boom'); },
+        onFinal: () => { onFinalCalls++; },
+    });
+
+    request.start();
+
+    const finalPixels = new Uint8Array([4, 5, 6, 255]).buffer;
+    worker.emit({
+        type: 'decode_final',
+        sessionId: 'decode-2',
+        pixels: finalPixels,
+        info: { width: 1, height: 1 },
+        format: 'rgba8',
+        pixelStride: 4,
+    });
+
+    // onFrame threw → done() rejects (failure recorded), but the terminal
+    // lifecycle still runs: onFinal fires and listeners are cleaned up.
+    await expect(request.done).rejects.toThrow('consumer onFrame boom');
+    expect(onFinalCalls).toBe(1);
+    expect(worker.listenerCount()).toBe(0);
+});
+
 class FakeWorker {
     messages = [];
     listeners = new Set();
