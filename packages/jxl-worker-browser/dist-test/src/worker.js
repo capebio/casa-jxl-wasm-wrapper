@@ -346,7 +346,13 @@ async function handleDecodeStart(msg) {
             return;
         }
         const handler = new DecodeHandler(msg, wasm, {
-            onSessionEnd: (sessionId) => decodeSessions.delete(sessionId),
+            // Identity guard: only clear the map slot if it still points at THIS handler.
+            // A late onSessionEnd from a superseded handler must not evict a newer session
+            // that reused the same sessionId (recycle / rapid re-decode).
+            onSessionEnd: (sessionId) => {
+                if (decodeSessions.get(sessionId) === handler)
+                    decodeSessions.delete(sessionId);
+            },
             decoderPool: decoderPool ?? undefined,
         });
         decodeSessions.set(msg.sessionId, handler);
@@ -423,7 +429,12 @@ async function handleEncodeStart(msg) {
             return;
         }
         const handler = new EncodeHandler(msg, wasm, {
-            onSessionEnd: (sessionId) => encodeSessions.delete(sessionId),
+            // Identity guard (see decode path): don't let a superseded handler evict a
+            // newer session that reused the same sessionId.
+            onSessionEnd: (sessionId) => {
+                if (encodeSessions.get(sessionId) === handler)
+                    encodeSessions.delete(sessionId);
+            },
         });
         encodeSessions.set(msg.sessionId, handler);
         flushQueuedEncodeMessages(msg.sessionId, handler);

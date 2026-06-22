@@ -95,9 +95,24 @@ export interface JxlModule {
         quality: number | null;
         effort: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
         progressive: boolean;
+        progressiveFlavor?: "dc" | "ac";
+        progressiveDc?: 0 | 1 | 2;
+        progressiveAc?: 0 | 1 | 2;
+        qProgressiveAc?: 0 | 1 | 2;
+        groupOrder?: 0 | 1;
         previewFirst: boolean;
         chunked: boolean;
         sidecarSizes?: readonly number[];
+        orientation?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+        centerX?: number;
+        centerY?: number;
+        intrinsicSize?: {
+            width: number;
+            height: number;
+        };
+        disablePerceptualHeuristics?: boolean;
+        codestreamLevel?: -1 | 5 | 10;
+        copyInput?: boolean;
     }): BrowserEncoder;
 }
 export interface WasmLoaderOptions {
