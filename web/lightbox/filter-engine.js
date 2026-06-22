@@ -81,7 +81,7 @@ function adjustSaturation(m, factor) {
       const s = (r === c ? factor : 0);
       o[r*4 + c] = s + (1 - factor) * l[c];
     }
-    o[r*4 + 3] = m[r*4 + 3]; // preserve bias
+    o[r*4 + 3] = 0; // pure linear sat; compose(m,o) carries m's bias through exactly once
   }
   return compose(m, o); // or direct
   // simpler: post compose sat on current

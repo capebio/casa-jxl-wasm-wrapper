@@ -57,3 +57,22 @@ test("apply produces valid output and histogram updates", () => {
   expect(hist.r.length).toBe(256);
   expect(hist.l[128]).toBeGreaterThan(0);
 });
+
+test("saturation does not double-count the matrix bias offset", () => {
+  // DEHAZE carries a constant bias of 0.02 in every offset column. getMatrix() always
+  // runs the saturation step (factor=1 at saturation=0, i.e. identity), so the offset
+  // column must remain the preset bias exactly. The old code seeded the sat matrix's
+  // offset from the incoming matrix, so compose() re-mixed and re-added the bias
+  // (0.02 -> ~0.04). The saturation step must carry the prior offset through once.
+  const eng = createFilterEngine(LightboxPreset.DEHAZE); // all sliders 0
+  const m = eng.getMatrix();
+  expect(m[3]).toBeCloseTo(0.02, 6);
+  expect(m[7]).toBeCloseTo(0.02, 6);
+  expect(m[11]).toBeCloseTo(0.02, 6);
+
+  // Identity / no-sat case for a zero-bias preset must remain the identity matrix.
+  const idEng = createFilterEngine(LightboxPreset.NONE);
+  const id = idEng.getMatrix();
+  const expected = [1,0,0,0, 0,1,0,0, 0,0,1,0];
+  for (let k = 0; k < 12; k++) expect(id[k]).toBeCloseTo(expected[k], 6);
+});

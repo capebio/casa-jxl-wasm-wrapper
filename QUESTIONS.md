@@ -1837,3 +1837,381 @@ All paths relative to repo root. All are perf/structure opportunities; each requ
 - File: .epiccodereview/20260622T113415Z/sections/002/adr_draft/exportroi-typedarray-ipc.md
 - Recommends: Pass the typed array (or its ArrayBuffer) directly + add a ROI size guard; identical JXL output, ≥5% marshalling/memory. Blocking unknown: confirm the Rust encode_rgba16_jxl command accepts a byte buffer.
 - Reversible: partial
+
+---
+
+# Section 003 — Lightbox M3 WebGL/tiled pipeline unfinished
+
+EpicCodeReview section 003 (`web/lightbox/`) found that the M3 16-bit **WebGL-HDR
+display path** and the **tiled-decode-pool path** are half-built / broken in ways
+that are **not safely fixable in-loop**: they are browser-verified-only, and the
+"fix" is feature completion plus a design decision about whether these paths are
+meant to be live. The 14 `direct_fix` tasks below are therefore **deferred** (no
+source edits, no commits this pass). All findings are verifier-confirmed
+(`sections/003/verified.json`) unless noted; the two CRITICALs were also
+re-confirmed by direct read of source.
+
+Root cause, in one line: **two M3 features were wired into the lightbox but never
+finished** — `webgl-pipeline.js` can't even load (broken import), the inline GL
+display path is dead (shadowed `redraw()`), and `tiled-decode-worker.js` speaks a
+different protocol than the pool that drives it (so the tiled path silently
+falls back to direct decode). Everything else in this section is downstream of
+those three.
+
+Dependency note for whoever picks this up: fix order is **(1) wiring/protocol →
+(2) correctness → (3) the perf ADRs**. The perf ADRs that target the WebGL path
+are *moot until the WIP cluster is wired* (called out per-ADR).
+
+---
+
+## 003.A — web/lightbox/webgl-pipeline.js (M3 WebGL-HDR module is unloadable)
+
+The whole module is **unreachable**: a load-time ES linkage failure means none of
+its exports (`createHdrRenderer`, `renderRgba16AdjustedToCanvas`,
+`adjustedRgba16ForExport`, `canUseWebGL16`, …) can be used. Findings (b)/(c)
+below don't matter until (a) is fixed and the module is rewritten against
+filter-engine's real API.
+
+### Q-003.A1 [CRITICAL] Broken import → module linkage failure
+- Task id: `003-correctness-wgl-import` (deferred)
+- File: web/lightbox/webgl-pipeline.js:3
+- Finding: `import { buildColorMatrix, clampAdjustments } from './filter-engine.js'`
+  imports two symbols that **filter-engine.js does not export** (and that exist
+  nowhere in the repo).
+- What we found: filter-engine.js exports exactly `ADJUSTMENT_PARAMS`,
+  `LightboxPreset`, `APPROVED_LIGHTBOX_PRESETS`, `createFilterEngine`,
+  `applyFilter`. A static named import of a binding the target doesn't export is a
+  hard load-time error → the entire `webgl-pipeline.js` module fails to
+  instantiate. `webgl-pipeline.test.js` does not catch this because it only
+  `readFileSync` + string-greps the source (fake-green) and never imports/executes
+  the module. (Also imported, equally broken, by `tauri-parity-lightbox.js:11-12 / :19`.)
+- What's needed: rewrite the module against filter-engine's actual API. The
+  intended supplier of the colour matrix is `createFilterEngine(...).getMatrix()`
+  (12-element 3×4 row-major). Replace `buildColorMatrix(preset, adj)` with an
+  engine built from the preset+adjustments and its `getMatrix()`; replace
+  `clampAdjustments(adjustments)` with whatever clamping `ADJUSTMENT_PARAMS`
+  implies (filter-engine already clamps internally in `createFilterEngine`).
+- Suggested direction: do **not** add `buildColorMatrix`/`clampAdjustments` to
+  filter-engine to satisfy the import — that re-creates the matrix path twice.
+  Consume the existing engine API instead. Pairs with Q-003.A2 (the matrix layout
+  must then match getMatrix's 12-element output).
+- Verify: `node -e "import('./web/lightbox/webgl-pipeline.js').then(m=>console.log(Object.keys(m)))"`
+  currently throws a SyntaxError/linkage error; after the fix it must list the
+  exports. Then a browser smoke (flipflopdom or a headless page) to confirm a
+  render.
+
+### Q-003.A2 [HIGH] matrixUniforms reads a 4×4/16-element layout; filter-engine emits 3×4/12-element
+- Task id: `003-correctness-wgl-matrix-layout` (deferred)
+- File: web/lightbox/webgl-pipeline.js:107-114
+- Finding: `matrixUniforms()` reads `m1=[matrix[5],[6],[7]]`, `m2=[matrix[10],[11],[12]]`,
+  `off=[matrix[4]/255, matrix[9]/255, matrix[14]/255]` — a 16-element 4×4 layout
+  with `/255` integer-scaled offsets.
+- What we found: every matrix in this lightbox is **12-element 3×4 row-major**
+  (`filter-engine` PRESET_BASE :30-43, compose :47-57): row r = `[r*4+0..r*4+2]`,
+  offset at `r*4+3`, offsets already in 0..1. Against a length-12 array, indices
+  `matrix[12]` and `matrix[14]` are **out of bounds (undefined)**, rows 1/2 read
+  the wrong cells (m1 should be `[4,5,6]`+offset `[7]`, not `[5,6,7]`+`[9]`), and
+  the `/255` is wrong because offsets are already normalized. Latent only because
+  its supplier (`buildColorMatrix`) is missing; once Q-003.A1 feeds real
+  getMatrix output, the transform would be wrong/NaN.
+- What's needed: rewrite `matrixUniforms` for the 12-element 3×4 layout:
+  `m0=[m[0],m[1],m[2]]`, `m1=[m[4],m[5],m[6]]`, `m2=[m[8],m[9],m[10]]`,
+  `off=[m[3],m[7],m[11]]` (no `/255`).
+- Suggested direction: do this **together with** Q-003.A1 (the layout fix is
+  meaningless until a real 12-element matrix is supplied). Add a unit test that
+  feeds a known getMatrix output and asserts the uniform vectors.
+
+### Q-003.A3 [LOW] No webglcontextlost handling on the shared renderer
+- Task id: `003-correctness-wgl-no-context-loss` (deferred)
+- File: web/lightbox/webgl-pipeline.js:119-241
+- Finding: `getRenderer()` (:238-241) memoizes a module-level `sharedRenderer`
+  for the process lifetime with no `isContextLost()` check and no
+  `webglcontextlost`/`restored` listener.
+- What we found: on context loss (GPU reset, tab backgrounding, driver hiccup)
+  `getRenderer()` keeps returning the dead renderer; `texImage2D`/`drawArrays`/
+  `readPixels` become no-ops, `readPixels` returns zeros → silent black/garbage
+  with no error and no fallback to `adjustRgba16Cpu`. `dispose()` exists but is
+  never wired to loss.
+- What's needed: `isContextLost()` guard + `webglcontextlost`/`restored`
+  listeners that invalidate `sharedRenderer`, with CPU fallback. (Captured in
+  more detail in the lifecycle ADR — `003-structure-wgl-deadcode`.)
+- Suggested direction: defer until the module is live (blocked by Q-003.A1 and
+  the engine-of-record decision in 003.C). Verify with the
+  `WEBGL_lose_context` extension in a browser test.
+
+---
+
+## 003.B — web/lightbox/tiled-decode-worker.js (protocol mismatch → tiled pool is dead)
+
+The worker is instantiated as the decode worker for `PyramidWorkerPool`
+(`web/pyramid-gallery/pyramid-decode.js:18-21` passes
+`new Worker('../lightbox/tiled-decode-worker.js')` as `workerFactory`), but it
+speaks a **different protocol** than the pool. Net effect: the readiness
+handshake never resolves, every reply is dropped, the watchdog times out, the
+handle is marked Bad, and the pool **silently falls back to direct decode**. The
+parallel tiled-decode path is effectively dead. Fix = rewrite the worker to speak
+the pool's v1 protocol (`load`/`ready`/`decode-reply`, `bytesId` caching,
+`format`→`use16`).
+
+### Q-003.B1 [CRITICAL] Message protocol does not match PyramidWorkerPool
+- Task id: `003-structure-twkr-proto` (deferred)
+- File: web/lightbox/tiled-decode-worker.js:5-16
+- Finding: the worker destructures `{id, bytes, region, bpp}` from each message
+  and replies `{id, ok, pixels, width, height}` (no `v`, no `type`, `width/height`
+  not `w/h`).
+- What we found: the pool (`packages/jxl-pyramid/src/tiled-decode-pool.ts`) sends
+  versioned `{v:1, type:'load', bytesId, bytes|sab}` (ensureLoaded :786/:788) and
+  `{v:1, type:'decode', id, bytesId, region, format}` (decodeTileWithWorker
+  :185-194). `parseWorkerReply` (:860-884) **only** accepts `{v:1, type:'ready'}`
+  and `{v:1, type:'decode-reply', id, ok, pixels, w, h}`, and hard-rejects on
+  `d.v !== 1` (:863) → every worker reply returns null and is dropped (:664). The
+  worker never emits `ready` (so `acquire`/`whenReady` hang on `h.ready`), never
+  handles `type:'load'`, and treats every message as a decode. The watchdog
+  (:158-165) then marks the handle Bad → direct-decode fallback (:1288-1291).
+- What's needed: rewrite the worker to (1) handle `type:'load'` and post
+  `{v:1, type:'ready'}`, (2) handle `type:'decode'` and reply
+  `{v:1, type:'decode-reply', id, ok, pixels, w, h}` (note `w`/`h`, and `v:1`).
+- Suggested direction: mirror the message shapes in `tiled-decode-pool.ts`
+  exactly; treat that file as the protocol contract. Pairs with Q-003.B2 and
+  Q-003.B3 (same rewrite).
+- Verify: browser-only. Run the pyramid grid in a headless page (flipflopdom),
+  confirm `decodeTiledViewportPooled` resolves via the worker (not the direct
+  fallback) — e.g. instrument/log the pool's `handle.ready` resolution and the
+  `decode-reply` path, and assert the direct-decode fallback at :1288-1291 is not
+  hit.
+
+### Q-003.B2 [HIGH] No bytesId/load state machine (defeats the load-once amplification fix)
+- Task id: `003-structure-twkr-noload` (deferred)
+- File: web/lightbox/tiled-decode-worker.js:1-16
+- Finding: the worker keeps no bytes cache and reads full `bytes` inline off
+  every decode message.
+- What we found: the pool's central design (`tiled-decode-pool.ts` header
+  :223-227 "Uses load/decode split + bytesId to eliminate structured-clone
+  amplification"; `ensureLoaded` :760-795) posts the container bytes **once per
+  worker** via `type:'load'` keyed by `bytesId` (optionally a SharedArrayBuffer),
+  and every subsequent decode references `bytesId` only — `bytes` is never sent on
+  decode. So against the real pool `ev.data.bytes` is **always undefined** and
+  decodes throw; and even if shapes were patched naively the worker would re-clone
+  the whole container per tile, exactly the amplification the protocol exists to
+  avoid.
+- What's needed: add a `Map<bytesId, Uint8Array|SAB-view>` populated on
+  `type:'load'`; on `type:'decode'` resolve `bytesId` → cached bytes (handle the
+  SAB case without copying).
+- Suggested direction: same rewrite as Q-003.B1. Keep the SAB fast-path
+  (no copy) to preserve the amplification fix.
+
+### Q-003.B3 [HIGH] Bit-depth keyed off `bpp` the pool never sends → 16-bit decodes as rgba8
+- Task id: `003-structure-twkr-bpp` (deferred)
+- File: web/lightbox/tiled-decode-worker.js:6-11
+- Finding: `const use16 = bpp === 8; const fn = use16 ? decodeTileContainerRegionRgba16 : decodeTileContainerRegionRgba8;`
+- What we found: the pool transmits `format:'rgba8'|'rgba16'`
+  (`decodeTileWithWorker` :191), **never** a `bpp` field. So `ev.data.bpp` is
+  always undefined → `use16 = (undefined === 8)` is always false → 16-bit
+  container regions are silently decoded as rgba8. (The `bpp===8 ⇒ rgba16`
+  mapping happens to align with `bppOfFormat` in `decode-core.ts:25` only by
+  coincidence; the load-bearing defect is the missing field.)
+- What's needed: branch on the pool's `format` field:
+  `const use16 = (region/msg).format === 'rgba16'`.
+- Suggested direction: fold into the Q-003.B1 rewrite.
+
+---
+
+## 003.C — web/lightbox/pyramid-lightbox.js (dead GL redraw, tiled bypass, tone drift)
+
+### Q-003.C1 [HIGH] Duplicate redraw() + clampPan() — last-declaration-wins kills the WebGL path (DESIGN DECISION)
+- Task ids: `003-correctness-plb-dup-redraw`, `003-structure-plb-redraw-dup` (both deferred)
+- File: web/lightbox/pyramid-lightbox.js:583 and :791 (redraw), :438 and :643 (clampPan)
+- Finding: `function redraw()` is declared **twice** in the same
+  `createPyramidLightbox` closure — :583 is GL-preferring
+  (`if (gl && levelInfo && levelPixels) { if (renderGL()) return; }`), :791 is
+  2D-only. `clampPan()` is also declared twice (:438, :643).
+- What we found: JS function-declaration hoisting makes the **last** declaration
+  win, so the live `redraw()` is the 2D-only :791 version, and `renderGL`
+  (:227-279, the inline 16-bit WebGL display path) is **dead code** (only refs:
+  def :227 and the dead :583 redraw). `reapplyToOffscreen` (:560-563)
+  deliberately skips CPU rendering for 16-bit *expecting* the GL redraw — so
+  16-bit GL display is dead end-to-end. The duplicate `clampPan` bodies are
+  near-identical (harmless, but same copy/paste hazard; one is dead).
+  (One verifier nit: the second detector said "three" redraws — grep confirms
+  exactly **two**; the dead-GL conclusion stands.)
+- What's needed: this is **not a mechanical de-dup** — resolving it requires a
+  DESIGN decision: *is the WebGL-HDR display path meant to be live?* If yes,
+  delete the 2D-only :791 redraw and make the GL path reachable (and pick the
+  engine of record — see the `003-structure-two-gl-pipelines` ADR). If no, delete
+  `renderGL`/the inline GL block and keep the 2D path.
+- Suggested direction: tie to the engine-of-record ADR
+  (`lightbox-two-webgl-pipelines-one-engine-of-record.md`). Do not silently pick
+  one — it changes user-visible 16-bit rendering. Verify in a real browser
+  (16-bit level open + slider drag) once decided.
+
+### Q-003.C2 [MEDIUM] loadLevel always full-decodes; never the pooled tiled path
+- Task id: `003-structure-plb-ignores-tiled` (deferred)
+- File: web/lightbox/pyramid-lightbox.js:491-556
+- Finding: `loadLevel` decodes via `ctx.decode({format, sourceKey, …})` +
+  `session.frames()` to materialize the whole level into `levelPixels`,
+  regardless of any tiling metadata — there is **no reference to `entry.tiled` /
+  region** anywhere in the file.
+- What we found: the sibling pooled API `decodePyramidLevel`
+  (`web/pyramid-gallery/pyramid-decode.js:12-23`) routes `opts.tiled` levels to
+  `decodeTiledViewportPooled` (region + worker pool). The lightbox full-decodes
+  tiled levels that the grid decodes tile-by-tile, duplicating decode work and
+  bypassing the tiled worker/pool on the lightbox seam.
+- What's needed: route `loadLevel` through the tiled path when the level
+  descriptor is tiled — **but this is blocked by 003.B** (the tiled worker/pool is
+  dead until the protocol is fixed). Until then, full-decode is the only working
+  path.
+- Suggested direction: fix 003.B first; then add an `entry.tiled` branch in
+  `loadLevel` that calls `decodeTiledViewportPooled` for the visible region.
+  Whether tiled levels actually reach the lightbox is itself an architectural
+  question — confirm before wiring. Win is real but unmeasured (needs flipflopdom).
+
+### Q-003.C3 [MEDIUM] Three divergent shadow/highlight tone formulas break FilterEngine parity
+- Task id: `003-structure-plb-tone-divergence` (deferred)
+- File: web/lightbox/pyramid-lightbox.js:127-142 (plus the four sites below)
+- Finding: the shadows/highlights tone op is implemented four times with two
+  different formulas.
+- What we found: (a) `filter-engine.js` `applyToImageData`/`applyFloat` use
+  unbounded `lift = sh*(1-l)`, `comp = hi*l` (:154,:160 and :196,:200); (b) the
+  inline `pyramid-lightbox` GL FS uses the same unbounded form (:129,:133); (c)
+  `webgl-pipeline.js` FS_300/FS_100 use **band-limited** `lift*max(0,0.35-luma)` /
+  `compress*max(0,luma-0.65)` (:34-35,:67-68); (d) `webgl-pipeline.js`
+  `adjustRgba16Cpu` repeats (c) (:320-329). The GL/CPU webgl-pipeline math
+  diverges from the filter-engine/inline-shader math → the "FilterEngine parity"
+  contract (`pyramid-lightbox.js:4`) is broken across the bit-depth/GL seam.
+- What's needed: single-source the tone function. Decide the canonical formula
+  (unbounded `(1-l)` vs band-limited `max(0,0.35-luma)`) and make all four sites
+  use it.
+- Suggested direction: tie to the engine-of-record ADR; the canonical tone math
+  should live in filter-engine and be referenced by the GL shaders. Parity-verify
+  in browser (same slider values → matching output across 8-bit / JS-float / GL).
+
+### Q-003.C4 [LOW] open() reuses LRU/grid-seed pixels as 8-bit even in 16-bit mode
+- Task id: `003-correctness-plb-lru-float-stored` (deferred)
+- File: web/lightbox/pyramid-lightbox.js:742-767
+- Finding: `loadLevel` only writes the LRU for 8-bit (`if (!use16) lruSet(...)`
+  :553); on `open()`, the LRU-hit and grid-card-seed branches (:744-766)
+  unconditionally wrap cached pixels in `new Uint8ClampedArray(hit.pixels)` and
+  set `levelInfo` **without `bitsPerSample`**.
+- What we found: (1) if `is16bitMode` is true on re-open, the seed path produces
+  an 8-bit-treated buffer with no `bitsPerSample` marker → `reapplyToOffscreen`
+  takes the 8-bit branch and the 16-bit toggle silently shows an 8-bit render
+  until `reloadCurrentLevelForMode`/`loadLevel` runs. (2) The grid-seed branch
+  sets `levelInfo = init` (chosen-level dims) while `levelPixels`/`offscreen`
+  come from `srcC` (grid canvas dims) → a w/h vs buffer-size mismatch feeding
+  `clampPan` and the shader `levelSize`.
+- What's needed: carry `bitsPerSample`/`use16` through the seed paths (don't
+  treat seeded pixels as 8-bit when 16-bit mode is active), and reconcile
+  `levelInfo.w/h` with the actual seeded buffer dimensions.
+- Suggested direction: low severity (a mode toggle re-runs `loadLevel`), but fix
+  the dimension contract while in the file. Depends on the redraw/engine decision
+  (003.C1) since the 16-bit display path itself is currently dead.
+
+### Q-003.C5 [LOW] Empty `_internal` debug stub + near-dead ditherFloatToU8
+- Task id: `003-structure-plb-internal-stub` (deferred)
+- File: web/lightbox/pyramid-lightbox.js:837-843
+- Finding: `createPyramidLightbox` returns `{ open, close, _internal: { /* for
+  debug only */ } }` — `_internal` is an empty object (documented debug surface
+  is non-existent). Separately `ditherFloatToU8` (:451-460) is reachable only via
+  the no-WebGL2 JS-16bit fallback (:564-570); on WebGL-capable machines that
+  branch is short-circuited (:560-563) and on no-WebGL machines the dead :583
+  redraw governs — so it is near-dead alongside the dead GL redraw.
+- What's needed: tidy the API surface (populate or remove `_internal`) and
+  resolve which 16-bit path is live (depends on 003.C1).
+- Suggested direction: defer until the redraw/engine decision; the dead-vs-live
+  status of `ditherFloatToU8` follows directly from it.
+
+---
+
+## 003.D — web/lightbox/pyramid-lightbox.test.js (asserts on absent JXTC/16-bit symbols)
+
+### Q-003.D1 [MEDIUM] Test asserts on instrumentation strings that no longer exist (RED or divergent)
+- Task id: `003-correctness-plb-test-stale` (deferred)
+- File: web/lightbox/pyramid-lightbox.test.js:9-32 (and webgl-pipeline.test.js:16-21)
+- Finding: all five tests in `pyramid-lightbox.test.js` `readFileSync` + string-
+  grep the source for `const t0Decode = performance.now()`,
+  `jxtcDecodeMs = performance.now() - t0Decode`, `jxtcDecodeMs` in the `levelInfo`
+  literal, a log referencing `jxtcDecodeMs`, and `via: 'jxtc'`. The second test in
+  `webgl-pipeline.test.js` (:16-21) asserts the source contains `encodeRgba16`,
+  `adjustedRgba16ForExport`, `decodePyramidRegion`, `-roi.jxl`.
+- What we found: **none** of `jxtcDecodeMs`, `t0Decode`,
+  `decodeTileContainerRegionRgba8`, `via: 'jxtc'`, `encodeRgba16`,
+  `adjustedRgba16ForExport`, `decodePyramidRegion`, or `-roi.jxl` appear in the
+  current `pyramid-lightbox.js` (grep-confirmed). The current `loadLevel` uses
+  `ctx.decode()`/`session.frames()` with no JXTC region decode and no timing
+  instrumentation. So these tests are **RED against this source** (string-grep
+  tests → assertions on absent strings fail). It indicates the JXTC/16-bit region
+  decode + timing instrumentation was removed from the source but the tests were
+  not updated.
+- What's needed: a HUMAN decision — confirm red/green by running the suite, then
+  either (a) **restore the instrumentation** (if the JXTC region-decode path and
+  its timing are meant to exist — this is lost functionality), or (b) **update the
+  test to current reality**. Do **not** silently edit the test to pass, which
+  would mask the lost functionality.
+- Current status (string-grep evidence): the asserted strings are absent from
+  source ⇒ the tests must currently **fail (red)**. Confirm by actually running.
+- Verify / confirm red:
+  `cd web && npx vitest run lightbox/pyramid-lightbox.test.js lightbox/webgl-pipeline.test.js`
+  (or the repo's test runner) and read the pass/fail. If red, the choice is
+  restore-instrumentation vs update-test; if unexpectedly green, the test file
+  under run does not match this source (a test/source divergence to resolve).
+- Suggested direction: this is entangled with 003.C (the tiled/JXTC region-decode
+  the tests expect is exactly the path that 003.B/003.C2 show is dead/bypassed).
+  Treat "restore JXTC region decode + timing" as part of finishing the tiled
+  feature, not a test edit.
+
+---
+
+## Section 003 — ADR drafts (perf + architecture, deferred_adr)
+
+The 7 `adr_draft` tasks are written to
+`.epiccodereview/20260622T113415Z/sections/003/adr_draft/`. The WebGL-path perf
+ADRs are **moot until the WIP cluster (003.A/003.B/003.C1) is wired** — each says
+so.
+
+## ADR DRAFT from task 003-hacker-getmatrix-allocs
+- Topic: filter-engine getMatrix() allocates ~6 short-lived 12-element arrays per call (web/lightbox/filter-engine.js:104-127)
+- File: .epiccodereview/20260622T113415Z/sections/003/adr_draft/filter-engine-getmatrix-single-buffer.md
+- Recommends: Fold the chain into one reused Float32Array(12) updated in place; output-identical (≤1 LSB), ≥5% via flipflopdom. Must land after the saturation correctness fix (003-correctness-fe-sat-bias-doublecount).
+- Reversible: yes
+
+## ADR DRAFT from task 003-hacker-computehistogram-luma
+- Topic: computeHistogram fills r/g/b/l per pixel but only luma is consumed (web/lightbox/filter-engine.js:172-181)
+- File: .epiccodereview/20260622T113415Z/sections/003/adr_draft/filter-engine-computehistogram-luma-only.md
+- Recommends: Drop the dead r/g/b stores (or gate behind a default-off flag); ~quarters per-pixel store work; hist.l bin-exact, ≥5% via flipflopdom on the redraw path.
+- Reversible: yes
+
+## ADR DRAFT from task 003-structure-two-gl-pipelines
+- Topic: Two independent WebGL 16-bit pipelines coexist — inline pyramid-lightbox.js GL vs webgl-pipeline.js (architecture)
+- File: .epiccodereview/20260622T113415Z/sections/003/adr_draft/lightbox-two-webgl-pipelines-one-engine-of-record.md
+- Recommends: Pick one engine of record (lean webgl-pipeline.js once its import/matrix are fixed) or drop WebGL for the JS-float path; single-source tone math. DESIGN decision gating 003.C1/C3. Both pipelines currently broken/dead.
+- Reversible: per-step yes; architectural choice sticky
+
+## ADR DRAFT from task 003-hacker-16bit-fallback-twopass
+- Topic: 16-bit JS fallback in reapplyToOffscreen runs 3 full-image passes + 2 Float32 allocs (web/lightbox/pyramid-lightbox.js:564-570)
+- File: .epiccodereview/20260622T113415Z/sections/003/adr_draft/lightbox-16bit-fallback-fuse-passes.md
+- Recommends: Fuse normalize into applyFloat (drop one alloc+pass), optionally fuse dither; ≤1 LSB parity, ≥5% via flipflopdom (force gl=null). Only meaningful once a live JS-float fallback path is confirmed (003-structure-two-gl-pipelines).
+- Reversible: yes
+
+## ADR DRAFT from task 003-hacker-ensurefbo-reupload
+- Topic: ensureFbo re-creates the RGBA32F FBO texture every runShader even when size is unchanged (web/lightbox/webgl-pipeline.js:153-167)
+- File: .epiccodereview/20260622T113415Z/sections/003/adr_draft/webgl-ensurefbo-cache-attachment.md
+- Recommends: Cache fboW/fboH, realloc only on size change; output-identical, ≥5% via flipflopdom (GL). MOOT until webgl-pipeline.js loads + is wired (003-correctness-wgl-import / 003-structure-two-gl-pipelines).
+- Reversible: yes
+
+## ADR DRAFT from task 003-hacker-uploadsource-realloc
+- Topic: uploadSource allocates a fresh w*h*4 Float32Array every call (web/lightbox/webgl-pipeline.js:169-190)
+- File: .epiccodereview/20260622T113415Z/sections/003/adr_draft/webgl-uploadsource-scratch-buffer.md
+- Recommends: Reuse a renderer-closure scratch Float32Array, realloc on size change; output-identical, ≥5%/GC-reduction via flipflopdom. MOOT until the module loads + is wired.
+- Reversible: yes
+
+## ADR DRAFT from task 003-structure-wgl-deadcode
+- Topic: Deprecated uploadRgba16ToGl + single shared undisposed renderer + leaking canUseWebGL16 probe (web/lightbox/webgl-pipeline.js:74-80, 238-241, 359-370)
+- File: .epiccodereview/20260622T113415Z/sections/003/adr_draft/webgl-deprecated-api-and-renderer-lifecycle.md
+- Recommends: Delete the deprecated export (cleanup safe now), dispose/cache the probe, add isContextLost + context-loss listeners with CPU fallback (lifecycle parts gated on the module being live).
+- Reversible: per-change yes
+
+## DEFERRED from task 003-structure-plb-internal-stub
+- Finding: createPyramidLightbox returns `_internal: { /* for debug only */ }` — an empty debug stub (web/lightbox/pyramid-lightbox.js:842). The companion `ditherFloatToU8` path is near-dead (only reachable via the no-WebGL2 16-bit JS fallback, which the dead :583 GL redraw governs).
+- Reason for deferral: No clear/trivial local fix. Repo-wide grep confirms `_internal` has NO consumer anywhere (no test, no other module reads it) — the empty stub breaks nothing, so there is no test-gated reason to populate it. Deciding what to expose (and resolving the dead ditherFloatToU8 / dead-redraw question it points at) is entangled with the deferred WIP cluster: duplicate redraw()/clampPan() declarations, the dead inline WebGL render path, and the loadLevel/tiled-decode bypass. Populating _internal in isolation would be guesswork and could mask the real structural issue.
+- Suggested resolution: handle together with the redraw/clampPan-dup + dead-GL-path writeup (003-correctness-plb-dup-redraw, 003-structure-plb-redraw-dup, 003-structure-plb-ignores-tiled, 003-structure-two-gl-pipelines) so the live 16-bit path is settled first; then expose the genuinely-live internals (or drop _internal entirely).
+- Reversible: yes
