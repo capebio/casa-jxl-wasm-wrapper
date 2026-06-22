@@ -828,24 +828,6 @@ fn separable_blur_into(src: &[u16], width: usize, _height: usize,
     });
 }
 
-/// Portable fused multiply-add for the auto-vectorised blur/FIR kernels.
-///
-/// `f32::mul_add` is a single-rounding hardware FMA *only* when the target has the
-/// `fma` feature; on the default baseline `x86-64` target (no `+fma`) it lowers to a
-/// scalar `fmaf` **libcall** (~50-100 cyc) that also blocks auto-vectorisation — which
-/// made the separable blur ~3.5× slower than necessary on shipped builds (measured:
-/// `examples/blur_mul_add_flip.rs`, 12-24 MP, 13-tap, +71% saved, ≤1 LSB parity). So:
-///   - FMA build (`+fma` / `target-cpu=native`) → `mul_add` (one `vfmadd`: fastest + most accurate)
-///   - baseline build                            → `a * b + c` (LLVM emits vectorised `mulps`/`addps`)
-/// The two paths differ by ≤1 LSB on the 16-bit blur intermediate — negligible.
-#[inline(always)]
-fn bfma(a: f32, b: f32, c: f32) -> f32 {
-    #[cfg(target_feature = "fma")]
-    { a.mul_add(b, c) }
-    #[cfg(not(target_feature = "fma"))]
-    { a * b + c }
-}
-
 /// 1-D FIR on a single f32 plane with stride-1 I/O and fixed kernel length N.
 /// LLVM can unroll the ki loop and auto-vectorise the x loop.
 #[inline]
@@ -860,7 +842,7 @@ fn blur_fir_planar<const N: usize>(plane: &[f32], kernel: &[f32], half: usize, o
         let mut acc = 0f32;
         for ki in 0..N {
             let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
-            acc = bfma(plane[xi], kernel[ki], acc);
+            acc = plane[xi].mul_add(kernel[ki], acc);
         }
         out[x] = acc;
     }
@@ -869,7 +851,7 @@ fn blur_fir_planar<const N: usize>(plane: &[f32], kernel: &[f32], half: usize, o
         let b0 = x - half;
         let mut acc = 0f32;
         for ki in 0..N {
-            acc = bfma(plane[b0 + ki], kernel[ki], acc);
+            acc = plane[b0 + ki].mul_add(kernel[ki], acc);
         }
         out[x] = acc;
     }
@@ -878,7 +860,7 @@ fn blur_fir_planar<const N: usize>(plane: &[f32], kernel: &[f32], half: usize, o
         let mut acc = 0f32;
         for ki in 0..N {
             let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
-            acc = bfma(plane[xi], kernel[ki], acc);
+            acc = plane[xi].mul_add(kernel[ki], acc);
         }
         out[x] = acc;
     }
@@ -895,21 +877,21 @@ fn blur_fir_planar_dyn(plane: &[f32], kernel: &[f32], half: usize, out: &mut [f3
         let mut acc = 0f32;
         for ki in 0..kernel.len() {
             let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
-            acc = bfma(plane[xi], kernel[ki], acc);
+            acc = plane[xi].mul_add(kernel[ki], acc);
         }
         out[x] = acc;
     }
     for x in int_start..int_end {
         let b0 = x - half;
         let mut acc = 0f32;
-        for (ki, &kv) in kernel.iter().enumerate() { acc = bfma(plane[b0 + ki], kv, acc); }
+        for (ki, &kv) in kernel.iter().enumerate() { acc = plane[b0 + ki].mul_add(kv, acc); }
         out[x] = acc;
     }
     for x in int_end.max(int_start)..width {
         let mut acc = 0f32;
         for ki in 0..kernel.len() {
             let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
-            acc = bfma(plane[xi], kernel[ki], acc);
+            acc = plane[xi].mul_add(kernel[ki], acc);
         }
         out[x] = acc;
     }
@@ -952,9 +934,9 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
                     }
                     // Accumulate: stride-1 reads + writes → LLVM auto-vectorises.
                     for xi in 0..tile {
-                        acc_r[xi] = bfma(r_tap[xi], kv, acc_r[xi]);
-                        acc_g[xi] = bfma(g_tap[xi], kv, acc_g[xi]);
-                        acc_b[xi] = bfma(b_tap[xi], kv, acc_b[xi]);
+                        acc_r[xi] = r_tap[xi].mul_add(kv, acc_r[xi]);
+                        acc_g[xi] = g_tap[xi].mul_add(kv, acc_g[xi]);
+                        acc_b[xi] = b_tap[xi].mul_add(kv, acc_b[xi]);
                     }
                 }
                 for xi in 0..tile {
@@ -997,9 +979,9 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
                         b_tap[xi] = temp[b + 2] as f32;
                     }
                     for xi in 0..tile {
-                        acc_r[xi] = bfma(r_tap[xi], kv, acc_r[xi]);
-                        acc_g[xi] = bfma(g_tap[xi], kv, acc_g[xi]);
-                        acc_b[xi] = bfma(b_tap[xi], kv, acc_b[xi]);
+                        acc_r[xi] = r_tap[xi].mul_add(kv, acc_r[xi]);
+                        acc_g[xi] = g_tap[xi].mul_add(kv, acc_g[xi]);
+                        acc_b[xi] = b_tap[xi].mul_add(kv, acc_b[xi]);
                     }
                 }
                 for xi in 0..tile {
