@@ -98,7 +98,17 @@ export function createGridController({
     canvas.height = decoded.height;
     const ctx2d = canvas.getContext('2d');
     if (!ctx2d) return canvas;
-    const imgData = new ImageData(new Uint8ClampedArray(decoded.pixels), decoded.width, decoded.height);
+    // Grid tiles are tight rgba8 (byteLength === w*h*4): wrap the decoded
+    // buffer zero-copy instead of allocating + memcpying it. putImageData
+    // consumes synchronously and does not transfer the buffer, so aliasing the
+    // source is safe. The byteLength guard keeps a future rgba16/strided caller
+    // from feeding a mis-sized buffer through the view path — falls back to copy.
+    const tightLen = decoded.width * decoded.height * 4;
+    const src =
+      decoded.pixels.byteLength === tightLen
+        ? new Uint8ClampedArray(decoded.pixels.buffer, decoded.pixels.byteOffset, tightLen)
+        : new Uint8ClampedArray(decoded.pixels);
+    const imgData = new ImageData(src, decoded.width, decoded.height);
     ctx2d.putImageData(imgData, 0, 0);
     const hadPaint = canvas.dataset.painted === '1';
     canvas.style.opacity = hadPaint ? '0' : '1';

@@ -1797,13 +1797,19 @@ function displayPaintSize(targetCanvas, width, height) {
 
 function downsampleRgbaNearest(source, width, height, targetWidth, targetHeight) {
     const out = new Uint8ClampedArray(targetWidth * targetHeight * 4);
+    // The source-X mapping depends only on x (row-invariant), so hoist it into a
+    // column LUT computed once instead of recomputing min/floor/div per pixel.
+    const colOff = new Int32Array(targetWidth);
+    for (let x = 0; x < targetWidth; x++) {
+        const sx = Math.min(width - 1, Math.floor(((x * 2 + 1) * width) / (targetWidth * 2)));
+        colOff[x] = sx * 4;
+    }
     for (let y = 0; y < targetHeight; y++) {
         const sy = Math.min(height - 1, Math.floor(((y * 2 + 1) * height) / (targetHeight * 2)));
         const srcRow = sy * width * 4;
         const dstRow = y * targetWidth * 4;
         for (let x = 0; x < targetWidth; x++) {
-            const sx = Math.min(width - 1, Math.floor(((x * 2 + 1) * width) / (targetWidth * 2)));
-            const srcIdx = srcRow + sx * 4;
+            const srcIdx = srcRow + colOff[x];
             const dstIdx = dstRow + x * 4;
             out[dstIdx] = source[srcIdx];
             out[dstIdx + 1] = source[srcIdx + 1];
