@@ -1666,6 +1666,15 @@ deferred as design questions rather than unilateral edits.
   source of truth is an architecture decision spanning multiple files, not a safe unilateral edit.
 - Decision needed (ADR): which engine/lightbox is canonical (tauri-parity vs pyramid-gallery), and
   collapse the other? Resolve the panels.js look vocabulary into the same model.
+- UPDATE 2026-06-23 (run 20260622T113415Z, filter-engine fork investigation): CONFIRMED LIVE —
+  `pyramid-filter-engine.js` is reachable from the home page (`web/index.html:56` → top-level
+  `./pyramid-gallery.html:54` → `pyramid-gallery.js:300` `import createFilterEngine`). So it is NOT
+  dead and was NOT deleted (deletion forbidden for a live, colour-behaviour-bearing fork). The
+  canonical engine is `web/lightbox/filter-engine.js` (engine of record, actively developed, wired
+  into the *modular* gallery `web/pyramid-gallery/` + `lightbox/pyramid-lightbox.js`; git 2026-06-22
+  vs legacy 2026-06-08). NOTE: the modular gallery's HTML is NOT linked from index.html — the home
+  nav still points at the legacy top-level page. Full migration + colour-parity risk written up in
+  `.epiccodereview/20260622T113415Z/sections/002/adr_draft/consolidate-filter-engines.md`.
 
 ### QUESTION (ADR/perf): renderLightboxAdjusted re-filters full image + allocs temp canvas per frame
 - `web/pyramid-gallery.js:409-440` (`renderLightboxAdjusted`) re-runs the full-image filter and
@@ -1759,6 +1768,14 @@ WASM-runtime / branch-intent — not safe unilateral local edits). The local
   `./lightbox/filter-engine.js` (buildColorMatrix), with no shared source of truth.
 - Why deferred (architectural → ADR): reconciling three look models is a cross-file design decision.
 - Decision needed: choose a single canonical look/preset representation and adapt the others to it.
+- DOWNGRADE 2026-06-23 (run 20260622T113415Z): this is NOT a true third colour-math fork.
+  `BUILTIN_PROFILES`/`PIPELINE_FILTERS` are plain additive `LOOK_PARAMS` deltas; `mergedLook()`
+  (`panels.js:475-483`) only does `clamp(base + profileDelta + filterDelta)` and returns a `look`
+  object — NO matrices, NO pixel transform. `main.js:919,922` feeds that merged look into the same
+  real WASM LookRenderer/`process` pipeline the main UI sliders drive. So panels.js is a UI-layer
+  preset *vocabulary* feeding the real engine, not a competing math implementation. Residual (minor):
+  align preset names/values with the canonical lightbox preset list for a shared vocabulary —
+  cosmetic, not a correctness fork. Demoted from "third engine" to vocabulary-alignment nicety.
 
 ---
 
@@ -2286,3 +2303,36 @@ clear error instead of being misrouted to the Olympus decoder.
   + `encodeRgba16` + `-roi.jxl` download do not. The corresponding test in
   `web/lightbox/webgl-pipeline.test.js` is `test.skip` (TODO(16-bit-ROI-export)); needs a
   browser/WASM round-trip to implement and verify.
+
+---
+
+## Section — web/main.js card state-bag (ADR-level refactor, deferred)
+
+These two refactors were explicitly deferred from the 2026-06-23 main.js/worker.js
+architectural fix pass (peepCache LRU, listener/cardBy* cleanup, WorkerPool cancel
+propagation, named `process_*_with_flags` wrapper, shared worker-message-types module).
+They are too large to do safely without runtime/browser verification, which is not
+available in this junctioned, headless worktree.
+
+- **Untyped ~30-field card state-bag.** Each gallery card element carries ~30
+  ad-hoc `_`-prefixed expando fields (`_taskId`, `_file`, `_tauriPath`, `_blobUrl`,
+  `_lightbox`, `_jxlDecoded`, `_jxlThumbBmp`, `_thumbRgb`/`_thumbW`/`_thumbH`,
+  `_thumbNativeW`/`_thumbNativeH`/`_thumbOrientation`, `_sensorW`/`_sensorH`,
+  `_embeddedPreview`, `_subjects`, `_crop`, `_focusedSubjectId`, `_sourceMode`,
+  `_tauriResult`, `_pipelineMs`, ...). They are read/written across hundreds of sites
+  in main.js plus several sibling modules (`window.renderSubjectThumb`,
+  `applyCropAndSubjectsToCard`, the lightbox draw path). Moving them into one typed
+  `card._state` sub-object (or a parallel `WeakMap<HTMLElement, CardState>`) is an
+  ADR-level change: the reference surface is too large to restructure correct-by-
+  construction without a real browser to exercise the gallery + lightbox + Tauri
+  batch paths. **Recommendation:** write an ADR proposing a `WeakMap`-backed
+  `CardState` (auto-GC when the element is removed, also fixes the map-leak class),
+  migrate field-by-field behind accessors, verify each batch in-browser.
+
+- **`card._lightbox` untagged union.** `card._lightbox` is sometimes a fully-decoded
+  `{ rgb, w, h }`, sometimes a lazy Tauri stub `{ rgb: null, w, h, id, fetching }`,
+  and sometimes absent — consumers disambiguate by ad-hoc truthiness/`rgb == null`
+  checks (`havePair`, raw-mode gating, the lazy `get_lightbox(id)` fetch). Same
+  deferral reason: typing it as a discriminated union (`{ kind: 'decoded' | 'lazy' }`)
+  touches every `_lightbox` read and needs in-browser verification of the lazy-fetch
+  state machine. Fold into the same CardState ADR above.

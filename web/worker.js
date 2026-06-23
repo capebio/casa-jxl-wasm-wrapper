@@ -5,10 +5,12 @@
 // to a separate pool of jxl-worker.js instances (SIMD+MT, spawned from the
 // main thread so Emscripten Pthreads bootstrap correctly under COOP/COEP).
 //
-// Protocol — main thread posts:
+// Protocol — main thread posts (type strings centralized in
+// ./worker-message-types.js as WorkerMsg.*):
 //   { id, bytes: Uint8Array, options }
 //   { id, type: 'reprocess_live', look }
 //   { type: 'reprocess_thumb_live', taskIds: [], look }
+//   { id, type: 'release_state' } | { id, type: 'cancel' }
 //
 // Worker posts (in order, transferring buffers where safe):
 //   { id, type: 'thumb',         rgb, w, h, pipelineMs, phaseMs, wbR, wbB, ... }
@@ -25,6 +27,7 @@
 // single-thread build (./pkg-st/, no shared memory, no rayon). Selected + bound lazily
 // in ensureWasm(), before any message handler touches these bindings.
 import { detectFormat } from './format-detect.js';
+import { WorkerMsg } from './worker-message-types.js';
 
 let init, rawWasm;
 // A3: rgb_to_rgba removed — send RGB8 directly to JXL worker (saves ~250ms + 25% transfer)
@@ -55,6 +58,30 @@ function pickRawDecoderWithFlags(bytes) {
   return process_orf_with_flags;
 }
 
+// Named-options wrapper over the positional *_with_flags WASM signature.
+// Mirrors processOrfNamed/ORF_NEUTRAL in jxl-benchmark.js, but for the
+// 16-arg flags-carrying decoders (process_orf_with_flags /
+// process_cr2_with_flags / process_dng_with_flags). Behaviour is identical —
+// it just maps a named object onto the bare positional literals so the live
+// decode call site is readable and the argument order is checked in one place.
+//
+// Positional order (MUST match src/lib.rs):
+//   (bytes, flags, exposureEv, contrast, highlights, shadows, whites, blacks,
+//    saturation, vibrance, temp, tint, wbR, wbB, texture, clarity)
+const RAW_NEUTRAL = {
+    exposureEv: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
+    saturation: 0, vibrance: 0, temp: 0, tint: 0,
+    wbR: NaN, wbB: NaN, texture: 0, clarity: 0,
+};
+function processRawWithFlagsNamed(decoderFn, bytes, flags, opts = RAW_NEUTRAL) {
+    const o = { ...RAW_NEUTRAL, ...opts };
+    return decoderFn(
+        bytes, flags,
+        o.exposureEv, o.contrast, o.highlights, o.shadows, o.whites, o.blacks,
+        o.saturation, o.vibrance, o.temp, o.tint, o.wbR, o.wbB, o.texture, o.clarity,
+    );
+}
+
 // EXIF orientation flag bits (mirror src/lib.rs).
 const OUT_FULL_RGB8 = 1;
 const OUT_LIGHTBOX  = 2;
@@ -79,6 +106,12 @@ let wasmReady;
 // Per-taskId state maps — survive across multiple files on this worker.
 const liveStateMap  = new Map(); // taskId → {renderer: LookRenderer, outW, outH, wbR, wbB}
 const thumbStateMap = new Map(); // taskId → same shape but thumb-sized LookRenderer
+// Tasks the main thread has cancelled (lightbox closed / card removed). The
+// synchronous WASM decode (process_*_with_flags) cannot be interrupted mid-call,
+// so cancel is best-effort *between* messages: we free cached renderer state and
+// skip emitting further output for the cancelled task. Bounded by the number of
+// live tasks; entries are cleared as soon as they are consumed.
+const cancelledTasks = new Set();
 
 async function ensureWasm() {
     if (!wasmReady) wasmReady = (async () => {
@@ -281,7 +314,7 @@ function processImageFormat(id, bytes, opts, look, route) {
         const thumbState = thumbStateMap.get(id);
         const thumbRgb = applyLookToState(thumbState, look);
         self.postMessage(
-            { id, type: 'thumb', rgb: thumbRgb,
+            { id, type: WorkerMsg.THUMB, rgb: thumbRgb,
               w: thumbState.outW, h: thumbState.outH,
               nativeW: thumbState.nativeW, nativeH: thumbState.nativeH,
               orientation: 1,
@@ -294,7 +327,7 @@ function processImageFormat(id, bytes, opts, look, route) {
         const lbState = liveStateMap.get(id);
         const bigRgb = applyLookToState(lbState, look);
         self.postMessage(
-            { id, type: 'lightbox', rgb: bigRgb,
+            { id, type: WorkerMsg.LIGHTBOX, rgb: bigRgb,
               w: lbState.outW, h: lbState.outH,
               nativeW: lbState.nativeW, nativeH: lbState.nativeH,
               orientation: 1 },
@@ -315,7 +348,7 @@ function processImageFormat(id, bytes, opts, look, route) {
         const rgbBuf = fullRgb.buffer.slice(fullRgb.byteOffset, fullRgb.byteOffset + fullRgb.byteLength);
         fullRgb = null;
         self.postMessage(
-            { id, type: 'encode_request', pixels: rgbBuf, format: 'rgb8', width: w, height: h,
+            { id, type: WorkerMsg.ENCODE_REQUEST, pixels: rgbBuf, format: 'rgb8', width: w, height: h,
               quality: opts.lossless ? 100 : opts.quality,
               effort: opts.effort ?? 3,
               lossless: !!opts.lossless,
@@ -341,20 +374,37 @@ function applyLookToState(state, look) {
 
 self.addEventListener('message', async (ev) => {
     // --- release cached LookRenderer state for a re-submitted task ---
-    if (ev.data.type === 'release_state') {
+    if (ev.data.type === WorkerMsg.RELEASE_STATE) {
         const lbState = liveStateMap.get(ev.data.id);
         if (lbState) { lbState.renderer.free(); liveStateMap.delete(ev.data.id); }
         const tState = thumbStateMap.get(ev.data.id);
         if (tState) { tState.renderer.free(); thumbStateMap.delete(ev.data.id); }
+        cancelledTasks.delete(ev.data.id);
+        return;
+    }
+
+    // --- cancel an in-flight / no-longer-needed task (lightbox closed, card
+    //     removed). Best-effort: frees cached renderer state and marks the task
+    //     so the pipeline below stops emitting for it. The synchronous WASM
+    //     decode itself cannot be interrupted mid-call. ---
+    if (ev.data.type === WorkerMsg.CANCEL) {
+        const cid = ev.data.id;
+        if (cid !== undefined && cid !== null) {
+            cancelledTasks.add(cid);
+            const lbState = liveStateMap.get(cid);
+            if (lbState) { lbState.renderer.free(); liveStateMap.delete(cid); }
+            const tState = thumbStateMap.get(cid);
+            if (tState) { tState.renderer.free(); thumbStateMap.delete(cid); }
+        }
         return;
     }
 
     // --- lightbox live reprocess (single image) ---
-    if (ev.data.type === 'reprocess_live') {
+    if (ev.data.type === WorkerMsg.REPROCESS_LIVE) {
         const { id, look } = ev.data;
         const state = liveStateMap.get(id);
         if (!state) {
-            self.postMessage({ id, type: 'error_live', error: 'no live state for this task' });
+            self.postMessage({ id, type: WorkerMsg.ERROR_LIVE, error: 'no live state for this task' });
             return;
         }
         try {
@@ -362,7 +412,7 @@ self.addEventListener('message', async (ev) => {
             const rgb = applyLookToState(state, look);
             const liveMs = performance.now() - t0;
             self.postMessage(
-                { id, type: 'lightbox_live', rgb,
+                { id, type: WorkerMsg.LIGHTBOX_LIVE, rgb,
                   // Phase 2: rgb is in sensor orientation (nativeW × nativeH).
                   // Display canvas is sized outW × outH. Main thread rotates via canvas transform.
                   w: state.outW, h: state.outH,
@@ -372,13 +422,13 @@ self.addEventListener('message', async (ev) => {
                 [rgb.buffer],
             );
         } catch (err) {
-            self.postMessage({ id, type: 'error_live', error: String(err?.message || err) });
+            self.postMessage({ id, type: WorkerMsg.ERROR_LIVE, error: String(err?.message || err) });
         }
         return;
     }
 
     // --- gallery thumb batch reprocess (multiple taskIds owned by this worker) ---
-    if (ev.data.type === 'reprocess_thumb_live') {
+    if (ev.data.type === WorkerMsg.REPROCESS_THUMB_LIVE) {
         const { taskIds, look } = ev.data;
         for (const tid of taskIds) {
             const state = thumbStateMap.get(tid);
@@ -386,14 +436,14 @@ self.addEventListener('message', async (ev) => {
             try {
                 const rgb = applyLookToState(state, look);
                 self.postMessage(
-                    { id: tid, type: 'thumb_live', rgb,
+                    { id: tid, type: WorkerMsg.THUMB_LIVE, rgb,
                       w: state.outW, h: state.outH,
                       nativeW: state.nativeW, nativeH: state.nativeH,
                       orientation: state.orientation },
                     [rgb.buffer],
                 );
             } catch (err) {
-                self.postMessage({ id: tid, type: 'error_live', error: String(err?.message || err) });
+                self.postMessage({ id: tid, type: WorkerMsg.ERROR_LIVE, error: String(err?.message || err) });
             }
         }
         return;
@@ -403,6 +453,12 @@ self.addEventListener('message', async (ev) => {
     const { id, bytes, options } = ev.data;
     if (!id || !bytes) {
         // Not a pipeline message — ignore unknown types silently
+        return;
+    }
+    // Best-effort cancel: if the task was cancelled before we started (queued
+    // submit then lightbox closed), skip the expensive decode entirely.
+    if (cancelledTasks.has(id)) {
+        cancelledTasks.delete(id);
         return;
     }
     try {
@@ -421,7 +477,7 @@ self.addEventListener('message', async (ev) => {
         }
         if (route === 'sdr' || route === 'jxl' || route === 'unknown') {
             self.postMessage({
-                id, type: 'error',
+                id, type: WorkerMsg.ERROR,
                 error: route === 'sdr'
                     ? 'Standard images (PNG/JPEG/etc.) use the browser decode path, not the RAW pipeline.'
                     : route === 'jxl'
@@ -437,24 +493,35 @@ self.addEventListener('message', async (ev) => {
         // rotation as metadata, so pixels stay sensor-native and we avoid the
         // 60–200 MB intermediate buffer + cache-hostile transpose at encode prep.
         const fullPipeFlags = OUT_FULL_RGB8 | OUT_LIGHTBOX | OUT_THUMB | OUT_NO_ORIENT;
-        const result = pickRawDecoderWithFlags(bytes)(
+        const result = processRawWithFlagsNamed(
+            pickRawDecoderWithFlags(bytes),
             bytes,
             fullPipeFlags,
-            look.exposureEv ?? 0,
-            look.contrast   ?? 0,
-            look.highlights ?? 0,
-            look.shadows    ?? 0,
-            look.whites     ?? 0,
-            look.blacks     ?? 0,
-            look.saturation ?? 0,
-            look.vibrance   ?? 0,
-            look.temp       ?? 0,
-            look.tint       ?? 0,
-            Number.isFinite(opts.wbR) ? opts.wbR : NaN,
-            Number.isFinite(opts.wbB) ? opts.wbB : NaN,
-            look.texture ?? 0,
-            look.clarity ?? 0,
+            {
+                exposureEv: look.exposureEv ?? 0,
+                contrast:   look.contrast   ?? 0,
+                highlights: look.highlights ?? 0,
+                shadows:    look.shadows    ?? 0,
+                whites:     look.whites     ?? 0,
+                blacks:     look.blacks     ?? 0,
+                saturation: look.saturation ?? 0,
+                vibrance:   look.vibrance   ?? 0,
+                temp:       look.temp       ?? 0,
+                tint:       look.tint       ?? 0,
+                wbR: Number.isFinite(opts.wbR) ? opts.wbR : NaN,
+                wbB: Number.isFinite(opts.wbB) ? opts.wbB : NaN,
+                texture: look.texture ?? 0,
+                clarity: look.clarity ?? 0,
+            },
         );
+        // Best-effort cancel checkpoint: the synchronous decode could not be
+        // interrupted, but if the task was cancelled while it ran, free the
+        // decode result and emit nothing further (no renderer state cached yet).
+        if (cancelledTasks.has(id)) {
+            cancelledTasks.delete(id);
+            result.free();
+            return;
+        }
         // OUT_NO_ORIENT: result.width/height are sensor dims (pre-rotation).
         let w = result.width;
         let h = result.height;
@@ -508,7 +575,7 @@ self.addEventListener('message', async (ev) => {
         const thumbState = thumbStateMap.get(id);
         const thumbRgb = applyLookToState(thumbState, look);
         self.postMessage(
-            { id, type: 'thumb', rgb: thumbRgb,
+            { id, type: WorkerMsg.THUMB, rgb: thumbRgb,
               w: thumbState.outW, h: thumbState.outH,
               nativeW: thumbState.nativeW, nativeH: thumbState.nativeH,
               orientation: thumbState.orientation,
@@ -520,7 +587,7 @@ self.addEventListener('message', async (ev) => {
         const lbState = liveStateMap.get(id);
         const bigRgb = applyLookToState(lbState, look);
         self.postMessage(
-            { id, type: 'lightbox', rgb: bigRgb,
+            { id, type: WorkerMsg.LIGHTBOX, rgb: bigRgb,
               w: lbState.outW, h: lbState.outH,
               nativeW: lbState.nativeW, nativeH: lbState.nativeH,
               orientation: lbState.orientation },
@@ -538,7 +605,7 @@ self.addEventListener('message', async (ev) => {
         const rgbBuf = fullRgb.buffer.slice(fullRgb.byteOffset, fullRgb.byteOffset + fullRgb.byteLength);
         fullRgb = null; // allow GC
         self.postMessage(
-            { id, type: 'encode_request', pixels: rgbBuf, format: 'rgb8', width: w, height: h,
+            { id, type: WorkerMsg.ENCODE_REQUEST, pixels: rgbBuf, format: 'rgb8', width: w, height: h,
               quality: opts.lossless ? 100 : opts.quality,
               effort: opts.effort ?? 3,
               lossless: !!opts.lossless,
@@ -558,7 +625,7 @@ self.addEventListener('message', async (ev) => {
         }
         self.postMessage({
             id,
-            type: 'error',
+            type: WorkerMsg.ERROR,
             error: (err && (err.message || String(err))) || 'unknown error',
         });
     }
