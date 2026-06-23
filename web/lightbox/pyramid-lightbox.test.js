@@ -3,30 +3,44 @@ import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('./pyramid-lightbox.js', import.meta.url), 'utf8');
 
-// Task 8: JXTC decode metrics capture
-// Verify the timing instrumentation is present in the source.
+// pyramid-lightbox decode path (post-refactor).
+//
+// The earlier "Task 8" tests asserted on JXTC timing instrumentation
+// (t0Decode / jxtcDecodeMs / via:'jxtc' / decodeTileContainerRegionRgba8) that
+// was removed when loadLevel was refactored to decode through the shared
+// scheduler context (ctx.decode session). These tests now assert on the
+// CURRENT decode reality so they reflect what the code actually does.
 
-test('Task 8: t0Decode timing variable declared before JXTC decode call', () => {
-  expect(source).toContain('const t0Decode = performance.now()');
+test('loadLevel decodes through the shared scheduler context (ctx.decode), not an ad-hoc JXTC region call', () => {
+  expect(source).toContain('ctx.decode(');
+  // The removed JXTC region-decode helper must not have crept back in.
+  expect(source).not.toContain('decodeTileContainerRegionRgba8');
 });
 
-test('Task 8: jxtcDecodeMs assigned from t0Decode after decodeTileContainerRegionRgba8', () => {
-  // Uses assignment to outer `let jxtcDecodeMs` (not re-declaration) so the value escapes the try block.
-  expect(source).toContain('jxtcDecodeMs = performance.now() - t0Decode');
+test('decode is deduped/monotonic via sourceKey = contenthash', () => {
+  // The decode request passes the level contenthash as sourceKey so the
+  // scheduler can dedupe and keep monotonic ordering.
+  expect(source).toMatch(/sourceKey:\s*entry\.contenthash/);
 });
 
-test('Task 8: jxtcDecodeMs stored on levelInfo', () => {
-  expect(source).toContain('jxtcDecodeMs');
-  // Must appear in the levelInfo literal
+test('decode picks format from the 8/16-bit mode toggle', () => {
+  // rgba8 for the 8-bit path, rgbaf32 for the 16-bit (HDR) path.
+  expect(source).toMatch(/const format = use16 \? 'rgbaf32' : 'rgba8'/);
+  expect(source).toMatch(/format,/); // passed into ctx.decode opts
+});
+
+test('frames are drained from the session and pixels packed/kept', () => {
+  // Refactored loop: iterate session.frames(), keep the last frame with pixels.
+  expect(source).toContain('session.frames()');
+  expect(source).toMatch(/for await \(const f of session\.frames\(\)\)/);
+  // 8-bit packs via packFramePixels; 16-bit keeps the rgbaf32 Float32Array.
+  expect(source).toContain('packFramePixels(last)');
+});
+
+test('levelInfo literal records contenthash, dimensions, size and bitsPerSample', () => {
   const levelInfoBlock = source.match(/levelInfo\s*=\s*\{[^}]+\}/s)?.[0] ?? '';
-  expect(levelInfoBlock).toContain('jxtcDecodeMs');
-});
-
-test('Task 8: jxtcDecodeMs logged via log helper', () => {
-  // The log call must reference jxtcDecodeMs so it is visible in the lightbox console.
-  expect(source).toMatch(/log\?\.\([^)]*jxtcDecodeMs/);
-});
-
-test('Task 8: via: jxtc present in the log output so callers can distinguish path', () => {
-  expect(source).toContain("via: 'jxtc'");
+  expect(levelInfoBlock).toContain('contenthash:');
+  expect(levelInfoBlock).toContain('bitsPerSample:');
+  // bits is 16 on the use16 path, 8 otherwise.
+  expect(source).toMatch(/bits = 16/);
 });

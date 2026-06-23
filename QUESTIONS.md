@@ -2278,3 +2278,11 @@ clear error instead of being misrouted to the Olympus decoder.
   covered by new vitest cases in `web/format-detect.test.js` (12 pass). RAW
   routing is unchanged (worker RAW branch is byte-identical; only `opts`/`look`
   were hoisted above the new route switch).
+
+- **16-bit ROI export from the lightbox (unimplemented).** Scoped in commit c108c22c
+  ("M3 ... + 16-bit ROI export") but never wired into `web/lightbox/pyramid-lightbox.js`.
+  Building blocks exist (`adjustedRgba16ForExport` in `webgl-pipeline.js`,
+  `decodePyramidRegion` in `pyramid-gallery/pyramid-decode.js`) but the lightbox-side glue
+  + `encodeRgba16` + `-roi.jxl` download do not. The corresponding test in
+  `web/lightbox/webgl-pipeline.test.js` is `test.skip` (TODO(16-bit-ROI-export)); needs a
+  browser/WASM round-trip to implement and verify.
