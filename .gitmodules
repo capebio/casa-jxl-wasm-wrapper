@@ -1,3 +1,7 @@
 [submodule "external/libjxl"]
 	path = external/libjxl
 	url = https://github.com/capebio/libjxl.git
+[submodule "external/libjxl-012"]
+	path = external/libjxl-012
+	url = https://github.com/capebio/libjxl.git
+	branch = casa-0.12-dev-o2
