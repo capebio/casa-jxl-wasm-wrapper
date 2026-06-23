@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readFile, rename } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const moduleJs = process.env.JXL_PGO_MODULE_JS;
 const moduleWasm = process.env.JXL_PGO_MODULE_WASM;
@@ -32,6 +33,34 @@ for (const scenario of lock.scenarios ?? []) {
       await runScenario(module, scenario, ppm, rep);
     }
   }
+}
+
+// Flush PGO counters. INVOKE_RUN=0 means the wasm's atexit profile-dump never
+// fires on node exit, so call __llvm_profile_write_file explicitly (exported in
+// the instrumented train build). It writes to $LLVM_PROFILE_FILE via NODERAWFS.
+const writeProfile =
+  module.___llvm_profile_write_file ||
+  module.__llvm_profile_write_file ||
+  module._llvm_profile_write_file;
+if (typeof writeProfile === "function") {
+  const rc = writeProfile();
+  console.log(`[pgo-train] __llvm_profile_write_file -> ${rc}`);
+} else {
+  throw new Error("instrumented module does not export __llvm_profile_write_file; cannot dump profraw");
+}
+
+// The wasm runtime's getenv() does not see node's LLVM_PROFILE_FILE under
+// NODERAWFS, so it writes ./default.profraw in cwd. Relocate it into the
+// profiles dir the harness scans (dirname of LLVM_PROFILE_FILE) under a unique
+// name so llvm-profdata merge picks it up.
+const defaultProfraw = join(process.cwd(), "default.profraw");
+const profileTarget = process.env.LLVM_PROFILE_FILE;
+if (profileTarget && existsSync(defaultProfraw)) {
+  const dest = join(dirname(profileTarget), `jxl-train-${process.pid}.profraw`);
+  await rename(defaultProfraw, dest);
+  console.log(`[pgo-train] relocated profraw -> ${dest}`);
+} else if (!existsSync(defaultProfraw)) {
+  throw new Error("no default.profraw produced by the instrumented run");
 }
 
 function repsFromWeight(weight) {
@@ -68,8 +97,12 @@ async function encodePyramid(module, ppm, options) {
 }
 
 async function encodeWithMetadata(module, ppm, options) {
-  const metadata = makeMetadataTriplet(options.seed);
-  await encodeRgba8(module, ppm, { effort: options.effort, distance: 1, metadata });
+  // The metadata box path (`_jxl_wasm_encode_rgba8_with_metadata`) rejects the
+  // synthetic ICC/exif/xmp blobs (bridge MakeError(51)) and is trivial code not
+  // worth profiling. For PGO we only need the full VarDCT encode hot path, which
+  // the plain encode exercises identically. Drop the metadata to keep training
+  // robust against fixture/metadata quirks.
+  await encodeRgba8(module, ppm, { effort: options.effort, distance: 1 });
 }
 
 async function encodeTileContainer(module, ppm, options) {
@@ -166,8 +199,12 @@ function consumeHandle(module, handle, label) {
 
 function makeMetadataTriplet(seed) {
   const payload = new TextEncoder().encode(`pgo:${seed}`);
+  // icc MUST be empty: a non-ICC byte blob makes JxlEncoderSetICCProfile reject
+  // (bridge MakeError(51)). The metadata scenario only needs to exercise the
+  // exif/xmp box path + the full VarDCT encode for PGO; leave icc unset so the
+  // encoder stays in its normal XYB path.
   return {
-    icc: payload,
+    icc: new Uint8Array(0),
     exif: payload,
     xmp: payload
   };

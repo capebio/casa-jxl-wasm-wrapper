@@ -97,8 +97,11 @@ async function resolveSources() {
   return existing;
 }
 
-export function pickPgoSourceFiles({ sources = DEFAULT_SOURCES, limit = DEFAULT_SOURCES.length } = {}) {
-  return sources.slice(0, limit);
+export function pickPgoSourceFiles({ sources = DEFAULT_SOURCES, limit = sources.length } = {}) {
+  // Default: use ALL provided sources (a richer/diverse corpus yields better PGO
+  // branch coverage). Cap only via explicit `limit` or PGO_SOURCE_LIMIT.
+  const cap = process.env.PGO_SOURCE_LIMIT ? Number(process.env.PGO_SOURCE_LIMIT) : limit;
+  return sources.slice(0, cap);
 }
 
 /**
