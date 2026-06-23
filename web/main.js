@@ -1110,7 +1110,11 @@ function makeCard(name) {
             try {
                 const [settings, token] = await Promise.all([invoke('get_settings'), invoke('get_token')]);
                 const { jxl, exif } = card._tauriResult;
-                const _jb = new Uint8Array(jxl); let _js = ''; for (let _i = 0; _i < _jb.length; _i++) _js += String.fromCharCode(_jb[_i]);
+                const _jb = new Uint8Array(jxl); let _js = '';
+                // Chunked binary-string build: String.fromCharCode.apply over
+                // 0x8000-byte windows avoids the super-linear cost of per-byte
+                // string concat on MB-scale JXL payloads. Identical base64 out.
+                for (let _i = 0; _i < _jb.length; _i += 0x8000) _js += String.fromCharCode.apply(null, _jb.subarray(_i, _i + 0x8000));
                 const jxl_b64 = btoa(_js);
                 const result = await invoke('push_to_planner', {
                     payload: { filename: name, jxl_b64, exif, planner_url: settings.planner_url, token: token ?? '' },
@@ -3570,9 +3574,16 @@ function lookToSnake(look) {
 }
 
 function rgbToRgbaArr(rgb) {
-    const rgba = new Uint8ClampedArray(rgb.length / 3 * 4);
-    for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
-        rgba[j] = rgb[i]; rgba[j+1] = rgb[i+1]; rgba[j+2] = rgb[i+2]; rgba[j+3] = 255;
+    // Same fast packer as rgbToRgba (one Uint32 store per pixel, ~4x fewer
+    // stores than the byte-wise form). Derives n from the RGB24 length so the
+    // existing single-arg call sites (decoded-frame paint paths) are unchanged.
+    // Little-endian => 0xFFBBGGRR; alpha fixed at 255. Byte-identical output.
+    const n = (rgb.length / 3) | 0;
+    const buf = new ArrayBuffer(n * 4);
+    const rgba = new Uint8ClampedArray(buf);
+    const u32 = new Uint32Array(buf);
+    for (let i = 0, p = 0; i < n; i++, p += 3) {
+        u32[i] = (rgb[p]) | (rgb[p + 1] << 8) | (rgb[p + 2] << 16) | 0xFF000000;
     }
     return rgba;
 }
