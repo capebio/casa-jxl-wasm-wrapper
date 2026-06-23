@@ -146,11 +146,19 @@ pub struct DecodeRegion {
     pub height: u32,
 }
 
-/// Movement counters from the measurement path (validates "remove movement").
+/// Measurement counters emitted by the timing paths (`time_full_decode`,
+/// `time_native_decode`). Intended for coarse allocation-movement audits.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DecodeMetrics {
     pub input_bytes: u64,
     pub output_bytes: u64,
+    /// Coarse count of major heap allocations in the decode path. Both timing
+    /// paths (`time_full_decode`, `time_native_decode`) call `run_full_into`
+    /// with `want_extra = false`, which performs exactly one `Vec` allocation
+    /// for the output pixel buffer — so the value is `1` in both cases. This
+    /// field is NOT a precise per-byte or per-call allocator count; it is a
+    /// structural indicator. If the call site ever gains extra-channel readback
+    /// (`want_extra = true`) the count would need to be updated (1 + extras).
     pub allocations: u32,
     pub decode_ms: f64,
 }

@@ -1349,3 +1349,117 @@ defer the eviction to a microtask) if this path is ever enabled in production.
 - `as`-casts to reach `sessionId`/`metric`/`stage` on the protocol union — pervasive and
   deliberate for discriminated-union narrowing on the hot path.
 - `dist-test/` was NOT review-scoped (generated TS output of `src/`).
+
+---
+
+# EpicCodeReview 20260623T013020Z — crates/raw-pipeline/src — global ADR drafts
+
+17 confirmed architecture+vision opportunities, all awaiting human ratification (no code edited). Drafts in `.epiccodereview/20260623T013020Z/global/adr_draft/`.
+
+## ADR DRAFT (global): CFA pattern is represented three incompatible ways across the RAW front-ends
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/cfa-pattern-three-representations.md
+- Recommends: Promote one shared `Cfa` phase type that every front-end populates; ORF must carry explicit CFA phase instead of silently assuming RGGB (kernels are already phase-aware — gap is type ownership).
+- Reversible: partial
+
+## ADR DRAFT (global): Tone-matrix math has two independent scalar implementations kept byte-identical by hand
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/tone-matrix-two-scalar-implementations.md
+- Recommends: Extract per-pixel tone kernel into one `#[inline]` fn consumed by both the LUT-builder tail (pipeline.rs) and the SIMD scalar tail (tone_simd.rs).
+- Reversible: yes
+
+## ADR DRAFT (global): No unified RAW decode entry point — every caller sniffs format and picks a different function
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/no-unified-raw-decode-entry-point.md
+- Recommends: Introduce a single `decode_raw(&[u8]) -> RawFrame` dispatcher absorbing the hand-assembled ORF glue.
+- Reversible: partial
+
+## ADR DRAFT (global): Endian readers and IFD tag-value extractors are reimplemented in all three TIFF-family parsers
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/duplicated-tiff-endian-ifd-readers.md
+- Recommends: Extract a shared `tiff_io` module (endian-aware bounds-checked readers + typed tag accessor) for tiff.rs/cr2.rs/dng.rs.
+- Reversible: yes
+
+## ADR DRAFT (global): The fused decode→black-subtract→demosaic band path exists only for DNG
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/fused-decode-demosaic-only-dng.md
+- Recommends: Extend the fused band decode+demosaic peak-memory path to CR2 and ORF behind the unified `decode_raw` entry.
+- Reversible: yes
+
+## ADR DRAFT (global): Rich capture provenance is parsed but never embedded into the encoded JXL
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/capture-provenance-not-embedded-in-jxl.md
+- Recommends: Add structured metadata input to EncoderOpts and embed EXIF/XMP boxes.
+- Reversible: yes
+
+## ADR DRAFT (global): Perceptual kernels are hand-written four times with only pairwise parity tests
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/simd-kernels-four-way-parity-contract.md
+- Recommends: Add tolerance-parameterised cross-backend parity harness; real gap is wasm (avx512 already tested) — pin wasm scale_err/pixels_to_xyb/ssim_moments against oracle.
+- Reversible: yes
+
+## ADR DRAFT (global): XYB transform and Butteraugli pyramid are crate-private
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/xyb-engine-not-exposed.md
+- Recommends: Expose minimal public `pixels_to_xyb` + pyramid accessor for downstream ML/recognition.
+- Reversible: yes
+
+## ADR DRAFT (global): Sensor-sharpening matrix B is a fixed constant with no illuminant input
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/sensor-sharpen-matrix-fixed-no-illuminant.md
+- Recommends: Thread optional per-camera `sensor_b` + WB-derived illuminant into constancy path (const as default).
+- Reversible: yes
+
+## ADR DRAFT (global): PerceptualGrid is hardcoded to scale=1.0 and silently drops saturation/vibrance
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/perceptualgrid-hardcoded-scale-drops-saturation.md
+- Recommends: Give the grid a sat/vib dimension (thread-local rebuild keyed on sat/vib bits, like LutCache) or 4D LUT.
+- Reversible: partial
+
+## ADR DRAFT (global): Camera-to-sRGB colour policy is scattered with no single owner
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/camera-to-srgb-colour-policy-scattered.md
+- Recommends: Introduce a `ColourPolicy` resolver with explicit precedence (embedded matrix → per-make table → CAM_TO_SRGB).
+- Reversible: yes
+
+## ADR DRAFT (global): FrameStats content-hash is exact; a perceptual/LSH hash would enable change detection
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/framehash-perceptual-lod-change-detection.md
+- Recommends: Add coarse perceptual/LSH hash (downsampled XYB sign bits) alongside exact hash for time-lapse change triage.
+- Reversible: yes
+
+## ADR DRAFT (global): EXR scene-referred HDR is clamped at ingest before the constancy engine
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/exr-hdr-clamped-before-constancy-engine.md
+- Recommends: Carry scene-referred HDR f32 through log-Euclidean constancy/tone engine, tone-map last, gated on HDR input.
+- Reversible: partial
+
+## ADR DRAFT (global): apply_perceptual_constancy supports layer-aware blending but has no bulk/SIMD entry
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/perceptual-constancy-no-bulk-simd-entry.md
+- Recommends: Add `apply_perceptual_constancy_bulk` over SoA planes (mirroring perceptual_apply_bulk).
+- Reversible: yes
+
+## ADR DRAFT (global): The 4-wide tone path delegates the constancy branch to 4 scalar calls
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/perceptual-grid-not-simd-in-tone-math4.md
+- Recommends: Implement wasm v128 / AVX trilinear grid gather for the constancy branch of apply_tone_math4.
+- Reversible: yes
+
+## ADR DRAFT (global): The RAW pipeline processes whole frames; a tile/region + LOD entry point is missing
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/no-region-decode-lod-entry-point.md
+- Recommends: Add `process_region(rgb16, stride, rect, lod)` over the already-pure per-pixel pipeline.
+- Reversible: yes
+
+## ADR DRAFT (global): Strategic map — RAW ingest → demosaic → tone/LUT → JXL codec
+- File: .epiccodereview/20260623T013020Z/global/adr_draft/strategic-map-raw-ingest-to-jxl.md
+- Recommends: Adopt the verified system map as canonical (drift-checked via ecosystem-map-gen); sequence dependent ADRs behind the `decode_raw` keystone.
+- Reversible: yes
+
+---
+
+# EpicCodeReview 20260623T013020Z — crates/raw-pipeline/src — section (root)
+
+19 confirmed findings. 9 fixed in-place (commit follows). Deferrals below.
+
+## DEFERRED (uncertain — verifier could not resolve from in-crate code)
+- jxl_casadecoder.rs:~440 — Non-partial decode path `set_len`s the output buffer to `elems` and trusts libjxl to fully fill it; if libjxl returns S_FULL with a partially-written bound buffer, uninitialised memory ships as pixels. Hinges on libjxl's internal fill contract (out of crate). Need: confirm libjxl guarantees full fill on S_FULL, or zero-init the buffer before SetImageOutBuffer.
+- pipeline.rs:~1032 — Texture + clarity unsharp run as two full read-modify-write passes; fusing into one traversal needs a 4th BLUR_SCRATCH buffer and only helps the both-sliders-active path. perf_sensitive — needs a flipflop A/B before commit (gate ≥5%).
+
+## DEFERRED (direct-fix attempted → cross-file / contract / FFI)
+- cr2.rs:478-496 — CR2 WB silently defaults to magic 2.0/1.7 on missing/garbled MakerNote, no caller signal. Fix needs a `wb_from_camera: bool` on `Cr2Image` + a colour-fallback policy decision in src/lib.rs (use auto_wb_rggb? warn? bail?) — colour intent, author's call. Suggested: add the bool, decide fallback in lib.rs.
+- casabio_encode.rs:188-216 — `encode_variants_cancellable` polls cancel only between variants, never inside the dominant EFFORT_FULL libjxl encode. A cooperative mid-encode cancel hook requires an FFI/libjxl callback change (build-gated, cross-boundary). Defer to ADR.
+- decompress.rs / demosaic.rs:12-28 — public APIs return `Result<_, String>` while parsers use anyhow and codecs use thiserror; one decode chain crosses three error idioms (substring-matched, lost categories). Fix is a cross-file signature refactor touching all callers. Defer; see also the global ColourPolicy/error-taxonomy theme.
+- jxl_casadecoder.rs:572/724/951 — three hand-rolled libjxl driver loops (run_full_into / run_progressive_into / decode_progressive_frames_borrowed) with LOAD-BEARING divergence (free-fn uses DecodeLimits::default() not self.opts.limits, saturating_mul vs checked_mul, resize vs reserve+set_len, raw handle vs Decoder). Safe extraction requires deliberately unifying the limits source (a behavior change for the free-fn). Structural debt, not a live bug — defer to intentional-unification ADR.
+
+## DEFERRED ADR-draft opportunities (section-level)
+- image_formats.rs:63-74 — `f32_linear_to_srgb8` does per-channel `powf(1/2.4)` per pixel; pipeline.rs already proves a clamp+gather+lerp over the cached SRGB_ENCODE LUT is byte-identical on u8 output. Wire the existing LUT into this EXR/HDR→display kernel. perf_sensitive (flipflop-gate). Strongest perf opportunity in the section.
+- image_formats.rs:13-22 — `DecodedRgba` is an untagged union (three always-allocated Vec<u8/u16/f32> + bit_depth tag); "exactly one set" lives only in a doc comment. Replace with a 3-variant enum (Rgba8|Rgba16|RgbaF32) to make the invariant compile-enforced.
+- ljpeg.rs / cr2.rs / dng.rs / tiff.rs — no fuzz/property harness over the untrusted-byte parsers despite many hand-added overflow guards; a per-parser cargo-fuzz target (decode_bytes, decompress, ljpeg::decode_tile, tiff::parse) would cheaply catch this bug class. (Live example of the class: dng::read_ascii inline `cnt<=4` branch indexes without bounds check — see global tiff_io ADR.)
+- tiff.rs:559-592 — `visit_ifd` is a shared zero-alloc walker, but the Olympus sub-IFD parsers + cr2.rs/dng.rs hand-roll their own IFD loops with divergent bounds policies (dng inline read_ascii unchecked). Route them through visit_ifd. Overlaps the global `duplicated-tiff-endian-ifd-readers` ADR.
+- pipeline.rs:1060-1073 — parallel clarity branches recompute `orig/65535.0` (f32 div, not auto-reciprocated) + `4*v*(1-v)` per element while the serial branch hoists norm_4/clarity_factor; copy the hoisted form into the parallel closures (native throughput path). perf_sensitive (flipflop-gate).

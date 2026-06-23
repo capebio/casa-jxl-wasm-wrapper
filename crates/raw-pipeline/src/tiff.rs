@@ -94,10 +94,14 @@ pub fn extract_largest_jpeg(data: &[u8]) -> Option<Vec<u8>> {
     let mut best: Option<&[u8]> = None;
     for n in 0..sois.len() {
         let start = sois[n];
-        let end = if n + 1 < sois.len() { sois[n + 1] } else { scan_end };
-        // Search for EOI (0xFF 0xD9) backwards from `end`.
+        // Search for this candidate's EOI (0xFF 0xD9) scanning BACKWARDS from the end
+        // of the buffer. We do NOT cap at sois[n+1] because a real preview JPEG often
+        // embeds a thumbnail (inner FFD8…FFD9), and capping would stop at the inner SOI
+        // returning a truncated blob. The true outermost EOI lies after any nested SOIs.
+        // Taking the last FFD9 in the whole remaining buffer gives the correct outer EOI.
+        let search_end = scan_end;
         let mut eoi = None;
-        let mut j = end.saturating_sub(1);
+        let mut j = search_end.saturating_sub(1);
         while j > start + 1 {
             if chunk[j - 1] == 0xFF && chunk[j] == 0xD9 {
                 eoi = Some(j + 1);
@@ -447,6 +451,19 @@ struct IfdEntry {
 impl IfdEntry {
     fn as_u32(&self, r: &Reader) -> Result<u32> {
         match self.dtype {
+            // BYTE (dtype=1): single unsigned byte, always inline in the value field.
+            // The first raw byte of the value field is the byte value regardless of
+            // endianness (TIFF spec §7, "Value" column). For LE files value_off is
+            // stored little-endian so byte[0] is the low byte; for BE it is the high
+            // byte of the big-endian u32, i.e. value_off >> 24.
+            1 => {
+                let byte_val = if r.le {
+                    (self.value_off & 0xFF) as u32
+                } else {
+                    self.value_off >> 24
+                };
+                Ok(byte_val)
+            }
             3 => {
                 if self.count <= 2 {
                     // Inline SHORT: count==1 or count==2 both fit in the 4-byte value field.
@@ -661,7 +678,10 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
                     } else {
                         continue;
                     };
-                    info.wb_r = Some(v as f32 / 256.0);
+                    // Guard against zero (corrupt/absent value) — mirrors 0x2040 path.
+                    if v > 0 {
+                        info.wb_r = Some(v as f32 / 256.0);
+                    }
                 }
             }
             // BlueBalance: SHORT×1, inline value, × 256
@@ -674,7 +694,10 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
                     } else {
                         continue;
                     };
-                    info.wb_b = Some(v as f32 / 256.0);
+                    // Guard against zero (corrupt/absent value) — mirrors 0x2040 path.
+                    if v > 0 {
+                        info.wb_b = Some(v as f32 / 256.0);
+                    }
                 }
             }
             // WB_RBLevels: SHORT×2 inline (4 bytes fits in value field), × 256
@@ -693,8 +716,10 @@ fn parse_olympus_makernote(r: &Reader, entry: &IfdEntry, info: &mut OrfInfo) {
                             _ => continue,
                         }
                     };
-                    info.wb_r = Some(a as f32 / 256.0);
-                    info.wb_b = Some(b as f32 / 256.0);
+                    // Guard against zero levels — mirrors 0x2040 path; a zero SHORT
+                    // would zero the channel multiplier and produce a colour cast.
+                    if a > 0 { info.wb_r = Some(a as f32 / 256.0); }
+                    if b > 0 { info.wb_b = Some(b as f32 / 256.0); }
                 }
             }
             // ImageProcessing sub-IFD — contains WB_RBLevels (tag 0x0100) on

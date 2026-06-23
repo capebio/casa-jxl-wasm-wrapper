@@ -436,14 +436,19 @@ fn hybrid_spring_and_dimishing_fc(lr: f32, lg: f32, lb: f32, luma_l: f32) -> (f3
     (r * fc_r, g * fc_g, b * fc_b)
 }
 
-/// Scaffold for precomputed multi-dimensional LUT (Lens17 #10, layer2) to execute the
-/// log-geodesic + Molchanov residuals/A_tensor + hybrid spring + Los Alamos f(c) at
-/// sub-millisecond speeds for AR/LLM/photogram/immersive use (illum-invariant).
-/// Grid would be ~17^3 or 33^3 (small memory, ~ few hundred KB for f32x3), built once
-/// or on sat/vib change, trilinear interp in hot path instead of ln/exp/sqrt per-px.
-/// Currently a stub that documents the structure; real population + sample can replace
-/// the runtime calc in the !c-perceptual pc branch of apply_tone_math.
-/// (Agent can expand without touching other files.)
+/// Live default perceptual-constancy LUT for `#[cfg(not(feature = "c-perceptual"))]` builds
+/// (WASM and native without the optional C++ AVX2 feature).
+///
+/// `new()` fully populates a 17³ grid by evaluating the complete advanced path
+/// (log-geodesic → Molchanov residuals/A_tensor → hybrid spring → f(c) hue diminishing
+/// returns) at every lattice point in [0, 1.5]³ with fixed saturation scale.
+/// `sample()` performs trilinear interpolation into that grid, replacing per-pixel
+/// `ln`/`exp`/`sqrt` calls with a handful of multiplies and adds.
+///
+/// Called per pixel in `apply_tone_math` via the `PERCEPTUAL_GRID` thread-local
+/// (lazy-initialised on first use, then borrowed read-only in the hot loop).
+/// Do not treat this as inert: removing or skipping it disables perceptual constancy
+/// for all non-c-perceptual targets.
 ///
 /// PIPE-008: data is stored as three separate planar arrays (data_r, data_g, data_b),
 /// each of length SZ^3, so the 8 corner values needed for trilinear interpolation on one
