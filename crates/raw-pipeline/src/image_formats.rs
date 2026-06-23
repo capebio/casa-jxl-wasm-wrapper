@@ -60,12 +60,17 @@ fn dynamic_to_rgba(img: DynamicImage) -> DecodedRgba {
 
 /// Convert interleaved RGBA f32 (linear) to RGBA8 for display/preview.
 /// Colour channels get the sRGB OETF; alpha is linear-scaled. HDR clamps to 1.0.
+///
+/// The OETF is evaluated through the shared cached 16384-entry sRGB-encode LUT
+/// (`pipeline::srgb_encode_lerp`) instead of a per-channel `powf`: ~88% faster on a
+/// 12 MP buffer (examples/srgb8_lut_flip.rs). The lerp matches the `powf` build to
+/// ≤1 u8 LSB (~4e-4 % of channels cross a u8 rounding boundary) — sub-perceptual for
+/// a display preview path; endpoints (0 / 255) and the HDR clamp are exact.
 pub fn f32_linear_to_srgb8(rgba_f32: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba_f32.len());
     for px in rgba_f32.chunks_exact(4) {
         for &c in &px[..3] {
-            let c = c.clamp(0.0, 1.0);
-            let s = if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+            let s = crate::pipeline::srgb_encode_lerp(c); // clamps [0,1] internally
             out.push((s * 255.0 + 0.5) as u8);
         }
         out.push((px[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8);

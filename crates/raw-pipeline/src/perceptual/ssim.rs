@@ -52,6 +52,16 @@ pub(crate) fn ssim_with_ref(
         "ssim_with_ref: a.len()/b.len() must hold np pixels of stride ch"
     );
     let wch = ch.min(3);
+    let (sa, saa, sab) = ssim_sums(a, b, np, ch);
+    finalize_ssim(&sa, sb, &saa, sbb, &sab, np, wch)
+}
+
+/// The scalar SSIM accumulation: per-channel test sums `sa=Σx`, `saa=Σx²`, and the
+/// cross term `sab=Σxy` over `np` pixels of stride `ch`. Split out of
+/// `ssim_with_ref` so `all()` can reuse `sa`/`saa` for `channel_moments` instead of
+/// re-streaming the test buffer (the SIMD backends already return these three sums).
+pub(crate) fn ssim_sums(a: &[u8], b: &[u8], np: usize, ch: usize) -> ([u64; 3], [u64; 3], [u64; 3]) {
+    let wch = ch.min(3);
     let mut sa = [0u64; 3];
     let mut saa = [0u64; 3];
     let mut sab = [0u64; 3];
@@ -66,7 +76,27 @@ pub(crate) fn ssim_with_ref(
         }
         j += ch;
     }
-    finalize_ssim(&sa, sb, &saa, sbb, &sab, np, wch)
+    (sa, saa, sab)
+}
+
+/// Derive `channel_moments`' (mus, vars) directly from the test sums `sa=Σx`,
+/// `saa=Σx²` that the SSIM path already accumulated. Bit-identical to
+/// `channel_moments` (same u64 sums, same f64 arithmetic) while saving a full
+/// strided pass over the test buffer. `nch` is the channel count moments cover.
+pub(crate) fn moments_from_sums(sa: &[u64; 3], saa: &[u64; 3], np: usize, nch: usize) -> ([f32; 3], [f32; 3], usize) {
+    let nch = nch.min(3);
+    let mut mus = [0f32; 3];
+    let mut vars = [0f32; 3];
+    if np == 0 {
+        return (mus, vars, 0);
+    }
+    let n = np as f64;
+    for c in 0..nch {
+        let mu = sa[c] as f64 / n;
+        mus[c] = mu as f32;
+        vars[c] = (saa[c] as f64 / n - mu * mu) as f32;
+    }
+    (mus, vars, nch)
 }
 
 /// Combine accumulated moments into the channel-averaged SSIM scalar. Shared by

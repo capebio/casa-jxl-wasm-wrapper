@@ -242,7 +242,7 @@ const SRGB_LUT_N: usize = 16384;
 /// post-LUT is byte-identical to the powf build and the u16 post-LUT differs by ≤1 LSB on rare
 /// entries (that 1 LSB is inherited from f32 `powf` node rounding in the table, not the lerp).
 #[inline(always)]
-fn srgb_encode_lerp(y: f32) -> f32 {
+pub(crate) fn srgb_encode_lerp(y: f32) -> f32 {
     let tbl = SRGB_ENCODE.get_or_init(|| {
         (0..=SRGB_LUT_N).map(|i| linear_to_srgb(i as f32 / SRGB_LUT_N as f32)).collect()
     });

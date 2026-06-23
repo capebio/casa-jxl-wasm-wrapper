@@ -283,6 +283,14 @@ impl Comparer {
         if test.len() != self.n * 4 {
             return f32::NAN;
         }
+        self.ssim_test_sums(test).0
+    }
+
+    /// SSIM score plus the per-channel test sums `sa=Σx`, `saa=Σx²` that every backend
+    /// already accumulates en route to `finalize_ssim`. `all()` reuses `sa`/`saa` to
+    /// derive `channel_moments` without a second pass over the test buffer.
+    /// Caller must ensure `test.len() == self.n * 4` (the public `ssim`/`all` guard it).
+    fn ssim_test_sums(&self, test: &[u8]) -> (f32, [u64; 3], [u64; 3]) {
         match self.backend {
             #[cfg(target_arch = "x86_64")]
             // Channel-as-lane SIMD moments (8-wide, 2 px/iter). flip-measured 1.33–1.51×
@@ -291,7 +299,7 @@ impl Comparer {
             // scalar `ssim_moments_avx2` is retained as the parity oracle for tests + flip.
             Backend::Avx2Strict | Backend::Avx2Rsqrt => {
                 let (sa, saa, sab) = unsafe { simd::avx2::ssim_moments_avx2_cal(test, &self.ref_rgba, self.n) };
-                ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
+                (ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3), sa, saa)
             }
             #[cfg(target_arch = "x86_64")]
             // Server option: channel-as-lane SIMD moments (16-wide, 4 px/iter). The
@@ -300,15 +308,18 @@ impl Comparer {
             // active whenever an AVX-512 backend is selected (auto on server hardware).
             Backend::Avx512Strict | Backend::Avx512Rsqrt => {
                 let (sa, saa, sab) = unsafe { simd::avx512::ssim_moments_avx512(test, &self.ref_rgba, self.n) };
-                ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
+                (ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3), sa, saa)
             }
             #[cfg(target_arch = "wasm32")]
             // wasm v128 channel-as-lane moments — bench-measured 3.73× over scalar.
             Backend::WasmSimd => {
                 let (sa, saa, sab) = simd::wasm::ssim_moments_wasm(test, &self.ref_rgba, self.n);
-                ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
+                (ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3), sa, saa)
             }
-            _ => ssim::ssim_with_ref(test, &self.ref_rgba, self.n, 4, &self.ssim_sb, &self.ssim_sbb),
+            _ => {
+                let (sa, saa, sab) = ssim::ssim_sums(test, &self.ref_rgba, self.n, 4);
+                (ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3), sa, saa)
+            }
         }
     }
 
@@ -373,15 +384,19 @@ impl Comparer {
     /// later task fuses the deinterleave.
     pub fn all(&mut self, test: &[u8]) -> Metrics {
         let butteraugli = self.butteraugli(test);
-        let ssim = self.ssim(test);
         let psnr = self.psnr(test);
-        // Match the per-metric graceful path: a short buffer makes the three calls
-        // above return NaN, so do not let channel_moments index OOB and panic.
-        let moments = if test.len() == self.n * 4 {
-            let (mus, vars, ch) = ssim::channel_moments(test, self.n, 4, 3);
-            ChannelMoments { mus, vars, ch }
+        // Fuse SSIM and channel_moments: the SSIM pass already accumulates the test
+        // sums sa=Σx, saa=Σx² per channel, and mus/vars are exactly sa/n and
+        // saa/n-mu². Deriving them here (bit-identical to channel_moments) removes a
+        // full strided pass over the test buffer — flip-measured 38% off the
+        // SSIM+moments work @24MP (examples/ssim_all_reuse_flip.rs, parity exact).
+        // A short buffer makes the metric calls return NaN; guard moments the same way.
+        let (ssim, moments) = if test.len() == self.n * 4 {
+            let (s, sa, saa) = self.ssim_test_sums(test);
+            let (mus, vars, ch) = ssim::moments_from_sums(&sa, &saa, self.n, 3);
+            (s, ChannelMoments { mus, vars, ch })
         } else {
-            ChannelMoments::default()
+            (f32::NAN, ChannelMoments::default())
         };
         Metrics { butteraugli, ssim, psnr, moments }
     }
@@ -527,6 +542,12 @@ mod tests {
         assert!((m.butteraugli - cmp2.butteraugli(&noisy)).abs() < 1e-5);
         assert!((m.ssim - cmp2.ssim(&noisy)).abs() < 1e-6);
         assert!((m.psnr - cmp2.psnr(&noisy)).abs() < 1e-3);
+        // Moments oracle: all() now derives mus/vars from the SSIM test sums; they must be
+        // BIT-IDENTICAL to a standalone channel_moments pass over the same buffer.
+        let (mus, vars, ch) = ssim::channel_moments(&noisy, w * h, 4, 3);
+        assert_eq!(m.moments.ch, ch, "moments channel count");
+        assert_eq!(m.moments.mus, mus, "fused mus must equal channel_moments");
+        assert_eq!(m.moments.vars, vars, "fused vars must equal channel_moments");
     }
 
     /// Regression: tiny images (1×N, N×1, 1×1) must not panic with index-out-of-bounds.
