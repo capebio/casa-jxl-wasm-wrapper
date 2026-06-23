@@ -1463,3 +1463,29 @@ defer the eviction to a microtask) if this path is ever enabled in production.
 - ljpeg.rs / cr2.rs / dng.rs / tiff.rs — no fuzz/property harness over the untrusted-byte parsers despite many hand-added overflow guards; a per-parser cargo-fuzz target (decode_bytes, decompress, ljpeg::decode_tile, tiff::parse) would cheaply catch this bug class. (Live example of the class: dng::read_ascii inline `cnt<=4` branch indexes without bounds check — see global tiff_io ADR.)
 - tiff.rs:559-592 — `visit_ifd` is a shared zero-alloc walker, but the Olympus sub-IFD parsers + cr2.rs/dng.rs hand-roll their own IFD loops with divergent bounds policies (dng inline read_ascii unchecked). Route them through visit_ifd. Overlaps the global `duplicated-tiff-endian-ifd-readers` ADR.
 - pipeline.rs:1060-1073 — parallel clarity branches recompute `orig/65535.0` (f32 div, not auto-reciprocated) + `4*v*(1-v)` per element while the serial branch hoists norm_4/clarity_factor; copy the hoisted form into the parallel closures (native throughput path). perf_sensitive (flipflop-gate).
+
+---
+
+# EpicCodeReview 20260623T013020Z — crates/raw-pipeline/src — sections bin + perceptual
+
+Section bin (gen_fractal.rs): io-panic-on-save fixed (main → Result, `?` on save()). Aspect-ratio squash (256² grid over 3.5×2.5 window) is cosmetic — WONTFIX. Section perceptual: 27 confirmed; butteraugli() OOB panic on 1×N images FIXED (+regression test). Remaining deferred below.
+
+## DEFERRED (build-gated — need the node bench-wasm / wasm harness; wasm intrinsics can't run under `cargo test` on x86)
+- perceptual/wasm.rs — HIGH: `scale_err_wasm` and `pixels_to_xyb_wasm` have NO scalar-parity assertion anywhere (in-crate or bench-wasm); only `downsample_wasm` is pinned in-crate and `ssd_wasm`/`ssim_moments_wasm` in bench-wasm. These are the f32-reassociation-prone kernels most likely to drift. ACTION: add `scale_err`/`pixels_to_xyb` parity cases to the bench-wasm node harness (the only place wasm intrinsics execute), assert vs scalar oracle within ΔE/tolerance. Overlaps global `simd-kernels-four-way-parity-contract` ADR.
+- perceptual/wasm.rs — `scale_err_wasm` drains its f32 accumulator on a different cadence (16384) than avx2/avx512 (32768/65536); f64 partials are not bit-identical to the oracle (acknowledged in-source, untested). Verify within tolerance via the harness; align cadence if it drifts.
+- perceptual/wasm.rs — `ssim_moments_wasm` has no SIMD-tail loop; correctness relies on FLUSH never firing before `np` and on lane order; untested vs scalar. Needs harness parity over non-multiple-of-lane sizes.
+- perceptual/wasm.rs — `ssim_moments_wasm` uses `v128_load32_zero` on a `*const u32` cast from a `u8` pointer (unaligned); confirm wasm unaligned-load semantics hold (likely fine — wasm allows unaligned), low.
+
+## DEFERRED ADR-draft / structural (perceptual)
+- perceptual/simd/mod.rs — backend dispatch is five independent hand-written `match self.backend` blocks (fill_test_xyb/ssim/psnr/scale_err_dispatch/downsample_one); four backends kept in lockstep by reviewer diligence only, signatures not even uniform (scale_err takes `rsqrt_path: bool` on x86, wasm collapses it). No dispatch table / kernel-set trait. ADR: introduce a Kernel trait or dispatch table to enforce signature lockstep. Overlaps global SIMD-parity ADR.
+- perceptual/telemetry.rs — runs a SECOND, disjoint dispatch scheme (inline feature-detect, own avx2 kernel, no wasm/avx512 path) ignoring the `Backend` enum. Unify with the primary dispatch.
+- perceptual/simd/mod.rs — `resolve_forced_backend` hard-codes Backend discriminant integers (id==4 == WasmSimd) instead of deriving from the enum; brittle. Low.
+- perceptual — three/four near-identical scalar 2× box-downsample bodies (downsample_inplace, butteraugli::dn2, test-side) with inconsistent edge-clamp idiom (`.min(h-1)` vs `if sy0+1<h`) — silent-drift surface. Dedup behind one helper.
+- perceptual/simd/mod.rs — blur (mask) stage has no SIMD backend (always scalar box_blur); rsqrt SIMD paths never reached (auto selection passes prefer_rsqrt=false); AVX-512 PSNR + rsqrt distinction collapse to other kernels at dispatch (enum carries more states than kernels honour). perf/structural, low — measure before acting.
+- perceptual/simd/avx2.rs — scalar SSIM oracle `ssim_moments_avx2` lives in the avx2 module wearing an unneeded `#[target_feature]`; third copy of the moment loop. Move to scalar module.
+- perceptual — opportunity: NO unified cross-backend parity harness pinning all kernels × all 4 backends to the scalar oracle + property tests on metric invariants (identical images → score 0). Umbrella for the wasm gaps above; overlaps global SIMD-parity ADR.
+
+## DEFERRED (low correctness — deferred to avoid changing established metric output)
+- perceptual/ssim.rs `finalize_ssim` — denominator/variance not clamped non-negative; pathological inputs could underflow. Deferred: a clamp could shift existing SSIM values and risk the parity contract — needs a parity check before landing.
+- perceptual/simd/mod.rs `Metrics::all()` — returns f32::NAN for butteraugli/ssim/psnr on a short buffer but zeroed Comparer moments; mixed sentinel inconsistency. Low; pick one sentinel convention.
+- perceptual/psnr.rs — PSNR averages MSE over the full RGBA byte buffer INCLUDING alpha, inflating dB on opaque images. Verifier confirmed this is a DOCUMENTED legacy-JS-parity choice — changing it breaks JS parity. Leave unless JS parity is dropped.

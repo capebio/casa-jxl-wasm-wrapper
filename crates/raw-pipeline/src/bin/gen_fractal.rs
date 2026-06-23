@@ -35,7 +35,7 @@ fn iter_to_linear(iter: f64, max_iter: u32) -> [f32; 3] {
     [r * hdr, g * hdr, b * hdr]
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = std::env::args().nth(1).unwrap_or_else(|| ".".into());
     let (w, h, max_iter) = (256u32, 256u32, 200u32);
     let (x_min, x_max, y_min, y_max) = (-2.5_f64, 1.0, -1.25, 1.25);
@@ -52,24 +52,20 @@ fn main() {
 
     // EXR f32 (linear, HDR preserved)
     let exr: image::ImageBuffer<image::Rgba<f32>, Vec<f32>> =
-        image::ImageBuffer::from_raw(w, h, f32buf.clone()).unwrap();
-    image::DynamicImage::ImageRgba32F(exr)
-        .save(format!("{dir}/mandelbrot_f32.exr"))
-        .unwrap();
+        image::ImageBuffer::from_raw(w, h, f32buf.clone()).expect("f32 buffer sized w*h*4");
+    image::DynamicImage::ImageRgba32F(exr).save(format!("{dir}/mandelbrot_f32.exr"))?;
 
     // u16 / u8 TIFF (tone-mapped to display range so they are viewable)
     let disp = raw_pipeline::image_formats::f32_linear_to_srgb8(&f32buf); // RGBA8
     let rgb8: Vec<u8> = disp.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
     image::RgbImage::from_raw(w, h, rgb8.clone())
-        .unwrap()
-        .save(format!("{dir}/mandelbrot_u8.tiff"))
-        .unwrap();
+        .expect("rgb8 buffer sized w*h*3")
+        .save(format!("{dir}/mandelbrot_u8.tiff"))?;
     let rgb16: Vec<u16> = rgb8.iter().map(|&b| (b as u16) << 8 | b as u16).collect();
     let img16: image::ImageBuffer<image::Rgb<u16>, Vec<u16>> =
-        image::ImageBuffer::from_raw(w, h, rgb16).unwrap();
-    image::DynamicImage::ImageRgb16(img16)
-        .save(format!("{dir}/mandelbrot_u16.tiff"))
-        .unwrap();
+        image::ImageBuffer::from_raw(w, h, rgb16).expect("rgb16 buffer sized w*h*3");
+    image::DynamicImage::ImageRgb16(img16).save(format!("{dir}/mandelbrot_u16.tiff"))?;
 
     println!("wrote mandelbrot_f32.exr / mandelbrot_u16.tiff / mandelbrot_u8.tiff to {dir}");
+    Ok(())
 }

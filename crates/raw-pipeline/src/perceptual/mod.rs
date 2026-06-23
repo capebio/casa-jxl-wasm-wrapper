@@ -241,7 +241,10 @@ impl Comparer {
         std::mem::swap(&mut self.tb, &mut self.db);
     }
 
-    /// 3-scale butteraugli. Mutates test scratch (tx/ty/tb get downsampled in place).
+    /// Multi-scale butteraugli (up to 3 scales). Mutates test scratch (tx/ty/tb get
+    /// downsampled in place). Iterates over `self.levels.len()` actual levels — which
+    /// may be fewer than 3 for tiny images (see `Comparer::new` break condition) —
+    /// so a 1×N or N×1 image never indexes a non-existent level.
     pub fn butteraugli(&mut self, test: &[u8]) -> f32 {
         if test.len() != self.n * 4 {
             return f32::NAN;
@@ -249,19 +252,23 @@ impl Comparer {
         self.fill_test_xyb(test);
         let (mut w, mut h) = (self.width, self.height);
         let mut total = 0f32;
-        for s in 0..3 {
+        let num_levels = self.levels.len();
+        for s in 0..num_levels {
             let e = self.scale_err_dispatch(s) * self.opts.weights[s];
             total += e;
-            if s < 2 && w > 1 && h > 1 {
+            // Mirror the Comparer::new break condition: only downsample when there is
+            // a next level AND the current resolution is still 2-D (both dims > 1).
+            // For a full 3-level image: num_levels==3, so `s < 2` — identical to before.
+            if s < num_levels - 1 && w > 1 && h > 1 {
                 let (dw, dh) = ((w >> 1).max(1), (h >> 1).max(1));
                 self.downsample_dispatch(w, h, dw, dh);
                 w = dw; h = dh;
             }
         }
-        // Divide by the actual sum of weights rather than the hardcoded 7.0 (the sum
-        // of the default [4, 2, 1]). Any caller supplying custom Opts.weights would
-        // otherwise receive a result scaled by 7.0/sum(custom_weights) — silently wrong.
-        let weight_sum: f32 = self.opts.weights.iter().sum();
+        // Divide by the sum of weights for the EVALUATED levels only.
+        // For a 3-level image this equals opts.weights.iter().sum() — identical to before.
+        // For a 1- or 2-level image this avoids under-normalizing by un-evaluated weights.
+        let weight_sum: f32 = self.opts.weights[..num_levels].iter().sum();
         // Use assert! (not debug_assert!) so callers passing Opts { weights: [0.0, ..] }
         // or NaN weights get a clear panic in release builds rather than silent NaN propagation
         // through Metrics and downstream comparisons.
@@ -520,6 +527,57 @@ mod tests {
         assert!((m.butteraugli - cmp2.butteraugli(&noisy)).abs() < 1e-5);
         assert!((m.ssim - cmp2.ssim(&noisy)).abs() < 1e-6);
         assert!((m.psnr - cmp2.psnr(&noisy)).abs() < 1e-3);
+    }
+
+    /// Regression: tiny images (1×N, N×1, 1×1) must not panic with index-out-of-bounds.
+    /// `Comparer::new` pushes fewer than 3 levels when width or height reaches 1 during
+    /// downscale; the old hard-coded `for s in 0..3` loop would index `self.levels[1]`
+    /// or `self.levels[2]` which don't exist for those images.
+    #[test]
+    fn tiny_image_no_panic() {
+        // 1×8: at s=0, h=8 w=1 → `w > 1 && h > 1` is FALSE → only 1 level pushed.
+        {
+            let (w, h) = (1, 8);
+            let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 7) % 251) as u8).collect();
+            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let score = cmp.butteraugli(&test);
+            assert!(score.is_finite(), "1×8 butteraugli must be finite, got {score}");
+            let m = cmp.all(&test);
+            assert!(m.butteraugli.is_finite(), "1×8 all().butteraugli must be finite");
+        }
+        // 8×1: same condition, h=1 at s=0.
+        {
+            let (w, h) = (8, 1);
+            let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 7) % 251) as u8).collect();
+            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let score = cmp.butteraugli(&test);
+            assert!(score.is_finite(), "8×1 butteraugli must be finite, got {score}");
+            let m = cmp.all(&test);
+            assert!(m.butteraugli.is_finite(), "8×1 all().butteraugli must be finite");
+        }
+        // 1×1: extreme degenerate — single pixel, 1 level.
+        {
+            let (w, h) = (1, 1);
+            let img = vec![100u8, 150, 200, 255];
+            let test = vec![110u8, 140, 190, 255];
+            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let score = cmp.butteraugli(&test);
+            assert!(score.is_finite(), "1×1 butteraugli must be finite, got {score}");
+            let m = cmp.all(&test);
+            assert!(m.butteraugli.is_finite(), "1×1 all().butteraugli must be finite");
+        }
+        // 2×4: both dims > 1 at s=0, but after one downsample → 1×2, which is ≤ 1 in w
+        // → only 2 levels pushed (verifies 2-level path).
+        {
+            let (w, h) = (2, 4);
+            let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 5) % 251) as u8).collect();
+            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let score = cmp.butteraugli(&test);
+            assert!(score.is_finite(), "2×4 butteraugli must be finite, got {score}");
+        }
     }
 
     /// Parity guard: all() must produce the same values as the three individual calls
