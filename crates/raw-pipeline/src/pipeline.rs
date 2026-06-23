@@ -1108,13 +1108,16 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                 {
                     let n = rgb16.len();
                     let mut i = 0;
-                    let norm_4 = 4.0 / 65535.0;
                     let clarity_factor = params.clarity;
                     while i < n {
                         let orig = rgb16[i] as i32;
                         let blur = blurred[i] as i32;
-                        let v = (orig as f32) * norm_4;
-                        let w = v * (1.0 - v);
+                        // Midtone mask w = 4·v·(1−v), v = orig/65535 — peaks at v=0.5.
+                        // (The previous hoisted form folded the 4 into v as 4·orig/65535,
+                        // which computes 4v(1−4v): wrong sign and 2× magnitude at midtones.
+                        // Matches the parallel closure and the has_snap serial branch above.)
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
                         let delta = clarity_factor * w * (orig - blur) as f32;
                         rgb16[i] = (orig as f32 + delta).round().clamp(0.0, 65535.0) as i32 as u16;
                         i += 1;
