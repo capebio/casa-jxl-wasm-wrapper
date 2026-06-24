@@ -63,8 +63,8 @@ async function run(which){
 console.log(`encode-mt browser bench  ${PPM.split(/[\\/]/).pop()}  reps=${REPS} rounds=${ROUNDS}`);
 for (let rd=1; rd<=ROUNDS; rd++){
   const a = await run("plain"), b = await run("pgo");
-  if(!a.ok){console.error("PLAIN FAIL:\n"+a.log); break;}
-  if(!b.ok){console.error("PGO FAIL:\n"+b.log); break;}
+  if(!a.ok){console.error("PLAIN FAIL: "+a.error+"\n"+(a.log||"")); break;}
+  if(!b.ok){console.error("PGO FAIL: "+b.error+"\n"+(b.log||"")); break;}
   console.log(`R${rd} PLAIN median=${a.median} min=${a.min} ${a.kb}KB iso=${a.iso} | PGO median=${b.median} min=${b.min} ${b.kb}KB`);
 }
 await browser.close(); server.close();

@@ -77,3 +77,7 @@ Cargo.lock text eol=lf
 *~ binary
 Thumbs.db binary
 .DS_Store binary
+
+# PGO profile + wasm are binary — never line-ending convert
+*.profdata binary
+*.wasm binary
