@@ -8,6 +8,13 @@
 
 import { getContext } from './jxl-browser-context.js';
 import { WorkerMsg } from './worker-message-types.js';
+import { createTauriParityLightbox } from './tauri-parity-lightbox.js';
+// Capability-detection namespace import over the RAW WASM pkg. Binding the
+// module does NOT instantiate WASM (init is lazy via default()/initSync), so
+// this is safe at page load. We only read which functions the build exported —
+// the H29 develop-channel fns (apply_look_stream / jxl_progressive_pass) are
+// absent until the Rust H29 work is built, so the channel path stays gated.
+import * as rawWasm from './pkg/raw_converter_wasm.js';
 import {
     applyLens, estimateSceneWhiteLms,
     normalizedLabBuffer, selectByColour, unionMask, maskBorder, maskCoverage,
@@ -5200,3 +5207,105 @@ if (IS_TAURI) {
         await invoke('set_settings', { settings: { planner_url: urlInput.value } });
     });
 }
+
+// ---------------------------------------------------------------------------
+// Tauri-parity M2 develop lightbox + H29 streaming-look channel
+// ---------------------------------------------------------------------------
+//
+// The Tauri-parity lightbox (CasaBio FilterEngine M2 + optional 16-bit WebGL
+// HDR) is wired into the browser bench here. In the bench there is no Tauri
+// `invoke` and no pyramid client, so those are nulled out — the component is
+// written to no-op gracefully (selectors → null, 16-bit toggle stays hidden,
+// export ROI falls back to a plain canvas PNG). The M2 sliders drive an in-DOM
+// FilterEngine repaint over an 8-bit baseline we hand it via onBaseFramePainted.
+//
+// H29 (Rust streaming develop channel) is capability-detected, not assumed:
+// apply_look_stream / jxl_progressive_pass are absent from the shipped pkg
+// until the H29 Rust work is built, so `h29` is null today and the channel
+// path degrades to the existing live-update flow. When a future WASM rebuild
+// exports them, `h29` becomes live and the M2 develop adjustments stream
+// through apply_look_stream with jxl_progressive_pass driving refinement.
+const h29 = (typeof rawWasm.apply_look_stream === 'function'
+          && typeof rawWasm.jxl_progressive_pass === 'function')
+    ? { applyLookStream: rawWasm.apply_look_stream, progressivePass: rawWasm.jxl_progressive_pass }
+    : null;
+let h29WarnedOnce = false;
+
+// Translate the current M2 develop adjustments into a streaming look update.
+// Real reference to the H29 exports (capability-gated); when the build lacks
+// them it logs exactly once and lets the standard repaint path handle it.
+function runH29DevelopChannel(adjustments) {
+    if (!h29) {
+        if (!h29WarnedOnce) {
+            h29WarnedOnce = true;
+            console.info('[H29] streaming develop channel unavailable — '
+                + 'apply_look_stream / jxl_progressive_pass not in this WASM build; '
+                + 'using standard live-update repaint. Rebuild raw-pipeline to enable.');
+        }
+        return false;
+    }
+    const card = cards[lightboxIndex];
+    if (!card || !card._taskId) return false;
+    try {
+        // Stream the develop-slider deltas, then drive a progressive refinement
+        // pass. Both are the real H29 exports detected above.
+        h29.applyLookStream(card._taskId, lookToSnake(adjustments));
+        h29.progressivePass(card._taskId);
+        return true;
+    } catch (e) {
+        console.warn('[H29] develop channel failed, falling back:', e);
+        return false;
+    }
+}
+
+// Derive a normalised viewport ROI (in source pixels) from the lightbox zoom/pan
+// so Export ROI crops what the user is actually looking at. Falls back to the
+// full frame when nothing is zoomed.
+function lightboxViewportRegion(imgW, imgH) {
+    const full = { x: 0, y: 0, w: imgW, h: imgH };
+    const cv = lightboxCanvas;
+    if (!cv.width || !cv.height || lbZoom <= 1.0001) return full;
+    const vp = lbViewport.getBoundingClientRect();
+    // Visible source pixels = viewport size / zoom, centred on the pan offset.
+    const visW = Math.min(imgW, Math.ceil((vp.width / lbZoom) * (imgW / cv.width)));
+    const visH = Math.min(imgH, Math.ceil((vp.height / lbZoom) * (imgH / cv.height)));
+    const cx = (cv.width / 2 - lbPanX / lbZoom) * (imgW / cv.width);
+    const cy = (cv.height / 2 - lbPanY / lbZoom) * (imgH / cv.height);
+    const x = Math.max(0, Math.min(imgW - visW, Math.round(cx - visW / 2)));
+    const y = Math.max(0, Math.min(imgH - visH, Math.round(cy - visH / 2)));
+    return { x, y, w: visW, h: visH };
+}
+
+const tauriParityLb = createTauriParityLightbox({
+    rootEl: lightbox,
+    canvas: lightboxCanvas,
+    histCanvas: lightbox.querySelector('[data-m2-hist]'),
+    // Bench has no Tauri bridge: pass the real invoke when present, else null.
+    invoke: (typeof invoke === 'function') ? invoke : null,
+    getActiveCard: () => (lightboxIndex >= 0 ? cards[lightboxIndex] : null) || null,
+    // When the M2 FilterEngine has no cached baseline (bench single-image), ask
+    // the develop channel / live pipeline to re-render the current frame.
+    onRepaintRequest: () => {
+        const adj = tauriParityLb?.state?.adjustments;
+        if (adj && runH29DevelopChannel(adj)) return;
+        scheduleLiveUpdate();
+    },
+    pyramidClient: null,
+    getViewportRegion: lightboxViewportRegion,
+    getZoom: () => lbZoom,
+});
+window.tauriParityLb = tauriParityLb;
+
+// Feed the M2 FilterEngine a clean 8-bit baseline whenever a fresh frame lands
+// on the lightbox canvas, so its sliders have pixels to transform.
+function feedTauriParityBaseline() {
+    if (!tauriParityLb || lightboxIndex < 0) return;
+    const card = cards[lightboxIndex];
+    if (!card || !lightboxCanvas.width || !lightboxCanvas.height) return;
+    try {
+        const ctx = lightboxCanvas.getContext('2d');
+        const img = ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height);
+        tauriParityLb.onBaseFramePainted(card, img.data, img.width, img.height);
+    } catch { /* cross-tainted canvas or 0-size: skip baseline feed */ }
+}
+window.feedTauriParityBaseline = feedTauriParityBaseline;
