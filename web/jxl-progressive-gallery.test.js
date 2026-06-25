@@ -3,13 +3,16 @@ import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('./jxl-progressive-gallery.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('./jxl-progressive-gallery.html', import.meta.url), 'utf8');
+const presetSource = readFileSync(new URL('./jxl-progressive-best-preset.js', import.meta.url), 'utf8');
 const js = source;
 
 test('progressive gallery uses the default progressive detail path', () => {
-    expect(source).toContain("progressionTarget: 'final'");
-    expect(source).toContain('emitEveryPass: true');
-    expect(source).toContain('const chosenDetail = getGalleryProgressiveDetail();');
-    expect(source).toContain("progressiveDetail: chosenDetail === 'auto' ? null : chosenDetail");
+    // updated: decode config (progressionTarget/emitEveryPass) was centralized into createProgressiveWebPreset
+    // (single source of truth) and gallery derives it via basePreset; gallery.js renamed chosenDetail → progDetail.
+    expect(presetSource).toContain("progressionTarget: 'final'");
+    expect(presetSource).toContain('emitEveryPass: DEFAULT_EMIT_EVERY_PASS');
+    expect(source).toContain('const progDetail = getGalleryProgressiveDetail();');
+    expect(source).toContain("progressiveDetail: progDetail === 'auto' ? null : progDetail");
     expect(source).toContain('frame.getImageData()');
     expect(source).toContain('buildPushBatches');
     expect(source).toContain("let pushMode = 'all-chunks';");
