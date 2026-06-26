@@ -1,5 +1,31 @@
 // packages/jxl-progressive/src/progressive-profile.ts
 import {} from "./progressive-manifest.js";
+import { meetsThreshold } from "./progressive-metrics.js";
+function defaultDcThreshold(m) { return m === "butteraugli" ? 3.0 : m === "ssim" ? 0.7 : 20; }
+function defaultPreviewThreshold(m) { return m === "butteraugli" ? 1.5 : m === "ssim" ? 0.9 : 30; }
+/** Choose dc/preview byteEnds as the earliest progression event whose score clears the
+ *  tier threshold. byteEnd always comes from a real progression event (never a guessed
+ *  byte count). Full tier is always the total. */
+export function selectTiersByScore(events, totalBytes, metric, thresholds) {
+    const tiers = [];
+    const firstMeeting = (t) => events.find((e) => e.byteOffset > 0 && e.byteOffset < totalBytes && meetsThreshold(metric, e.score, t));
+    const dcEvent = firstMeeting(thresholds.dc);
+    if (dcEvent !== undefined) {
+        tiers.push({
+            name: "dc", byteStart: 0, byteEnd: dcEvent.byteOffset, progressionIndex: dcEvent.progressionIndex,
+            intendedUse: "thumbnail", score: { metric, value: dcEvent.score, reference: "final" },
+        });
+    }
+    const previewEvent = firstMeeting(thresholds.preview);
+    if (previewEvent !== undefined && previewEvent.byteOffset > (dcEvent?.byteOffset ?? 0)) {
+        tiers.push({
+            name: "preview", byteStart: 0, byteEnd: previewEvent.byteOffset, progressionIndex: previewEvent.progressionIndex,
+            intendedUse: "visible-card", score: { metric, value: previewEvent.score, reference: "final" },
+        });
+    }
+    tiers.push({ name: "full", byteStart: 0, byteEnd: totalBytes, progressionIndex: "final", intendedUse: "zoom-export" });
+    return tiers;
+}
 // Yield control until all pending microtasks (including async-generator machinery)
 // have drained. Needed so framesTask reads bytesPushed before pushTask advances it
 // for the next chunk. setImmediate (Node) fires after all microtasks; setTimeout(0)
@@ -97,12 +123,21 @@ export async function profileJxl(jxlBytes, sessionFactory, source, opts = {}) {
     // Collect frames concurrently with pushing bytes.
     // drainMicrotasks() after each push ensures framesTask reads bytesPushed before
     // pushTask advances it for the next chunk (async-generator delivery adds 2+ hops).
+    const capturePixels = opts.scorer !== undefined;
     const framesTask = (async () => {
         for await (const frame of session.frames()) {
+            let snap;
+            if (capturePixels) {
+                const px = frame.pixels;
+                // Copy: the decoder may reuse the underlying buffer on the next pass.
+                if (px !== undefined)
+                    snap = Uint8Array.from(px instanceof Uint8Array ? px : new Uint8Array(px));
+            }
             events.push({
                 byteOffset: bytesPushed,
                 stage: frame.stage,
                 progressionIndex: progressionIdx++,
+                pixels: snap,
             });
         }
     })();
@@ -131,6 +166,25 @@ export async function profileJxl(jxlBytes, sessionFactory, source, opts = {}) {
     })();
     await Promise.all([pushTask, framesTask]);
     const sha256 = await computeSha256(jxlBytes);
+    let tiers;
+    if (opts.scorer !== undefined) {
+        const finalEvent = [...events].reverse().find((e) => e.pixels !== undefined && e.pixels.length > 0);
+        const scored = [];
+        if (finalEvent?.pixels !== undefined) {
+            for (const e of events) {
+                if (e.pixels === undefined || e.pixels.length !== finalEvent.pixels.length)
+                    continue;
+                const value = await opts.scorer.score(e.pixels, finalEvent.pixels, source.width, source.height);
+                scored.push({ byteOffset: e.byteOffset, progressionIndex: e.progressionIndex, score: value });
+            }
+        }
+        tiers = scored.length > 0
+            ? selectTiersByScore(scored, jxlBytes.byteLength, opts.scorer.metric, opts.thresholds ?? { dc: defaultDcThreshold(opts.scorer.metric), preview: defaultPreviewThreshold(opts.scorer.metric) })
+            : selectTiers(events, jxlBytes.byteLength);
+    }
+    else {
+        tiers = selectTiers(events, jxlBytes.byteLength);
+    }
     const manifest = {
         version: 1,
         source: {
@@ -141,7 +195,7 @@ export async function profileJxl(jxlBytes, sessionFactory, source, opts = {}) {
         },
         jxl: { bytes: jxlBytes.byteLength, sha256 },
         encoder: { name: encoderName, libjxlVersion, flags: encoderFlags },
-        tiers: selectTiers(events, jxlBytes.byteLength),
+        tiers,
     };
     if (saliency !== undefined) {
         manifest.saliency = saliency;
