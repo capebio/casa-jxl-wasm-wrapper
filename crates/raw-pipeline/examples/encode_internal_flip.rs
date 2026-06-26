@@ -264,6 +264,69 @@ fn bench_box_header() {
     print_result("box_header (per alloc)", &mut ta, &mut tb, BOX_ITERS, true);
 }
 
+// ── B1/B1x  AppendBoxHeader: double-resize [old] vs stack+single-resize [new] ─
+// Old AppendBoxHeader:
+//   output->resize(n + kLargeBoxHeaderSize);   ← grow to max (16B)
+//   header_size = WriteBoxHeader(...);          ← may write only 8B
+//   output->resize(n + header_size);            ← shrink back
+// New:
+//   WriteBoxHeader into stack buf[16];
+//   output->resize(n + hdr_size);              ← single grow to actual size
+//   memcpy(output->data() + n, buf, hdr_size);
+//
+// Simulated here as: vector growing from capacity-0 on each call.
+
+const AHDR_ITERS: u64 = 200_000;
+const AHDR_ROUNDS: usize = 13;
+
+fn bench_append_box_header() {
+    println!(
+        "\n[B1/B1x] AppendBoxHeader: double-resize [old] vs stack+single-resize [new]"
+    );
+    println!("  {AHDR_ITERS} appends/slot, {AHDR_ROUNDS} rounds  (ns/append)");
+    println!("  Pattern: even rounds A→B first, odd rounds B→A first");
+
+    // Sizes opaque: mix of 8B (small box) and 16B (large box) actual header sizes.
+    let hdr_sizes: Vec<usize> = (0..AHDR_ITERS)
+        .map(|i| black_box(if i % 4 == 0 { 16usize } else { 8usize }))
+        .collect();
+
+    // A: grow to kLargeBoxHeaderSize, write, shrink (old double-resize pattern)
+    let run_a = || -> u64 {
+        let t = Instant::now();
+        let mut sink: u8 = 0;
+        for &hdr_sz in &hdr_sizes {
+            let mut v: Vec<u8> = Vec::new();
+            let n = v.len();
+            v.resize(n + 16, 0u8);               // grow to max
+            black_box(v[n]);                       // force the alloc to stay
+            v.resize(n + hdr_sz, 0u8);            // shrink to actual
+            sink = sink.wrapping_add(v[n]);
+        }
+        black_box(sink);
+        t.elapsed().as_nanos() as u64
+    };
+
+    // B: write to stack buf, single resize, memcpy (new pattern)
+    let run_b = || -> u64 {
+        let t = Instant::now();
+        let mut sink: u8 = 0;
+        for &hdr_sz in &hdr_sizes {
+            let buf = black_box([0u8; 16]);
+            let mut v: Vec<u8> = Vec::new();
+            let n = v.len();
+            v.resize(n + hdr_sz, 0u8);            // single grow to actual size
+            v[n..n + hdr_sz].copy_from_slice(&buf[..hdr_sz]);
+            sink = sink.wrapping_add(v[n]);
+        }
+        black_box(sink);
+        t.elapsed().as_nanos() as u64
+    };
+
+    let (mut ta, mut tb) = flipflop(AHDR_ROUNDS, run_a, run_b);
+    print_result("append_box_header (per call)", &mut ta, &mut tb, AHDR_ITERS, true);
+}
+
 // ── A4/B4  Real encoder: animation batch vs single-frame  ────────────────────
 #[cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
 mod real_encoder {
@@ -354,6 +417,7 @@ fn main() {
     bench_queue();
     bench_copy();
     bench_box_header();
+    bench_append_box_header();
 
     #[cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
     real_encoder::run();
@@ -363,5 +427,6 @@ fn main() {
 
     println!("\nDone. speedup > 1.0 = new code faster.");
     println!("Gate: A1 speedup >= 5x@N=2000 (O(N^2) vs O(N)); A2 speedup ~ stride_pad%;");
-    println!("      A3 speedup >= 2x (alloc vs stack); A4 per-frame overhead decreasing.");
+    println!("      A3 speedup >= 2x (alloc vs stack); B1 speedup >= 1.5x (double-resize);");
+    println!("      A4 per-frame overhead decreasing.");
 }
