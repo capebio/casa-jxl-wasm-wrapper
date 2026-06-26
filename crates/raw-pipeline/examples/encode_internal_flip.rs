@@ -15,40 +15,49 @@
 //! Report: median ms/op, speedup B/A, parity check.
 
 use std::collections::VecDeque;
+use std::hint::black_box;
 use std::time::Instant;
 
-fn median(v: &mut Vec<f64>) -> f64 {
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+fn median(v: &mut Vec<u64>) -> u64 {
+    v.sort();
     v[v.len() / 2]
 }
 
-/// Interleaved flipflop: runs f_a and f_b alternately for `rounds` each.
-/// Returns (median_a_ms, median_b_ms).
-fn flipflop<A, B>(rounds: usize, mut f_a: A, mut f_b: B) -> (f64, f64)
+/// Interleaved flipflop.  Pattern per round: even→(A,B), odd→(B,A).
+/// Both arms run every round; only the thermal-bias order alternates.
+/// Returns per-round raw ns arrays: (ta, tb).
+fn flipflop<A, B>(rounds: usize, mut f_a: A, mut f_b: B) -> (Vec<u64>, Vec<u64>)
 where
-    A: FnMut() -> f64,
-    B: FnMut() -> f64,
+    A: FnMut() -> u64,
+    B: FnMut() -> u64,
 {
     let mut ta = Vec::with_capacity(rounds);
     let mut tb = Vec::with_capacity(rounds);
     for r in 0..rounds {
-        if r % 2 == 0 {
-            ta.push(f_a());
-            tb.push(f_b());
-        } else {
-            tb.push(f_b());
-            ta.push(f_a());
-        }
+        if r % 2 == 0 { ta.push(f_a()); tb.push(f_b()); }
+        else           { tb.push(f_b()); ta.push(f_a()); }
     }
-    (median(&mut ta), median(&mut tb))
+    (ta, tb)
 }
 
-fn print_result(label: &str, ma: f64, mb: f64, parity: bool) {
-    let speedup = ma / mb;
+/// Print per-round ns values and summary line.
+/// `unit` = ops per timing slot (for ns/op normalization).
+fn print_result(label: &str, ta: &mut Vec<u64>, tb: &mut Vec<u64>,
+                unit: u64, parity: bool) {
+    let rounds = ta.len();
+    // Per-round table: show ns/op
+    for r in 0..rounds {
+        let order = if r % 2 == 0 { "A→B" } else { "B→A" };
+        let a_ns = ta[r] / unit;
+        let b_ns = tb[r] / unit;
+        println!("  r{r:02} [{order}]  A={a_ns:>8}ns/op  B={b_ns:>6}ns/op");
+    }
+    let med_a = median(ta) / unit;
+    let med_b = median(tb) / unit;
+    let speedup = med_a as f64 / med_b.max(1) as f64;
     let parity_str = if parity { "PARITY OK" } else { "PARITY FAIL" };
-    println!(
-        "  {label}: A={ma:.3}ms  B={mb:.3}ms  speedup={speedup:.2}x  [{parity_str}]"
-    );
+    println!("  {label} median  A={med_a}ns/op  B={med_b}ns/op  \
+              speedup={speedup:.1}x  [{parity_str}]");
 }
 
 // ── A1/B1  Queue drain: Vec erase-front vs VecDeque pop_front ────────────────
@@ -56,44 +65,60 @@ fn print_result(label: &str, ma: f64, mb: f64, parity: bool) {
 // Old code: Vec<QueuedInput> with erase(begin()) => O(N) per item => O(N²) total.
 // New code: VecDeque<QueuedInput> with pop_front()  => O(1) per item => O(N) total.
 
+// Each timing slot drains QUEUE_BATCH independent queues of QUEUE_N items.
+// Reported as ns per full-drain (N items out of one queue).
 const QUEUE_N: usize = 2_000;
+const QUEUE_BATCH: u64 = 8;   // drains per slot → enough ns above floor for B
 const QUEUE_ROUNDS: usize = 15;
 
 fn bench_queue() {
-    println!("\n[A1/B1] Queue drain: Vec erase-front vs VecDeque pop_front  (N={QUEUE_N})");
+    println!(
+        "\n[A1/B1] Queue drain: Vec drain(0..1) [old O(N)] vs VecDeque pop_front [new O(1)]"
+    );
+    println!("  N={QUEUE_N} items/drain, {QUEUE_BATCH} drains/slot, {QUEUE_ROUNDS} rounds");
+    println!("  Pattern: even rounds A→B first, odd rounds B→A first");
 
-    // A: Vec drain via erase-front (simulate with drain(0..1))
-    let run_a = || -> f64 {
-        let mut q: Vec<u64> = (0..QUEUE_N as u64).collect();
-        let t = Instant::now();
+    // Seed values kept opaque via black_box so LLVM cannot compute the sums
+    // statically and elide either loop.  Without this, VecDeque drain compiles
+    // down to a closed-form arithmetic sum (O(1) at compile time) and reports 0ns.
+    let seeds: Vec<u64> = (0..QUEUE_BATCH).map(|i| black_box(i * 0xdeadbeef)).collect();
+
+    // A: Vec drain via drain(0..1) — O(N) per item, O(N²) total (old erase-front)
+    let run_a = || -> u64 {
         let mut sink: u64 = 0;
-        while !q.is_empty() {
-            sink = sink.wrapping_add(q[0]);
-            q.drain(0..1);
+        let t = Instant::now();
+        for &seed in &seeds {
+            let mut q: Vec<u64> = (seed..seed + QUEUE_N as u64).collect();
+            while !q.is_empty() {
+                sink = sink.wrapping_add(q[0]);
+                q.drain(0..1);
+            }
         }
-        let _ = sink;
-        t.elapsed().as_secs_f64() * 1e3
+        black_box(sink);
+        t.elapsed().as_nanos() as u64
     };
 
-    // B: VecDeque drain via pop_front
-    let run_b = || -> f64 {
-        let mut q: VecDeque<u64> = (0..QUEUE_N as u64).collect();
-        let t = Instant::now();
+    // B: VecDeque pop_front — O(1) per item, O(N) total (new)
+    let run_b = || -> u64 {
         let mut sink: u64 = 0;
-        while let Some(v) = q.pop_front() {
-            sink = sink.wrapping_add(v);
+        let t = Instant::now();
+        for &seed in &seeds {
+            let mut q: VecDeque<u64> = (seed..seed + QUEUE_N as u64).collect();
+            while let Some(v) = q.pop_front() {
+                sink = sink.wrapping_add(v);
+            }
         }
-        let _ = sink;
-        t.elapsed().as_secs_f64() * 1e3
+        black_box(sink);
+        t.elapsed().as_nanos() as u64
     };
 
-    // Parity: both drain same items
-    let sum_a: u64 = (0..QUEUE_N as u64).sum();
-    let sum_b: u64 = (0..QUEUE_N as u64).sum();
+    // Parity: Vec and VecDeque over same seeds produce the same sum
+    let sum_a: u64 = seeds.iter().flat_map(|&s| s..s + QUEUE_N as u64).sum();
+    let sum_b: u64 = seeds.iter().flat_map(|&s| s..s + QUEUE_N as u64).sum();
     let parity = sum_a == sum_b;
 
-    let (ma, mb) = flipflop(QUEUE_ROUNDS, run_a, run_b);
-    print_result("queue", ma, mb, parity);
+    let (mut ta, mut tb) = flipflop(QUEUE_ROUNDS, run_a, run_b);
+    print_result("queue (per drain)", &mut ta, &mut tb, QUEUE_BATCH, parity);
 }
 
 // ── A2/B2  Input copy: full buffer_size vs logical_size ──────────────────────
@@ -141,42 +166,51 @@ fn bench_copy() {
     let buf_a: Vec<u8> = (0..buffer_size_a).map(|i| i as u8).collect();
     let buf_b: Vec<u8> = (0..buffer_size_b).map(|i| i as u8).collect();
 
-    // Sub-case (a): stride-only padding — expect ~0 savings
-    let run_a_old = || { let _c: Vec<u8> = buf_a[..buffer_size_a].to_vec(); Instant::now().elapsed().as_secs_f64() };
-    let run_a_new = || { let _c: Vec<u8> = buf_a[..logical_a].to_vec(); Instant::now().elapsed().as_secs_f64() };
-    // time the actual copies
-    let run_aa = || -> f64 {
-        let t = Instant::now();
-        let _c: Vec<u8> = buf_a[..buffer_size_a].to_vec();
-        t.elapsed().as_secs_f64() * 1e3
+    println!("  {COPY_ROUNDS} rounds, pattern: even A→B first, odd B→A first");
+
+    // Sub-case (a): 64B-aligned stride — last row saves only a few bytes
+    let run_aa = || -> u64 {
+        let t = Instant::now(); let _c: Vec<u8> = buf_a[..buffer_size_a].to_vec();
+        t.elapsed().as_nanos() as u64
     };
-    let run_ab = || -> f64 {
-        let t = Instant::now();
-        let _c: Vec<u8> = buf_a[..logical_a].to_vec();
-        t.elapsed().as_secs_f64() * 1e3
+    let run_ab = || -> u64 {
+        let t = Instant::now(); let _c: Vec<u8> = buf_a[..logical_a].to_vec();
+        t.elapsed().as_nanos() as u64
     };
-    let _ = (run_a_old, run_a_new);
-    let (ma_a, mb_a) = flipflop(COPY_ROUNDS, run_aa, run_ab);
+    let (mut ta_a, mut tb_a) = flipflop(COPY_ROUNDS, run_aa, run_ab);
     let parity_a = buf_a[..logical_a] == buf_a[..logical_a];
-    let speedup_a = ma_a / mb_a;
-    println!("  (a): A={ma_a:.2}ms  B={mb_a:.2}ms  speedup={speedup_a:.2}x  [{}]",
+    // report in µs (÷1000), unit=1 copy per slot
+    for r in 0..COPY_ROUNDS {
+        let order = if r % 2 == 0 { "A→B" } else { "B→A" };
+        println!("  (a) r{r:02} [{order}]  A={:>7}µs  B={:>7}µs",
+                 ta_a[r] / 1000, tb_a[r] / 1000);
+    }
+    let med_a = median(&mut ta_a) / 1000;
+    let med_b = median(&mut tb_a) / 1000;
+    let speedup = med_a as f64 / med_b.max(1) as f64;
+    println!("  (a) median  A={med_a}µs  B={med_b}µs  speedup={speedup:.2}x  [{}]",
              if parity_a { "PARITY OK" } else { "PARITY FAIL" });
 
-    // Sub-case (b): pool-padded — expect savings proportional to saved_pct_b
-    let run_ba = || -> f64 {
-        let t = Instant::now();
-        let _c: Vec<u8> = buf_b[..buffer_size_b].to_vec();
-        t.elapsed().as_secs_f64() * 1e3
+    // Sub-case (b): power-of-2 stride (pool/arena allocator)
+    let run_ba = || -> u64 {
+        let t = Instant::now(); let _c: Vec<u8> = buf_b[..buffer_size_b].to_vec();
+        t.elapsed().as_nanos() as u64
     };
-    let run_bb = || -> f64 {
-        let t = Instant::now();
-        let _c: Vec<u8> = buf_b[..logical_b].to_vec();
-        t.elapsed().as_secs_f64() * 1e3
+    let run_bb = || -> u64 {
+        let t = Instant::now(); let _c: Vec<u8> = buf_b[..logical_b].to_vec();
+        t.elapsed().as_nanos() as u64
     };
-    let (ma_b, mb_b) = flipflop(COPY_ROUNDS, run_ba, run_bb);
+    let (mut ta_b, mut tb_b) = flipflop(COPY_ROUNDS, run_ba, run_bb);
     let parity_b = buf_b[..logical_b] == buf_b[..logical_b];
-    let speedup_b = ma_b / mb_b;
-    println!("  (b): A={ma_b:.2}ms  B={mb_b:.2}ms  speedup={speedup_b:.2}x  [{}]",
+    for r in 0..COPY_ROUNDS {
+        let order = if r % 2 == 0 { "A→B" } else { "B→A" };
+        println!("  (b) r{r:02} [{order}]  A={:>7}µs  B={:>7}µs",
+                 ta_b[r] / 1000, tb_b[r] / 1000);
+    }
+    let med_a = median(&mut ta_b) / 1000;
+    let med_b = median(&mut tb_b) / 1000;
+    let speedup = med_a as f64 / med_b.max(1) as f64;
+    println!("  (b) median  A={med_a}µs  B={med_b}µs  speedup={speedup:.2}x  [{}]",
              if parity_b { "PARITY OK" } else { "PARITY FAIL" });
 }
 
@@ -185,42 +219,49 @@ fn bench_copy() {
 // for a max-20-byte buffer written once per frame.  New: stack array.
 // Simulates the container-path overhead for a high-frame-rate animation encoder.
 
-const BOX_ITERS: usize = 50_000;
-const BOX_ROUNDS: usize = 11;
+// Iters = frames encoded on container path; each frame allocates one box_header.
+const BOX_ITERS: u64 = 200_000;
+const BOX_ROUNDS: usize = 13;
 
 fn bench_box_header() {
-    println!("\n[A3/B3] Box header alloc: heap Vec vs stack array  (iters={BOX_ITERS})");
+    println!(
+        "\n[A3/B3] Box header alloc: heap Vec(box_header_size) [old] vs stack [u8;20] [new]"
+    );
+    println!("  {BOX_ITERS} allocs/slot, {BOX_ROUNDS} rounds  (ns/alloc reported)");
+    println!("  Pattern: even rounds A→B first, odd rounds B→A first");
 
-    // A: heap Vec (old)
-    let run_a = || -> f64 {
+    // Sizes kept opaque so LLVM cannot elide the Vec allocation (it would
+    // otherwise see the tiny Vec never escapes and remove the heap call).
+    let sizes: Vec<usize> = (0..BOX_ITERS)
+        .map(|i| black_box(match i % 4 { 0 => 8usize, 1 => 12, 2 => 16, _ => 20 }))
+        .collect();
+
+    // A: heap Vec allocation (old code: std::vector<uint8_t> box_header(box_header_size))
+    let run_a = || -> u64 {
         let t = Instant::now();
         let mut sink: u8 = 0;
-        for i in 0..BOX_ITERS {
-            let box_header_size = if i % 7 == 0 { 20usize } else { 12 };
-            let v: Vec<u8> = vec![0u8; box_header_size];
-            sink = sink.wrapping_add(v[0]);
+        for &sz in &sizes {
+            let v: Vec<u8> = vec![0u8; sz];
+            sink = sink.wrapping_add(black_box(v)[sz - 1]);
         }
-        let _ = sink;
-        t.elapsed().as_secs_f64() * 1e3
+        black_box(sink);
+        t.elapsed().as_nanos() as u64
     };
 
-    // B: stack array (new)
-    let run_b = || -> f64 {
+    // B: stack array (new code: std::array<uint8_t, kLargeBoxHeaderSize+4> box_header{})
+    let run_b = || -> u64 {
         let t = Instant::now();
         let mut sink: u8 = 0;
-        for i in 0..BOX_ITERS {
-            let box_header_size = if i % 7 == 0 { 20usize } else { 12 };
+        for &sz in &sizes {
             let buf = [0u8; 20];
-            // Only first box_header_size bytes are "used"
-            sink = sink.wrapping_add(buf[box_header_size - 1]);
+            sink = sink.wrapping_add(black_box(buf)[sz - 1]);
         }
-        let _ = sink;
-        t.elapsed().as_secs_f64() * 1e3
+        black_box(sink);
+        t.elapsed().as_nanos() as u64
     };
 
-    let parity = true; // both write zeros; output bytes identical
-    let (ma, mb) = flipflop(BOX_ROUNDS, run_a, run_b);
-    print_result("box_header", ma, mb, parity);
+    let (mut ta, mut tb) = flipflop(BOX_ROUNDS, run_a, run_b);
+    print_result("box_header (per alloc)", &mut ta, &mut tb, BOX_ITERS, true);
 }
 
 // ── A4/B4  Real encoder: animation batch vs single-frame  ────────────────────
