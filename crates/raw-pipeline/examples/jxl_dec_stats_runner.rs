@@ -39,6 +39,11 @@ fn run() {
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let med = times[times.len() / 2];
     let min = times[0];
+
+    // Pixel checksum for parity testing
+    let ref_img = dec.decode::<u8>(&jxl, Channels::Rgb).expect("ref decode");
+    let psum: u64 = ref_img.data.iter().map(|&x| x as u64).sum();
+    println!("psum={psum}  pixels={}", ref_img.data.len());
     println!("Done: med={med:.1}ms min={min:.1}ms  (stats dump follows on stderr)");
     // DecTransformStats destructor fires here → dumps to stderr
 }
