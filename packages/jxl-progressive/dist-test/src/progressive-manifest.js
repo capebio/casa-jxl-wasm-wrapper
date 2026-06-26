@@ -18,6 +18,7 @@ function assertField(condition, field, message) {
         throw new ManifestValidationError(message, field);
 }
 const VALID_TIER_NAMES = new Set(["dc", "preview", "full"]);
+const VALID_SCORE_METRICS = new Set(["ssim", "psnr", "butteraugli"]);
 export function validateManifest(json) {
     assertField(typeof json === "object" && json !== null, "root", "Manifest must be an object");
     const obj = json;
@@ -81,6 +82,13 @@ export function validateManifest(json) {
         assertField(t["byteEnd"] <= jxl["bytes"], `${f}.byteEnd`, `${f}.byteEnd (${t["byteEnd"]}) exceeds jxl.bytes (${jxl["bytes"]})`);
         assertField(typeof t["progressionIndex"] === "number" || t["progressionIndex"] === "final", `${f}.progressionIndex`, `${f}.progressionIndex must be number or "final"`);
         assertField(typeof t["intendedUse"] === "string", `${f}.intendedUse`, `${f}.intendedUse must be a string`);
+        if (t["score"] !== undefined) {
+            assertField(typeof t["score"] === "object" && t["score"] !== null, `${f}.score`, `${f}.score must be an object if present`);
+            const sc = t["score"];
+            assertField(VALID_SCORE_METRICS.has(sc["metric"]), `${f}.score.metric`, `${f}.score.metric must be ssim|psnr|butteraugli`);
+            assertField(typeof sc["value"] === "number" && Number.isFinite(sc["value"]), `${f}.score.value`, `${f}.score.value must be a finite number`);
+            assertField(sc["reference"] === "final" || sc["reference"] === "source", `${f}.score.reference`, `${f}.score.reference must be "final" or "source"`);
+        }
     }
     // Cross-tier: each tier name must appear at most once.
     const seenNames = new Set();
