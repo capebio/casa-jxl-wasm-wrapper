@@ -4,13 +4,17 @@ const MANIFEST_KEY_PREFIX = "jxl-progressive:manifest:";
 const BYTES_KEY_PREFIX = "jxl-progressive:bytes:";
 // Bitmap cache is in-memory only (ImageBitmap is not serialisable to OPFS).
 const BITMAP_KEY_PREFIX = "jxl-progressive:bitmap:";
+// Null byte is never valid in a URL or tier name, making it a safe separator.
+const TIER_SEP = "\0";
+const _textDecoder = new TextDecoder();
 const DEFAULT_MANIFEST_TTL_MS = 3_600_000; // 1 hour
+const MAX_BITMAP_ENTRIES = 100;
 /**
  * Progressive-specific cache layer wrapping JxlCacheBrowser.
  *
  * Key conventions:
  *   Manifests  — "jxl-progressive:manifest:{jxlUrl}"
- *   Byte ranges — "jxl-progressive:bytes:{jxlUrl}#{tierName}"
+ *   Byte ranges — "jxl-progressive:bytes:{jxlUrl}\0{tierName}"
  *
  * Manifests are stored as UTF-8 JSON (ArrayBuffer). Byte ranges are stored raw.
  */
@@ -31,61 +35,70 @@ export class ProgressiveCache {
         if (buf === undefined || buf.byteLength === 0)
             return null;
         try {
-            const text = new TextDecoder().decode(buf);
+            const text = _textDecoder.decode(buf);
             const entry = JSON.parse(text);
             if (Date.now() - entry.storedAt > this.manifestTtlMs) {
-                // Expired — remove and return null
-                void this.inner.set(key, new ArrayBuffer(0)); // empty = sentinel for eviction; jxl-cache LRU will drop it
+                // Expired — delete the entry so subsequent reads miss cleanly.
+                await this.inner.delete(key);
                 return null;
             }
             return validateManifest(entry.manifest);
         }
         catch {
+            // Corrupt entry — evict it so the cache self-heals on next setManifest.
+            await this.inner.delete(key).catch(() => undefined);
             return null;
         }
     }
     async setManifest(jxlUrl, manifest) {
         const entry = { manifest, storedAt: Date.now() };
         const text = JSON.stringify(entry);
-        const nodeBuffer = Buffer.from(text);
-        const buf = nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
+        // Universal (browser + node): TextEncoder always present. Avoids Buffer (node-only)
+        // which would crash pure browser usage of progressive cache + jxl-cache.
+        const buf = new TextEncoder().encode(text).buffer;
         await this.inner.set(MANIFEST_KEY_PREFIX + jxlUrl, buf);
     }
     async invalidateManifest(jxlUrl) {
-        // Store empty ArrayBuffer to evict — jxl-cache will overwrite the slot.
-        // On next get() the empty buffer triggers the parse failure path → returns null.
-        await this.inner.set(MANIFEST_KEY_PREFIX + jxlUrl, new ArrayBuffer(0));
+        await this.inner.delete(MANIFEST_KEY_PREFIX + jxlUrl);
     }
     // ---------------------------------------------------------------------------
     // Byte ranges
     // ---------------------------------------------------------------------------
     async getByteRange(jxlUrl, tier) {
-        const buf = await this.inner.get(BYTES_KEY_PREFIX + jxlUrl + "#" + tier);
+        const buf = await this.inner.get(BYTES_KEY_PREFIX + jxlUrl + TIER_SEP + tier);
         if (buf === undefined || buf.byteLength === 0)
             return null;
         return buf;
     }
     async setByteRange(jxlUrl, tier, bytes) {
-        await this.inner.set(BYTES_KEY_PREFIX + jxlUrl + "#" + tier, bytes);
+        await this.inner.set(BYTES_KEY_PREFIX + jxlUrl + TIER_SEP + tier, bytes);
     }
     // ---------------------------------------------------------------------------
     // Decoded bitmaps (in-memory only)
     // ---------------------------------------------------------------------------
     async getBitmap(jxlUrl, tier) {
-        return this.bitmapStore.get(BITMAP_KEY_PREFIX + jxlUrl + "#" + tier) ?? null;
+        return this.bitmapStore.get(BITMAP_KEY_PREFIX + jxlUrl + TIER_SEP + tier) ?? null;
     }
     async setBitmap(jxlUrl, tier, bitmap) {
-        this.bitmapStore.set(BITMAP_KEY_PREFIX + jxlUrl + "#" + tier, bitmap);
+        this.bitmapStore.set(BITMAP_KEY_PREFIX + jxlUrl + TIER_SEP + tier, bitmap);
+        // Evict oldest entry (insertion order) when cap is exceeded to bound GPU memory.
+        if (this.bitmapStore.size > MAX_BITMAP_ENTRIES) {
+            const oldestKey = this.bitmapStore.keys().next().value;
+            const evicted = this.bitmapStore.get(oldestKey);
+            this.bitmapStore.delete(oldestKey);
+            evicted?.close();
+        }
     }
     /**
      * Evict decoded bitmaps for all URLs except those in `exceptJxlUrls`.
      * Call when memory pressure is detected.
      */
     evictBitmaps(exceptJxlUrls = []) {
-        const keep = new Set(exceptJxlUrls.map((u) => BITMAP_KEY_PREFIX + u));
+        const keep = new Set(exceptJxlUrls.map((u) => BITMAP_KEY_PREFIX + u + TIER_SEP));
         for (const key of this.bitmapStore.keys()) {
-            // key format: "jxl-progressive:bitmap:{jxlUrl}#{tier}"
-            const urlPart = key.slice(0, key.lastIndexOf("#"));
+            // key format: "jxl-progressive:bitmap:{jxlUrl}\0{tier}"
+            const sepIdx = key.indexOf(TIER_SEP);
+            const urlPart = sepIdx === -1 ? key : key.slice(0, sepIdx + 1);
             if (!keep.has(urlPart)) {
                 this.bitmapStore.delete(key);
             }
@@ -98,10 +111,11 @@ export class ProgressiveCache {
     async invalidate(jxlUrl) {
         await this.invalidateManifest(jxlUrl);
         for (const tier of ["dc", "preview", "full"]) {
-            await this.inner.set(BYTES_KEY_PREFIX + jxlUrl + "#" + tier, new ArrayBuffer(0));
+            await this.inner.delete(BYTES_KEY_PREFIX + jxlUrl + TIER_SEP + tier);
         }
-        for (const key of [...this.bitmapStore.keys()]) {
-            if (key.includes(jxlUrl))
+        const bitmapPrefix = BITMAP_KEY_PREFIX + jxlUrl + TIER_SEP;
+        for (const key of this.bitmapStore.keys()) {
+            if (key.startsWith(bitmapPrefix))
                 this.bitmapStore.delete(key);
         }
     }

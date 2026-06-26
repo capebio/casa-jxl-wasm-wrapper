@@ -1,12 +1,30 @@
 export type TierName = "dc" | "preview" | "full";
 import type { CameraPose, Relation, FrameSetMember, FrameSet, AssetChannel, ChannelDescriptor } from "./types.js";
 export type { CameraPose, Relation, FrameSetMember, FrameSet, AssetChannel, ChannelDescriptor };
+export type ScoreMetric = "ssim" | "psnr" | "butteraugli";
+export interface TierScore {
+    metric: ScoreMetric;
+    /** Metric value of this tier's partial reconstruction vs the reference. */
+    value: number;
+    /** What the score compares against: the file's own final frame, or the encoder source. */
+    reference: "final" | "source";
+}
 export interface ManifestTier {
     name: TierName;
     byteStart: number;
     byteEnd: number;
     progressionIndex: number | "final";
     intendedUse: string;
+    /** Optional measured perceptual score for this tier (Phase A). */
+    score?: TierScore;
+}
+export interface ScaleFrontierEntry {
+    /** Longest-edge display pixels this entry covers (inclusive upper bound). */
+    maxDisplayPx: number;
+    tier: TierName;
+    /** Denormalized from tiers[tier].byteEnd so a consumer can Range-fetch directly. */
+    byteEnd: number;
+    score: TierScore;
 }
 export interface ProgressiveManifest {
     version: 1;
@@ -38,6 +56,8 @@ export interface ProgressiveManifest {
      */
     perceptual?: Record<string, unknown>;
     tiers: ManifestTier[];
+    /** Optional display-scale → earliest-sufficient-tier frontier (Phase B). */
+    scaleFrontier?: ScaleFrontierEntry[];
     capture?: {
         pose?: CameraPose;
         intrinsics?: FrameSetMember["intrinsics"];

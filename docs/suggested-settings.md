@@ -212,3 +212,17 @@ See HANDOFF-tauri-wasm-parity-2026.md for the full mission and guiding principle
 ---
 
 *This document records the current engineering preference after extensive measurement. It should be updated when new environments are measured or when a future improvement (e.g., direct production inside raw-pipeline or better glue, or full JXTC integration in gallery) changes the data.*
+
+---
+
+## Perceptual + scale-aware progressive manifest
+
+`@casabio/jxl-progressive` can emit a sidecar manifest (`<file>.jxl.json`) whose tier byte-cutoffs are driven by a **measured perceptual score**, plus a **display-scale frontier** so small renders fetch/decode fewer bytes. Generated once at ingest; consulted at serve/decode time as an array lookup (no metric runs on the decode path).
+
+- **Generate:** `node benchmark/generate-perceptual-manifest.mjs <file.jxl> <W> <H> [psnr|ssim|butteraugli]`.
+- **Reference = the file's own final frame** (a diminishing-returns cutoff — "more bytes won't visibly help"), not absolute quality vs the camera source.
+- **Metric tiers:** SSIM/PSNR are pure-JS (no wasm) — the eager, default metric. Butteraugli requires a wasm build with the butteraugli bridge (`computeButteraugli` throws `CapabilityMissing` otherwise) — the lazy, premium-tier metric, built on first premium request and cached as `<file>.jxl.butteraugli.json`.
+- **Scale frontier:** a pass insufficient at native resolution can be sufficient once downscaled (high-frequency artifacts wash out; low-frequency errors survive), so `scaleFrontier[]` maps display size → earliest sufficient tier. **A native-res cutoff is NOT scale-invariant** — a 4K image shown at 768 px is perceptually "done" far earlier than its native cutoff.
+- **Serving:** the client requests its display tier via HTTP Range (`fetchTier`), but that cutoff is a hint. An edge worker (`resolveTierRequest`) is **authoritative** for premium gating — a client-only cutoff is bypassable, so any paywall must be enforced edge/server-side.
+- **Gallery:** `capBytesForDisplay` caps decoded bytes to the display-appropriate tier **only when a manifest provider is supplied**; absent a manifest (today's local-file gallery), decode behavior is unchanged.
+- Scores are stored finite (an identical pass would be `psnr = Infinity`, which is capped) so the JSON sidecar round-trips and passes `validateManifest`.

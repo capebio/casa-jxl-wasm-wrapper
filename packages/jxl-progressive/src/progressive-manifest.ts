@@ -15,12 +15,33 @@ import type {
 
 export type { CameraPose, Relation, FrameSetMember, FrameSet, AssetChannel, ChannelDescriptor };
 
+export type ScoreMetric = "ssim" | "psnr" | "butteraugli";
+
+export interface TierScore {
+  metric: ScoreMetric;
+  /** Metric value of this tier's partial reconstruction vs the reference. */
+  value: number;
+  /** What the score compares against: the file's own final frame, or the encoder source. */
+  reference: "final" | "source";
+}
+
 export interface ManifestTier {
   name: TierName;
   byteStart: number;
   byteEnd: number;
   progressionIndex: number | "final";
   intendedUse: string;
+  /** Optional measured perceptual score for this tier (Phase A). */
+  score?: TierScore;
+}
+
+export interface ScaleFrontierEntry {
+  /** Longest-edge display pixels this entry covers (inclusive upper bound). */
+  maxDisplayPx: number;
+  tier: TierName;
+  /** Denormalized from tiers[tier].byteEnd so a consumer can Range-fetch directly. */
+  byteEnd: number;
+  score: TierScore;
 }
 
 export interface ProgressiveManifest {
@@ -53,6 +74,8 @@ export interface ProgressiveManifest {
    */
   perceptual?: Record<string, unknown>;
   tiers: ManifestTier[];
+  /** Optional display-scale → earliest-sufficient-tier frontier (Phase B). */
+  scaleFrontier?: ScaleFrontierEntry[];
 
   // Phase 8: reserved ingest CV fields + channel semantics (PG2/PG4/PG5/ST8).
   // Populated for photogrammetry/transect assets; FrameSet groups multiple such manifests.
@@ -95,6 +118,7 @@ function assertField(
 }
 
 const VALID_TIER_NAMES = new Set<string>(["dc", "preview", "full"]);
+const VALID_SCORE_METRICS = new Set<string>(["ssim", "psnr", "butteraugli"]);
 
 export function validateManifest(json: unknown): ProgressiveManifest {
   assertField(
@@ -231,6 +255,14 @@ export function validateManifest(json: unknown): ProgressiveManifest {
       `${f}.progressionIndex must be number or "final"`,
     );
     assertField(typeof t["intendedUse"] === "string", `${f}.intendedUse`, `${f}.intendedUse must be a string`);
+
+    if (t["score"] !== undefined) {
+      assertField(typeof t["score"] === "object" && t["score"] !== null, `${f}.score`, `${f}.score must be an object if present`);
+      const sc = t["score"] as Record<string, unknown>;
+      assertField(VALID_SCORE_METRICS.has(sc["metric"] as string), `${f}.score.metric`, `${f}.score.metric must be ssim|psnr|butteraugli`);
+      assertField(typeof sc["value"] === "number" && Number.isFinite(sc["value"] as number), `${f}.score.value`, `${f}.score.value must be a finite number`);
+      assertField(sc["reference"] === "final" || sc["reference"] === "source", `${f}.score.reference`, `${f}.score.reference must be "final" or "source"`);
+    }
   }
 
   // Cross-tier: each tier name must appear at most once.
@@ -251,6 +283,29 @@ export function validateManifest(json: unknown): ProgressiveManifest {
       `tiers[${i}].byteEnd`,
       `tiers[${i}].byteEnd (${curr}) must be greater than tiers[${i - 1}].byteEnd (${prev})`
     );
+  }
+
+  if (obj["scaleFrontier"] !== undefined) {
+    assertField(Array.isArray(obj["scaleFrontier"]), "scaleFrontier", "scaleFrontier must be an array if present");
+    const fr = obj["scaleFrontier"] as unknown[];
+    assertField(fr.length <= 16, "scaleFrontier", "scaleFrontier must have <= 16 entries");
+    for (let i = 0; i < fr.length; i++) {
+      const e = fr[i] as Record<string, unknown>;
+      const f = `scaleFrontier[${i}]`;
+      assertField(typeof e === "object" && e !== null, f, `${f} must be an object`);
+      assertField(typeof e["maxDisplayPx"] === "number" && (e["maxDisplayPx"] as number) > 0, `${f}.maxDisplayPx`, `${f}.maxDisplayPx must be a positive number`);
+      assertField(VALID_TIER_NAMES.has(e["tier"] as string), `${f}.tier`, `${f}.tier must be dc|preview|full`);
+      assertField(
+        typeof e["byteEnd"] === "number" && (e["byteEnd"] as number) > 0 && (e["byteEnd"] as number) <= (jxl["bytes"] as number),
+        `${f}.byteEnd`, `${f}.byteEnd must be in (0, jxl.bytes]`
+      );
+      if (i > 0) {
+        assertField(
+          (e["maxDisplayPx"] as number) > ((fr[i - 1] as Record<string, unknown>)["maxDisplayPx"] as number),
+          `${f}.maxDisplayPx`, `${f}.maxDisplayPx must be strictly ascending`
+        );
+      }
+    }
   }
 
   return json as ProgressiveManifest;
