@@ -11,4 +11,9 @@ export { fetchTier, fetchFull, streamTierFrames, } from "./progressive-stream.js
 export { ProgressiveCache } from "./progressive-cache.js";
 // Scheduler
 export { ProgressiveGallery, tierRank, fairnessScore, } from "./progressive-scheduler.js";
+// Perceptual metrics + scale frontier + tiered serving (Phase A/B)
+export { psnrVsRef, ssimVsRef, meetsThreshold } from "./progressive-metrics.js";
+export { selectTierForDisplay, selectFrontierTier } from "./progressive-scale.js";
+export { selectTiersByScore, buildScaleFrontier } from "./progressive-profile.js";
+export { makeButteraugliScorer, makeWasmDownscaler } from "./progressive-adapters.js";
 //# sourceMappingURL=index.js.map
