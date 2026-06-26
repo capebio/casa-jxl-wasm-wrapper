@@ -66,3 +66,9 @@ export { selectTiersByScore, buildScaleFrontier } from "./progressive-profile.js
 export type { Downscaler, ScoredEvent, ScoredPass, ScoreThresholds, BuildFrontierArgs } from "./progressive-profile.js";
 export { makeButteraugliScorer, makeWasmDownscaler } from "./progressive-adapters.js";
 export type { ScaleFrontierEntry, TierScore, ScoreMetric } from "./progressive-manifest.js";
+
+// Tiered serving: lazy manifest service + authoritative edge resolver (Phase 4)
+export { getOrBuildManifest } from "./progressive-service.js";
+export type { ManifestServiceDeps, ManifestRequest } from "./progressive-service.js";
+export { resolveTierRequest } from "./progressive-edge.js";
+export type { EdgeDeps, EdgeRequest, EdgeResolution, TierPolicy } from "./progressive-edge.js";
