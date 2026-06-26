@@ -4,8 +4,10 @@ import type { SessionFactory } from "./types.js";
 import {
   type ProgressiveManifest,
   type ManifestTier,
+  type ScaleFrontierEntry,
+  type TierName,
 } from "./progressive-manifest.js";
-import { meetsThreshold, type MetricName, type MetricScorer } from "./progressive-metrics.js";
+import { meetsThreshold, psnrVsRef, ssimVsRef, type MetricName, type MetricScorer } from "./progressive-metrics.js";
 
 export type { SessionFactory };
 
@@ -24,6 +26,10 @@ export interface ProfileOptions {
   scorer?: MetricScorer;
   /** Per-tier score thresholds (defaults derived from the scorer's metric). */
   thresholds?: ScoreThresholds;
+  /** Longest-edge display sizes to compute a scale frontier for (ascending). */
+  displaySizes?: number[];
+  /** Downscaler used to build the scale frontier (production: wasm downscale_rgba). */
+  downscaler?: Downscaler;
 }
 
 /** Options for profileJxlFile, extending ProfileOptions with a filesystem side-effect flag. */
@@ -88,6 +94,68 @@ export function selectTiersByScore(
 
   tiers.push({ name: "full", byteStart: 0, byteEnd: totalBytes, progressionIndex: "final", intendedUse: "zoom-export" });
   return tiers;
+}
+
+export type Downscaler = (rgba: Uint8Array, w: number, h: number, dw: number, dh: number) => Uint8Array;
+
+export interface ScoredPass {
+  byteOffset: number;
+  progressionIndex: number;
+  pixels: Uint8Array;
+}
+
+export interface BuildFrontierArgs {
+  passes: ScoredPass[];
+  finalPixels: Uint8Array;
+  srcW: number;
+  srcH: number;
+  tiers: ManifestTier[];
+  totalBytes: number;
+  metric: MetricName;
+  thresholds: ScoreThresholds;
+  /** Longest-edge display sizes to compute frontier entries for, ascending. */
+  displaySizes: number[];
+  downscaler: Downscaler;
+  scorerAt?: (cand: Uint8Array, ref: Uint8Array, w: number, h: number) => Promise<number> | number;
+}
+
+function dimsForLongestEdge(srcW: number, srcH: number, longest: number): { dw: number; dh: number } {
+  const edge = Math.max(srcW, srcH);
+  if (longest >= edge) return { dw: srcW, dh: srcH };
+  const scale = longest / edge;
+  return { dw: Math.max(1, Math.round(srcW * scale)), dh: Math.max(1, Math.round(srcH * scale)) };
+}
+
+/** For each display size, find the earliest pass that clears the preview threshold once
+ *  both pass and final are downsampled to that size; map it to the smallest covering tier.
+ *  A pass insufficient at native res can be sufficient at thumbnail res, so frontier
+ *  byteEnds shrink with display size. */
+export async function buildScaleFrontier(args: BuildFrontierArgs): Promise<ScaleFrontierEntry[]> {
+  const { passes, finalPixels, srcW, srcH, tiers, metric, thresholds, displaySizes, downscaler } = args;
+  const score = args.scorerAt ?? ((c: Uint8Array, r: Uint8Array, w: number, h: number): number =>
+    metric === "ssim" ? ssimVsRef(c, r, w, h) : psnrVsRef(c, r));
+  const tierForByteEnd = (be: number): ManifestTier =>
+    tiers.find((t) => t.byteEnd >= be) ?? tiers[tiers.length - 1]!;
+
+  const out: ScaleFrontierEntry[] = [];
+  for (const longest of displaySizes) {
+    const { dw, dh } = dimsForLongestEdge(srcW, srcH, longest);
+    const refDown = downscaler(finalPixels, srcW, srcH, dw, dh);
+    let chosen: { byteEnd: number; tier: TierName; value: number } | undefined;
+    for (const p of passes) {
+      const candDown = downscaler(p.pixels, srcW, srcH, dw, dh);
+      const value = await score(candDown, refDown, dw, dh);
+      if (meetsThreshold(metric, value, thresholds.preview)) {
+        const t = tierForByteEnd(p.byteOffset);
+        chosen = { byteEnd: t.byteEnd, tier: t.name, value };
+        break;
+      }
+    }
+    const fallback = tiers[tiers.length - 1]!;
+    const e = chosen ?? { byteEnd: fallback.byteEnd, tier: fallback.name, value: thresholds.preview };
+    out.push({ maxDisplayPx: longest, tier: e.tier, byteEnd: e.byteEnd, score: { metric, value: e.value, reference: "final" } });
+  }
+  return out;
 }
 
 // Yield control until all pending microtasks (including async-generator machinery)
@@ -298,6 +366,22 @@ export async function profileJxl(
 
   if (saliency !== undefined) {
     manifest.saliency = saliency;
+  }
+
+  if (opts.scorer !== undefined && opts.displaySizes !== undefined && opts.downscaler !== undefined) {
+    const finalEvent = [...events].reverse().find((e) => e.pixels !== undefined && e.pixels.length > 0);
+    if (finalEvent?.pixels !== undefined) {
+      const finalPixels = finalEvent.pixels;
+      const passes: ScoredPass[] = events
+        .filter((e) => e.pixels !== undefined && e.pixels.length === finalPixels.length)
+        .map((e) => ({ byteOffset: e.byteOffset, progressionIndex: e.progressionIndex, pixels: e.pixels! }));
+      manifest.scaleFrontier = await buildScaleFrontier({
+        passes, finalPixels, srcW: source.width, srcH: source.height,
+        tiers: manifest.tiers, totalBytes: jxlBytes.byteLength, metric: opts.scorer.metric,
+        thresholds: opts.thresholds ?? { dc: defaultDcThreshold(opts.scorer.metric), preview: defaultPreviewThreshold(opts.scorer.metric) },
+        displaySizes: opts.displaySizes, downscaler: opts.downscaler, scorerAt: opts.scorer.score,
+      });
+    }
   }
 
   return manifest;

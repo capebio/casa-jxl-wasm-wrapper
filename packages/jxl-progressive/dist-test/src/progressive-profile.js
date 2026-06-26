@@ -1,6 +1,6 @@
 // packages/jxl-progressive/src/progressive-profile.ts
 import {} from "./progressive-manifest.js";
-import { meetsThreshold } from "./progressive-metrics.js";
+import { meetsThreshold, psnrVsRef, ssimVsRef } from "./progressive-metrics.js";
 function defaultDcThreshold(m) { return m === "butteraugli" ? 3.0 : m === "ssim" ? 0.7 : 20; }
 function defaultPreviewThreshold(m) { return m === "butteraugli" ? 1.5 : m === "ssim" ? 0.9 : 30; }
 /** Choose dc/preview byteEnds as the earliest progression event whose score clears the
@@ -25,6 +25,41 @@ export function selectTiersByScore(events, totalBytes, metric, thresholds) {
     }
     tiers.push({ name: "full", byteStart: 0, byteEnd: totalBytes, progressionIndex: "final", intendedUse: "zoom-export" });
     return tiers;
+}
+function dimsForLongestEdge(srcW, srcH, longest) {
+    const edge = Math.max(srcW, srcH);
+    if (longest >= edge)
+        return { dw: srcW, dh: srcH };
+    const scale = longest / edge;
+    return { dw: Math.max(1, Math.round(srcW * scale)), dh: Math.max(1, Math.round(srcH * scale)) };
+}
+/** For each display size, find the earliest pass that clears the preview threshold once
+ *  both pass and final are downsampled to that size; map it to the smallest covering tier.
+ *  A pass insufficient at native res can be sufficient at thumbnail res, so frontier
+ *  byteEnds shrink with display size. */
+export async function buildScaleFrontier(args) {
+    const { passes, finalPixels, srcW, srcH, tiers, metric, thresholds, displaySizes, downscaler } = args;
+    const score = args.scorerAt ?? ((c, r, w, h) => metric === "ssim" ? ssimVsRef(c, r, w, h) : psnrVsRef(c, r));
+    const tierForByteEnd = (be) => tiers.find((t) => t.byteEnd >= be) ?? tiers[tiers.length - 1];
+    const out = [];
+    for (const longest of displaySizes) {
+        const { dw, dh } = dimsForLongestEdge(srcW, srcH, longest);
+        const refDown = downscaler(finalPixels, srcW, srcH, dw, dh);
+        let chosen;
+        for (const p of passes) {
+            const candDown = downscaler(p.pixels, srcW, srcH, dw, dh);
+            const value = await score(candDown, refDown, dw, dh);
+            if (meetsThreshold(metric, value, thresholds.preview)) {
+                const t = tierForByteEnd(p.byteOffset);
+                chosen = { byteEnd: t.byteEnd, tier: t.name, value };
+                break;
+            }
+        }
+        const fallback = tiers[tiers.length - 1];
+        const e = chosen ?? { byteEnd: fallback.byteEnd, tier: fallback.name, value: thresholds.preview };
+        out.push({ maxDisplayPx: longest, tier: e.tier, byteEnd: e.byteEnd, score: { metric, value: e.value, reference: "final" } });
+    }
+    return out;
 }
 // Yield control until all pending microtasks (including async-generator machinery)
 // have drained. Needed so framesTask reads bytesPushed before pushTask advances it
@@ -199,6 +234,21 @@ export async function profileJxl(jxlBytes, sessionFactory, source, opts = {}) {
     };
     if (saliency !== undefined) {
         manifest.saliency = saliency;
+    }
+    if (opts.scorer !== undefined && opts.displaySizes !== undefined && opts.downscaler !== undefined) {
+        const finalEvent = [...events].reverse().find((e) => e.pixels !== undefined && e.pixels.length > 0);
+        if (finalEvent?.pixels !== undefined) {
+            const finalPixels = finalEvent.pixels;
+            const passes = events
+                .filter((e) => e.pixels !== undefined && e.pixels.length === finalPixels.length)
+                .map((e) => ({ byteOffset: e.byteOffset, progressionIndex: e.progressionIndex, pixels: e.pixels }));
+            manifest.scaleFrontier = await buildScaleFrontier({
+                passes, finalPixels, srcW: source.width, srcH: source.height,
+                tiers: manifest.tiers, totalBytes: jxlBytes.byteLength, metric: opts.scorer.metric,
+                thresholds: opts.thresholds ?? { dc: defaultDcThreshold(opts.scorer.metric), preview: defaultPreviewThreshold(opts.scorer.metric) },
+                displaySizes: opts.displaySizes, downscaler: opts.downscaler, scorerAt: opts.scorer.score,
+            });
+        }
     }
     return manifest;
 }
