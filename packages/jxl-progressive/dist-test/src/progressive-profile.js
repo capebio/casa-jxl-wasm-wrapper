@@ -3,6 +3,15 @@ import {} from "./progressive-manifest.js";
 import { meetsThreshold, psnrVsRef, ssimVsRef } from "./progressive-metrics.js";
 function defaultDcThreshold(m) { return m === "butteraugli" ? 3.0 : m === "ssim" ? 0.7 : 20; }
 function defaultPreviewThreshold(m) { return m === "butteraugli" ? 1.5 : m === "ssim" ? 0.9 : 30; }
+/** Scores must be finite for JSON sidecar round-trip (JSON.stringify(Infinity) === "null")
+ *  and pass validateManifest. An identical pass yields psnr === Infinity; cap it to a large
+ *  finite sentinel. NaN / -Infinity (degenerate) → 0. */
+const SCORE_MAX = 1000;
+function finiteScore(v) {
+    if (Number.isFinite(v))
+        return v;
+    return v > 0 ? SCORE_MAX : 0;
+}
 /** Choose dc/preview byteEnds as the earliest progression event whose score clears the
  *  tier threshold. byteEnd always comes from a real progression event (never a guessed
  *  byte count). Full tier is always the total. */
@@ -13,14 +22,14 @@ export function selectTiersByScore(events, totalBytes, metric, thresholds) {
     if (dcEvent !== undefined) {
         tiers.push({
             name: "dc", byteStart: 0, byteEnd: dcEvent.byteOffset, progressionIndex: dcEvent.progressionIndex,
-            intendedUse: "thumbnail", score: { metric, value: dcEvent.score, reference: "final" },
+            intendedUse: "thumbnail", score: { metric, value: finiteScore(dcEvent.score), reference: "final" },
         });
     }
     const previewEvent = firstMeeting(thresholds.preview);
     if (previewEvent !== undefined && previewEvent.byteOffset > (dcEvent?.byteOffset ?? 0)) {
         tiers.push({
             name: "preview", byteStart: 0, byteEnd: previewEvent.byteOffset, progressionIndex: previewEvent.progressionIndex,
-            intendedUse: "visible-card", score: { metric, value: previewEvent.score, reference: "final" },
+            intendedUse: "visible-card", score: { metric, value: finiteScore(previewEvent.score), reference: "final" },
         });
     }
     tiers.push({ name: "full", byteStart: 0, byteEnd: totalBytes, progressionIndex: "final", intendedUse: "zoom-export" });
@@ -57,7 +66,7 @@ export async function buildScaleFrontier(args) {
         }
         const fallback = tiers[tiers.length - 1];
         const e = chosen ?? { byteEnd: fallback.byteEnd, tier: fallback.name, value: thresholds.preview };
-        out.push({ maxDisplayPx: longest, tier: e.tier, byteEnd: e.byteEnd, score: { metric, value: e.value, reference: "final" } });
+        out.push({ maxDisplayPx: longest, tier: e.tier, byteEnd: e.byteEnd, score: { metric, value: finiteScore(e.value), reference: "final" } });
     }
     return out;
 }
