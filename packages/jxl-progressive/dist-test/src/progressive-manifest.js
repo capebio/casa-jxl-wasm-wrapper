@@ -104,6 +104,22 @@ export function validateManifest(json) {
         const curr = tiersArr[i]["byteEnd"];
         assertField(curr > prev, `tiers[${i}].byteEnd`, `tiers[${i}].byteEnd (${curr}) must be greater than tiers[${i - 1}].byteEnd (${prev})`);
     }
+    if (obj["scaleFrontier"] !== undefined) {
+        assertField(Array.isArray(obj["scaleFrontier"]), "scaleFrontier", "scaleFrontier must be an array if present");
+        const fr = obj["scaleFrontier"];
+        assertField(fr.length <= 16, "scaleFrontier", "scaleFrontier must have <= 16 entries");
+        for (let i = 0; i < fr.length; i++) {
+            const e = fr[i];
+            const f = `scaleFrontier[${i}]`;
+            assertField(typeof e === "object" && e !== null, f, `${f} must be an object`);
+            assertField(typeof e["maxDisplayPx"] === "number" && e["maxDisplayPx"] > 0, `${f}.maxDisplayPx`, `${f}.maxDisplayPx must be a positive number`);
+            assertField(VALID_TIER_NAMES.has(e["tier"]), `${f}.tier`, `${f}.tier must be dc|preview|full`);
+            assertField(typeof e["byteEnd"] === "number" && e["byteEnd"] > 0 && e["byteEnd"] <= jxl["bytes"], `${f}.byteEnd`, `${f}.byteEnd must be in (0, jxl.bytes]`);
+            if (i > 0) {
+                assertField(e["maxDisplayPx"] > fr[i - 1]["maxDisplayPx"], `${f}.maxDisplayPx`, `${f}.maxDisplayPx must be strictly ascending`);
+            }
+        }
+    }
     return json;
 }
 export function lookupTier(manifest, name) {

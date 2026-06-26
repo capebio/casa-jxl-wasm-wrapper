@@ -18,6 +18,14 @@ export interface ManifestTier {
     /** Optional measured perceptual score for this tier (Phase A). */
     score?: TierScore;
 }
+export interface ScaleFrontierEntry {
+    /** Longest-edge display pixels this entry covers (inclusive upper bound). */
+    maxDisplayPx: number;
+    tier: TierName;
+    /** Denormalized from tiers[tier].byteEnd so a consumer can Range-fetch directly. */
+    byteEnd: number;
+    score: TierScore;
+}
 export interface ProgressiveManifest {
     version: 1;
     source: {
@@ -48,6 +56,8 @@ export interface ProgressiveManifest {
      */
     perceptual?: Record<string, unknown>;
     tiers: ManifestTier[];
+    /** Optional display-scale → earliest-sufficient-tier frontier (Phase B). */
+    scaleFrontier?: ScaleFrontierEntry[];
     capture?: {
         pose?: CameraPose;
         intrinsics?: FrameSetMember["intrinsics"];

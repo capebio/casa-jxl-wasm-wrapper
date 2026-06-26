@@ -35,6 +35,15 @@ export interface ManifestTier {
   score?: TierScore;
 }
 
+export interface ScaleFrontierEntry {
+  /** Longest-edge display pixels this entry covers (inclusive upper bound). */
+  maxDisplayPx: number;
+  tier: TierName;
+  /** Denormalized from tiers[tier].byteEnd so a consumer can Range-fetch directly. */
+  byteEnd: number;
+  score: TierScore;
+}
+
 export interface ProgressiveManifest {
   version: 1;
   source: {
@@ -65,6 +74,8 @@ export interface ProgressiveManifest {
    */
   perceptual?: Record<string, unknown>;
   tiers: ManifestTier[];
+  /** Optional display-scale → earliest-sufficient-tier frontier (Phase B). */
+  scaleFrontier?: ScaleFrontierEntry[];
 
   // Phase 8: reserved ingest CV fields + channel semantics (PG2/PG4/PG5/ST8).
   // Populated for photogrammetry/transect assets; FrameSet groups multiple such manifests.
@@ -272,6 +283,29 @@ export function validateManifest(json: unknown): ProgressiveManifest {
       `tiers[${i}].byteEnd`,
       `tiers[${i}].byteEnd (${curr}) must be greater than tiers[${i - 1}].byteEnd (${prev})`
     );
+  }
+
+  if (obj["scaleFrontier"] !== undefined) {
+    assertField(Array.isArray(obj["scaleFrontier"]), "scaleFrontier", "scaleFrontier must be an array if present");
+    const fr = obj["scaleFrontier"] as unknown[];
+    assertField(fr.length <= 16, "scaleFrontier", "scaleFrontier must have <= 16 entries");
+    for (let i = 0; i < fr.length; i++) {
+      const e = fr[i] as Record<string, unknown>;
+      const f = `scaleFrontier[${i}]`;
+      assertField(typeof e === "object" && e !== null, f, `${f} must be an object`);
+      assertField(typeof e["maxDisplayPx"] === "number" && (e["maxDisplayPx"] as number) > 0, `${f}.maxDisplayPx`, `${f}.maxDisplayPx must be a positive number`);
+      assertField(VALID_TIER_NAMES.has(e["tier"] as string), `${f}.tier`, `${f}.tier must be dc|preview|full`);
+      assertField(
+        typeof e["byteEnd"] === "number" && (e["byteEnd"] as number) > 0 && (e["byteEnd"] as number) <= (jxl["bytes"] as number),
+        `${f}.byteEnd`, `${f}.byteEnd must be in (0, jxl.bytes]`
+      );
+      if (i > 0) {
+        assertField(
+          (e["maxDisplayPx"] as number) > ((fr[i - 1] as Record<string, unknown>)["maxDisplayPx"] as number),
+          `${f}.maxDisplayPx`, `${f}.maxDisplayPx must be strictly ascending`
+        );
+      }
+    }
   }
 
   return json as ProgressiveManifest;
