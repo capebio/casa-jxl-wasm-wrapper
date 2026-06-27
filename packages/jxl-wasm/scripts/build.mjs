@@ -425,7 +425,7 @@ async function findStaticArchives(root) {
 
 function sortArchivesForLink(archives) {
   const priority = (path) => {
-    const name = path.replaceAll("\\", "/").split("/").pop() ?? "";
+    const name = path.replace(/\\/g, "/").split("/").pop() ?? "";
     if (name === "libjxl.a") return 0;
     if (name === "libjxl_threads.a") return 1;
     if (name === "libjxl_cms.a") return 2;
@@ -703,7 +703,7 @@ function resolveEmsdkImages() {
     return [process.env.EMSDK_IMAGE];
   }
   return [
-    "docker.io/emscripten/emsdk:latest"
+    "docker.io/emscripten/emsdk:3.1.27"
   ];
 }
 
@@ -715,7 +715,7 @@ function resolveBashBinary() {
 }
 
 function toCmakePath(path) {
-  return path.replaceAll("\\", "/");
+  return path.replace(/\\/g, "/");
 }
 
 async function rmDir(path) {
