@@ -2088,6 +2088,12 @@ const colourSelect = { labBuf: null, mask: null, tolerance: 30, seeds: [] };
 function captureCleanAndApplyLens(imageData) {
     cleanSnapshot = imageData;
     if (typeof setCleanCanvas === 'function') setCleanCanvas(imageData);
+    // Feed the Tauri-parity M2 FilterEngine the clean 8-bit baseline (the
+    // pre-lens snapshot) so its colour sliders have pixels to transform. This is
+    // the only caller; without it paintFromBaseline always missed and the panel
+    // was inert. Pass the snapshot directly to avoid a canvas read-back and to
+    // avoid capturing lens-modified pixels.
+    feedTauriParityBaseline(imageData);
     applyPerceptualLens();
 }
 
@@ -5298,13 +5304,17 @@ window.tauriParityLb = tauriParityLb;
 
 // Feed the M2 FilterEngine a clean 8-bit baseline whenever a fresh frame lands
 // on the lightbox canvas, so its sliders have pixels to transform.
-function feedTauriParityBaseline() {
+function feedTauriParityBaseline(snapshot) {
     if (!tauriParityLb || lightboxIndex < 0) return;
     const card = cards[lightboxIndex];
-    if (!card || !lightboxCanvas.width || !lightboxCanvas.height) return;
+    if (!card) return;
     try {
-        const ctx = lightboxCanvas.getContext('2d');
-        const img = ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height);
+        let img = snapshot;
+        if (!img) {
+            if (!lightboxCanvas.width || !lightboxCanvas.height) return;
+            const ctx = lightboxCanvas.getContext('2d');
+            img = ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height);
+        }
         tauriParityLb.onBaseFramePainted(card, img.data, img.width, img.height);
     } catch { /* cross-tainted canvas or 0-size: skip baseline feed */ }
 }
