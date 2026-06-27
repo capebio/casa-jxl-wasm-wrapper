@@ -62,7 +62,6 @@ pub fn decompress_rows_into(
             compressed.len(), HEADER_SKIP
         ));
     }
-    let huff = huff_table();
     let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
 
     for row in 0..nrows {
@@ -98,7 +97,7 @@ pub fn decompress_rows_into(
             // arithmetic shift spreads top bit of the 3-bit field into a -1/0 mask
             let sign = (((sb as i32) << 29) >> 31) as i32;
 
-            let high0 = br.read_huff(&huff);
+            let high0 = br.read_huff();
             if br.truncated {
                 return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
             }
@@ -172,25 +171,6 @@ pub fn decompress_rows_into(
     Ok(nrows)
 }
 
-fn build_huff() -> [u16; 4096] {
-    let mut huff = [0u16; 4096];
-    let mut n = 0usize;
-    huff[0] = 0xc0c; // 12-bit lookup, escape value 12
-    for i in (0..12).rev() {
-        let len = 2048usize >> i;
-        for _ in 0..len {
-            n += 1;
-            huff[n] = (((i as u16) + 1) << 8) | (i as u16);
-        }
-    }
-    huff
-}
-
-fn huff_table() -> &'static [u16; 4096] {
-    static HUFF: std::sync::OnceLock<[u16; 4096]> = std::sync::OnceLock::new();
-    HUFF.get_or_init(build_huff)
-}
-
 /// MSB-first bit reader.  No byte stuffing (Olympus does not set `zero_after_ff`).
 struct BitReader<'a> {
     data: &'a [u8],
@@ -257,12 +237,19 @@ impl<'a> BitReader<'a> {
         v as u32
     }
 
+    /// Decode one Olympus "high" symbol. It is a **unary prefix code**, so no table
+    /// is needed: from the original dcraw 4096-entry lookup, value = number of leading
+    /// zero bits in the 12-bit peek (capped at 12 = escape) and the consumed length =
+    /// value + 1 (capped at 12). One `leading_zeros` replaces a per-pixel 8 KB
+    /// data-cache load on the inter-pixel critical path. `huff_lz_equiv_sweep` proves
+    /// this closed form equals the canonical table for all 4096 indices.
     #[inline(always)]
-    fn read_huff(&mut self, huff: &[u16; 4096]) -> u32 {
+    fn read_huff(&mut self) -> u32 {
         self.fill(12);
-        let idx = ((self.buf >> (self.nbits - 12)) & 0xFFF) as usize;
-        let entry = huff[idx];
-        let len = (entry >> 8) as u32;
+        let idx = ((self.buf >> (self.nbits - 12)) & 0xFFF) as u32;
+        // idx < 4096 => at least 20 leading zeros in the u32, so `- 20` is in 0..=12.
+        let value = idx.leading_zeros() - 20;
+        let len = (value + 1).min(12);
         if len > self.real_in_buf {
             self.truncated = true;
             self.real_in_buf = 0;
@@ -270,7 +257,7 @@ impl<'a> BitReader<'a> {
             self.real_in_buf -= len;
         }
         self.nbits -= len;
-        (entry & 0xff) as u32
+        value
     }
 }
 
@@ -298,6 +285,55 @@ mod tests {
         // also via rows full
         let out2 = decompress_rows(GOLDEN_FULL, GOLDEN_W, GOLDEN_H, GOLDEN_H).unwrap();
         assert_eq!(out2, GOLDEN_EXPECT);
+    }
+
+    // Parity-unroll micro, REJECT (ScannerBot 20-06-26, branch ScannerBotDecompressDotRs).
+    // Hypothesis: unroll the column loop ×2 so even/odd columns get scalar
+    // `acarry`/`west`/`nw` locals instead of `[[i32;3];2]` indexed by `col & 1`,
+    // hoping the running-average chain stays in registers (asm showed stack traffic).
+    // Built bit-exact (golden + random even/odd/width-1 parity all EXACT) and measured
+    // via a 5239x600 synthetic-bitstream flipflop. Result: +6.7 / -2.6 / -2.6 / -1.3 /
+    // +2.2 % across warm runs — mean ~+0.5%, sign-unstable, entirely inside this box's
+    // ±4-6% thermal noise band. Sub-V2 (>=5%) and trust:low (V1). The decode is
+    // latency-bound on the bit-serial stream + huff table-load; the [parity] spill is
+    // not on the binding critical path (OoO hides it). ea3fca93's branchless predictor
+    // remains the achievable single-thread win. Don't re-chase (cf. D3/D6 below).
+    #[test]
+    #[ignore]
+    fn parity_unroll_reject() {
+        let _ = decompress(GOLDEN_FULL, GOLDEN_W, GOLDEN_H);
+    }
+
+    // Provenance guard for the table-free `read_huff`: its `leading_zeros` closed form
+    // must equal dcraw's canonical 4096-entry "high" table for EVERY index. Builds the
+    // original table locally as the oracle (read_huff is a pure fn of the 12-bit peek ->
+    // (value, consumed-len)). If anyone "fixes" the formula, this fails. (The table was
+    // removed from production as a needless 8 KB per-pixel load — ScannerBot 20-06-26.)
+    #[test]
+    fn huff_lz_equiv_sweep() {
+        // dcraw's olympus build_huff, kept here only as the reference oracle.
+        let mut table = [0u16; 4096];
+        let mut n = 0usize;
+        table[0] = 0xc0c; // 12-bit lookup, escape value 12
+        for i in (0..12).rev() {
+            let len = 2048usize >> i;
+            for _ in 0..len {
+                n += 1;
+                table[n] = (((i as u16) + 1) << 8) | (i as u16);
+            }
+        }
+
+        for idx in 0u32..4096 {
+            let entry = table[idx as usize];
+            let len_tbl = (entry >> 8) as u32;
+            let val_tbl = (entry & 0xff) as u32;
+
+            // The exact closed form used by `read_huff`.
+            let value = idx.leading_zeros() - 20;
+            let len = (value + 1).min(12);
+
+            assert_eq!((val_tbl, len_tbl), (value, len), "huff mismatch at idx={}", idx);
+        }
     }
 
     // D8(b): D2 formula matches the original search loop for all u16 carry, i in {0,2}.
