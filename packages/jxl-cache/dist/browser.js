@@ -316,10 +316,20 @@ export class JxlCacheBrowser {
     async writePersistentFile(name, buffer) {
         if (!this.opfsRoot)
             return;
+        // OPFS FileSystemWritableFileStream.write() rejects SharedArrayBuffer-backed
+        // views ("The provided ArrayBuffer value must not be shared"). The memory
+        // cache is SAB-backed and setPersistent forwards a SAB view, so copy into a
+        // non-shared buffer before writing. (A bare ArrayBuffer / non-shared view
+        // passes through untouched.)
+        let data = buffer;
+        const underlying = buffer instanceof Uint8Array ? buffer.buffer : buffer;
+        if (typeof SharedArrayBuffer !== 'undefined' && underlying instanceof SharedArrayBuffer) {
+            data = buffer instanceof Uint8Array ? new Uint8Array(buffer) : new Uint8Array(new Uint8Array(buffer));
+        }
         const fileHandle = await this.opfsRoot.getFileHandle(name, { create: true });
         const writable = await fileHandle.createWritable();
         try {
-            await writable.write(buffer);
+            await writable.write(data);
             await writable.close();
         }
         catch (writeErr) {

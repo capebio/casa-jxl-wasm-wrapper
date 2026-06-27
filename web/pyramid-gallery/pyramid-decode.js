@@ -52,14 +52,16 @@ export async function decodePyramidLevel(ctx, bytes, opts) {
   let rgba = null;
   let width = 0;
   let height = 0;
+  // jxl-session frames() yields frame events keyed by `stage` (header|dc|pass|final),
+  // NOT `type` — the terminal frame is stage === 'final'. (The facade decoder.events()
+  // used by decodePyramidRegion below is a different contract that keys on `type`.)
+  // Errors surface by frames() throwing, not as an event, so they propagate out of this loop.
   for await (const ev of session.frames()) {
-    if (ev.type === 'final') {
+    if (ev.stage === 'final') {
       // Preserve packed bytes for rgba16 (len = w*h*8); Uint8Array container passed through to webgl-pipeline / export.
       rgba = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
       width = ev.info.width;
       height = ev.info.height;
-    } else if (ev.type === 'error') {
-      throw new Error(`${ev.code}: ${ev.message}`);
     }
   }
   await session.done();
