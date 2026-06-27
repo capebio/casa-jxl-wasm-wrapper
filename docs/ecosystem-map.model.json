@@ -184,7 +184,7 @@
         "rust",
         "wasm"
       ],
-      "gc": 10,
+      "gc": 11,
       "lines": 1079
     },
     {
@@ -198,7 +198,7 @@
         "rust",
         "wasm"
       ],
-      "gc": 18,
+      "gc": 20,
       "hot": true,
       "lines": 1727
     },
@@ -287,9 +287,9 @@
         "rust",
         "wasm"
       ],
-      "gc": 43,
+      "gc": 47,
       "hot": true,
-      "lines": 3500
+      "lines": 3518
     },
     {
       "id": "p_params",
@@ -368,7 +368,7 @@
         "rust",
         "wasm"
       ],
-      "line": 2172
+      "line": 2190
     },
     {
       "id": "p_pc",
@@ -380,7 +380,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1123
+      "line": 1141
     },
     {
       "id": "p_wb",
@@ -403,7 +403,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1486
+      "line": 1504
     },
     {
       "id": "f_apply_tone",
@@ -415,7 +415,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1195
+      "line": 1213
     },
     {
       "id": "f_apply_tone4",
@@ -427,7 +427,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1321
+      "line": 1339
     },
     {
       "id": "f_tone_curve",
@@ -451,7 +451,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1900
+      "line": 1918
     },
     {
       "id": "f_process16",
@@ -463,7 +463,7 @@
         "rust",
         "wasm"
       ],
-      "line": 2041
+      "line": 2059
     },
     {
       "id": "f_build_pre",
@@ -569,7 +569,7 @@
         "rust",
         "wasm"
       ],
-      "line": 1123
+      "line": 1141
     },
     {
       "id": "d_mhc",
@@ -1155,7 +1155,7 @@
       "tech": [
         "rust"
       ],
-      "gc": 1,
+      "gc": 2,
       "lines": 30
     },
     {
@@ -1168,7 +1168,7 @@
       "tech": [
         "rust"
       ],
-      "gc": 5,
+      "gc": 7,
       "lines": 379
     },
     {
@@ -1181,7 +1181,7 @@
       "tech": [
         "rust"
       ],
-      "gc": 1,
+      "gc": 2,
       "lines": 8
     },
     {
@@ -1195,7 +1195,7 @@
       ],
       "path": "external/libjxl-012",
       "hot": true,
-      "lines": 693518
+      "lines": 736123
     },
     {
       "id": "lj_core",
@@ -1288,7 +1288,7 @@
         "rust",
         "wasm"
       ],
-      "gc": 27,
+      "gc": 28,
       "hot": true,
       "lines": 558
     },
@@ -1579,7 +1579,7 @@
         "wasm"
       ],
       "desc": "This file (src/lib.rs at the repository root, NOT the one under crates/) is the front door the web browser uses to reach the RAW image pipeline. Everything else in the Rust codebase is a library; this file is the thin \"glue\" layer that takes that library and exposes a handful of functions to JavaScript by tagging them with #[wasm_bindgen]. wasm-bindgen is the tool that compiles Rust to WebAssembly (\"wasm\" — a fast, portable binary that runs inside a web page like a tiny CPU-native module) and auto-generates the JavaScript bindings so the browser can call Rust functions and pass byte arrays back and forth. At the top of the file you can see it pulls in the same four core modules the native build uses — decompress, demosaic, pipeline, tiff (lines 11-14) — so the browser runs byte-for-byte the SAME decoding science as the desktop app, just compiled for a different target.\n\nWhy it exists: a camera RAW file is not a viewable image. It is a sensor dump — millions of single-colour brightness readings behind a coloured grid — wrapped in a manufacturer-specific container. To show it on screen the browser would otherwise need to reimplement all of that parsing and colour maths in slow JavaScript. Instead, this entry point lets the heavy lifting happen in compiled Rust at near-native speed inside the page, while JavaScript stays in charge of the user interface. The module-level doc comment spells out the contract: parse an ORF blob, decompress the 12-bit predictive stream, demosaic (reconstruct full colour from the single-colour-per-pixel mosaic), apply white balance and the sRGB tone curve, fix orientation, and hand back an interleaved pixel buffer plus its dimensions. Notably it deliberately leaves JXL/WebP *encoding* to a separate component to keep this wasm module small.\n\nHow it works: the file is organised around a few exported #[wasm_bindgen] surfaces. The core is the process_orf family (around line 905) which returns a ProcessResult struct — a bundle holding the finished RGB8 pixels plus a large set of read-only fields: timing for each stage (decompress_ms, demosaic_ms, tonemap_ms, orient_ms), the white balance actually used, the colour matrix, and a full set of EXIF facts (lens, ISO, GPS, exposure) for the gallery's info panel. It also carries pre-downscaled \"lightbox\" (1800 px) and \"thumb\" (360 px) buffers so the gallery never has to re-decode. To move large pixel buffers to JavaScript cheaply it uses take_* methods (e.g. take_rgb, take_rgba at lines 264-298) that std::mem::take the Vec out of the struct — transferring ownership rather than copying twice. There is also an OUT_* output-flags bitmask (lines 548-556) so a caller doing batch JXL encoding can ask for only the full-resolution buffer and skip generating previews, and an OUT_NO_ORIENT flag that lets the encoder store rotation as metadata instead of paying a 60-200 MB physical rotate.\n\nConnections: on the JavaScript side this module is invoked from the browser progressive-paint loop (web_paint) which calls process_orf to turn camera bytes into pixels. On the Rust side, every exported function ultimately delegates into the shared raw-pipeline crate — for example process_orf calls decode_orf_raw (line 601), which runs tiff::parse, decompress::decompress, demosaic::demosaic_rggb_mhc / demosaic_rggb_planar, and pipeline::process_into_auto. The data that crosses the wasm boundary is always plain byte arrays (Uint8Array in JS): file bytes in, RGBA8/RGB8 pixels out, plus scalar metadata. Critically, the browser does NOT use this file for JXL compression — that is a separate wasm codec (bridge) — so this entry point is purely the RAW-to-pixels half of the picture.\n\nGotchas a maintainer must know: WebAssembly has no wall clock, so timing here calls into the browser's performance.now() via now_ms() (line 311), which caches the Performance object and even falls back through window → WorkerGlobalScope → Date.now so it works inside web workers, not just the main page. The take_* methods transfer ownership: calling take_rgb twice returns an empty buffer the second time — a deliberate one-shot to avoid double-copies. Multithreading (rayon) only activates if the crate is built with the parallel-wasm feature AND JavaScript first calls init_thread_pool (line 19-20), which in turn requires the page to be served with COOP/COEP security headers so SharedArrayBuffer is allowed. Several large blocks near the top (demosaic_bench_*, fstats_*) are bench-only A/B harnesses driven by tooling scripts, not part of the production path — they exist to time SIMD vs scalar kernels and should not be mistaken for the real pipeline.",
-      "gc": 59,
+      "gc": 60,
       "lines": 3333
     },
     {
@@ -1637,7 +1637,7 @@
         "wasm"
       ],
       "desc": "bridge is the browser's JXL codec — and it is a completely different thing from the native Rust JXL encoder/decoder used on the desktop. It is C++ that wraps libjxl (the reference JPEG XL library) and is compiled to WebAssembly, shipped as the prebuilt web package and driven from JavaScript. The architecture model and CLAUDE.md make the split explicit: in the browser, the RAW-to-pixels half is the Rust pipeline compiled to wasm (wasm_entry), but the JXL compression/decompression half is THIS separate C++/libjxl wasm module. The native Rust codecs (jxl_casaencoder / jxl_casadecoder, which go through jxl-ffi) run only in the Tauri desktop app and CLI — the browser never touches them. So bridge is where JXL codestream bytes get turned into pixels (decode) and where pixels get turned into JXL bytes (encode) inside a web page.\n\nWhy it exists: JPEG XL is a sophisticated modern codec; reimplementing it would be enormous and error-prone, so both the desktop and the browser ultimately lean on the same upstream libjxl. But the desktop reaches libjxl through a Rust FFI (foreign-function interface) layer, which is the natural fit for a native binary, whereas a web page cannot load a native .dll/.so — it needs a wasm module. bridge.cpp is the answer: it presents libjxl's decode/encode capability through a small C++ surface that compiles cleanly to wasm and is callable from JavaScript. Per CLAUDE.md it manages the wasm heap with grow-only realloc buffers (it reuses and only ever grows its scratch memory rather than reallocating per call), which keeps the hot decode/encode loop allocation-light. The build notes record that this module's symbol surface (including a JPEG-to-JXL transcode entry) is exported in the shipped dist/jxl-core.simd.js artifact.\n\nHow it works (architecturally — the C++ source lives in packages/jxl-wasm/src/bridge.cpp, which is the browser codec, parallel to the Rust path): the surrounding TypeScript facade (packages/jxl-wasm/src/facade.ts in the layer map) handles wasm heap allocation, zero-copy writes of input bytes into wasm memory, and a capability cache; bridge.cpp itself is the C++ FFI that calls into libjxl to run the actual decode (producing pixels, optionally progressively as more bytes arrive) and encode (producing a JXL codestream). The decode-handler in the worker package drives it as a session state machine — feeding chunks of compressed bytes in and pulling decoded pixel frames out. Because decode_pause/decode_resume preemption is handled a layer up, bridge's own push of bytes into libjxl runs synchronously to completion per chunk.\n\nConnections: bridge sits at the bottom of the browser JXL stack. Above it, the worker's decode-handler (jxl_worker) calls into it to decode incoming JXL bytes into pixels; the scheduler (jxl_sched) routes work to that worker; the public session (jxl_session) hides all of this from the app; and the progressive paint loop (web_paint) ultimately consumes the decoded frames. The representation crossing into bridge is compressed JXL codestream bytes (and, for encode, raw pixels); what comes back is decoded pixel buffers (or, for encode, JXL bytes). It is the browser's single C boundary into libjxl, exactly analogous to what jxl-ffi is for the native build — but the two never mix.\n\nGotchas: the most important one is the identity confusion this node exists to dispel — the browser uses bridge, NOT the native Rust jxl_casaencoder/jxl_casadecoder. Treating them as interchangeable leads to wrong conclusions about which code path runs where. Because libjxl multithreading and SharedArrayBuffer both require COOP/COEP cross-origin-isolation headers, bridge's threaded decode only works on a properly-isolated page. CLAUDE.md also notes that an experimental decoder/encoder split (jxl-core.dec.* artifacts) is not built yet, so test helpers must fall back to the monolithic jxl-core.simd.js — a sharp edge for anyone wiring up tests against this module.",
-      "gc": 71,
+      "gc": 72,
       "hot": true,
       "lines": 3925
     },

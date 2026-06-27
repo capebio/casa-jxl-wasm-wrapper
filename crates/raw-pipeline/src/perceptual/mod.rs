@@ -246,7 +246,10 @@ impl Comparer {
         std::mem::swap(&mut self.tb, &mut self.db);
     }
 
-    /// 3-scale butteraugli. Mutates test scratch (tx/ty/tb get downsampled in place).
+    /// Multi-scale butteraugli (up to 3 scales). Mutates test scratch (tx/ty/tb get
+    /// downsampled in place). Iterates over `self.levels.len()` actual levels — which
+    /// may be fewer than 3 for tiny images (see `Comparer::new` break condition) —
+    /// so a 1×N or N×1 image never indexes a non-existent level.
     pub fn butteraugli(&mut self, test: &[u8]) -> f32 {
         if test.len() != self.n * 4 {
             return f32::NAN;
@@ -254,19 +257,23 @@ impl Comparer {
         self.fill_test_xyb(test);
         let (mut w, mut h) = (self.width, self.height);
         let mut total = 0f32;
-        for s in 0..3 {
+        let num_levels = self.levels.len();
+        for s in 0..num_levels {
             let e = self.scale_err_dispatch(s) * self.opts.weights[s];
             total += e;
-            if s < 2 && w > 1 && h > 1 {
+            // Mirror the Comparer::new break condition: only downsample when there is
+            // a next level AND the current resolution is still 2-D (both dims > 1).
+            // For a full 3-level image: num_levels==3, so `s < 2` — identical to before.
+            if s < num_levels - 1 && w > 1 && h > 1 {
                 let (dw, dh) = ((w >> 1).max(1), (h >> 1).max(1));
                 self.downsample_dispatch(w, h, dw, dh);
                 w = dw; h = dh;
             }
         }
-        // Divide by the actual sum of weights rather than the hardcoded 7.0 (the sum
-        // of the default [4, 2, 1]). Any caller supplying custom Opts.weights would
-        // otherwise receive a result scaled by 7.0/sum(custom_weights) — silently wrong.
-        let weight_sum: f32 = self.opts.weights.iter().sum();
+        // Divide by the sum of weights for the EVALUATED levels only.
+        // For a 3-level image this equals opts.weights.iter().sum() — identical to before.
+        // For a 1- or 2-level image this avoids under-normalizing by un-evaluated weights.
+        let weight_sum: f32 = self.opts.weights[..num_levels].iter().sum();
         // Use assert! (not debug_assert!) so callers passing Opts { weights: [0.0, ..] }
         // or NaN weights get a clear panic in release builds rather than silent NaN propagation
         // through Metrics and downstream comparisons.
@@ -281,6 +288,14 @@ impl Comparer {
         if test.len() != self.n * 4 {
             return f32::NAN;
         }
+        self.ssim_test_sums(test).0
+    }
+
+    /// SSIM score plus the per-channel test sums `sa=Σx`, `saa=Σx²` that every backend
+    /// already accumulates en route to `finalize_ssim`. `all()` reuses `sa`/`saa` to
+    /// derive `channel_moments` without a second pass over the test buffer.
+    /// Caller must ensure `test.len() == self.n * 4` (the public `ssim`/`all` guard it).
+    fn ssim_test_sums(&self, test: &[u8]) -> (f32, [u64; 3], [u64; 3]) {
         match self.backend {
             #[cfg(target_arch = "x86_64")]
             // Channel-as-lane SIMD moments (8-wide, 2 px/iter). flip-measured 1.33–1.51×
@@ -289,7 +304,7 @@ impl Comparer {
             // scalar `ssim_moments_avx2` is retained as the parity oracle for tests + flip.
             Backend::Avx2Strict | Backend::Avx2Rsqrt => {
                 let (sa, saa, sab) = unsafe { simd::avx2::ssim_moments_avx2_cal(test, &self.ref_rgba, self.n) };
-                ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
+                (ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3), sa, saa)
             }
             #[cfg(target_arch = "x86_64")]
             // Server option: channel-as-lane SIMD moments (16-wide, 4 px/iter). The
@@ -298,15 +313,18 @@ impl Comparer {
             // active whenever an AVX-512 backend is selected (auto on server hardware).
             Backend::Avx512Strict | Backend::Avx512Rsqrt => {
                 let (sa, saa, sab) = unsafe { simd::avx512::ssim_moments_avx512(test, &self.ref_rgba, self.n) };
-                ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
+                (ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3), sa, saa)
             }
             #[cfg(target_arch = "wasm32")]
             // wasm v128 channel-as-lane moments — bench-measured 3.73× over scalar.
             Backend::WasmSimd => {
                 let (sa, saa, sab) = simd::wasm::ssim_moments_wasm(test, &self.ref_rgba, self.n);
-                ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3)
+                (ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3), sa, saa)
             }
-            _ => ssim::ssim_with_ref(test, &self.ref_rgba, self.n, 4, &self.ssim_sb, &self.ssim_sbb),
+            _ => {
+                let (sa, saa, sab) = ssim::ssim_sums(test, &self.ref_rgba, self.n, 4);
+                (ssim::finalize_ssim(&sa, &self.ssim_sb, &saa, &self.ssim_sbb, &sab, self.n, 3), sa, saa)
+            }
         }
     }
 
@@ -371,15 +389,19 @@ impl Comparer {
     /// later task fuses the deinterleave.
     pub fn all(&mut self, test: &[u8]) -> Metrics {
         let butteraugli = self.butteraugli(test);
-        let ssim = self.ssim(test);
         let psnr = self.psnr(test);
-        // Match the per-metric graceful path: a short buffer makes the three calls
-        // above return NaN, so do not let channel_moments index OOB and panic.
-        let moments = if test.len() == self.n * 4 {
-            let (mus, vars, ch) = ssim::channel_moments(test, self.n, 4, 3);
-            ChannelMoments { mus, vars, ch }
+        // Fuse SSIM and channel_moments: the SSIM pass already accumulates the test
+        // sums sa=Σx, saa=Σx² per channel, and mus/vars are exactly sa/n and
+        // saa/n-mu². Deriving them here (bit-identical to channel_moments) removes a
+        // full strided pass over the test buffer — flip-measured 38% off the
+        // SSIM+moments work @24MP (examples/ssim_all_reuse_flip.rs, parity exact).
+        // A short buffer makes the metric calls return NaN; guard moments the same way.
+        let (ssim, moments) = if test.len() == self.n * 4 {
+            let (s, sa, saa) = self.ssim_test_sums(test);
+            let (mus, vars, ch) = ssim::moments_from_sums(&sa, &saa, self.n, 3);
+            (s, ChannelMoments { mus, vars, ch })
         } else {
-            ChannelMoments::default()
+            (f32::NAN, ChannelMoments::default())
         };
         Metrics { butteraugli, ssim, psnr, moments }
     }
@@ -525,6 +547,63 @@ mod tests {
         assert!((m.butteraugli - cmp2.butteraugli(&noisy)).abs() < 1e-5);
         assert!((m.ssim - cmp2.ssim(&noisy)).abs() < 1e-6);
         assert!((m.psnr - cmp2.psnr(&noisy)).abs() < 1e-3);
+        // Moments oracle: all() now derives mus/vars from the SSIM test sums; they must be
+        // BIT-IDENTICAL to a standalone channel_moments pass over the same buffer.
+        let (mus, vars, ch) = ssim::channel_moments(&noisy, w * h, 4, 3);
+        assert_eq!(m.moments.ch, ch, "moments channel count");
+        assert_eq!(m.moments.mus, mus, "fused mus must equal channel_moments");
+        assert_eq!(m.moments.vars, vars, "fused vars must equal channel_moments");
+    }
+
+    /// Regression: tiny images (1×N, N×1, 1×1) must not panic with index-out-of-bounds.
+    /// `Comparer::new` pushes fewer than 3 levels when width or height reaches 1 during
+    /// downscale; the old hard-coded `for s in 0..3` loop would index `self.levels[1]`
+    /// or `self.levels[2]` which don't exist for those images.
+    #[test]
+    fn tiny_image_no_panic() {
+        // 1×8: at s=0, h=8 w=1 → `w > 1 && h > 1` is FALSE → only 1 level pushed.
+        {
+            let (w, h) = (1, 8);
+            let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 7) % 251) as u8).collect();
+            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let score = cmp.butteraugli(&test);
+            assert!(score.is_finite(), "1×8 butteraugli must be finite, got {score}");
+            let m = cmp.all(&test);
+            assert!(m.butteraugli.is_finite(), "1×8 all().butteraugli must be finite");
+        }
+        // 8×1: same condition, h=1 at s=0.
+        {
+            let (w, h) = (8, 1);
+            let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 7) % 251) as u8).collect();
+            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let score = cmp.butteraugli(&test);
+            assert!(score.is_finite(), "8×1 butteraugli must be finite, got {score}");
+            let m = cmp.all(&test);
+            assert!(m.butteraugli.is_finite(), "8×1 all().butteraugli must be finite");
+        }
+        // 1×1: extreme degenerate — single pixel, 1 level.
+        {
+            let (w, h) = (1, 1);
+            let img = vec![100u8, 150, 200, 255];
+            let test = vec![110u8, 140, 190, 255];
+            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let score = cmp.butteraugli(&test);
+            assert!(score.is_finite(), "1×1 butteraugli must be finite, got {score}");
+            let m = cmp.all(&test);
+            assert!(m.butteraugli.is_finite(), "1×1 all().butteraugli must be finite");
+        }
+        // 2×4: both dims > 1 at s=0, but after one downsample → 1×2, which is ≤ 1 in w
+        // → only 2 levels pushed (verifies 2-level path).
+        {
+            let (w, h) = (2, 4);
+            let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 5) % 251) as u8).collect();
+            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let score = cmp.butteraugli(&test);
+            assert!(score.is_finite(), "2×4 butteraugli must be finite, got {score}");
+        }
     }
 
     /// Parity guard: all() must produce the same values as the three individual calls

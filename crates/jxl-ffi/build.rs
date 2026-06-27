@@ -227,6 +227,21 @@ fn main() {
         }
     }
 
+    // Compile-gated decode-path counters (strategy histogram, nzeros, CfL mode,
+    // active-component mask, dequant work ledger).  Dumps to stderr at exit.
+    // Enable: $env:JXL_DEC_TRANSFORM_STATS=1  before building.
+    // Disable (default): env var absent → zero overhead at runtime.
+    if env::var_os("JXL_DEC_TRANSFORM_STATS").is_some() {
+        let flag = if target_os == "windows" {
+            "/DJXL_DEC_TRANSFORM_STATS"
+        } else {
+            "-DJXL_DEC_TRANSFORM_STATS"
+        };
+        cfg.cxxflag(flag);
+        println!("cargo:warning=jxl-ffi: JXL_DEC_TRANSFORM_STATS enabled");
+    }
+    println!("cargo:rerun-if-env-changed=JXL_DEC_TRANSFORM_STATS");
+
     let prefix = cfg.build();
 
     let lib_dir = {

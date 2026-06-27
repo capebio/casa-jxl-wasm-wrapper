@@ -1,4 +1,4 @@
-ARG EMSDK_IMAGE=ghcr.io/emscripten-core/emsdk:4.0.14
+ARG EMSDK_IMAGE=docker.io/emscripten/emsdk:latest
 FROM ${EMSDK_IMAGE}
 
 SHELL ["/bin/bash", "-lc"]
@@ -27,8 +27,7 @@ RUN git clone --recursive --shallow-submodules --depth 1 --branch "${LIBJXL_TAG}
   && test "$(git -C /tmp/jxl-wasm-work/libjxl rev-parse HEAD)" = "${LIBJXL_COMMIT}" \
   && bash -lc "cd /tmp/jxl-wasm-work/libjxl && ./deps.sh"
 
-RUN embuilder build libc libc++ libc++abi libcompiler_rt libmalloc-emmalloc libemmalloc --lto \
-  && embuilder build libc-mt libc++-mt libc++abi-mt libcompiler_rt-mt --lto
+# System libraries built on-demand by emcc (pre-building can fail on latest emsdk)
 
 RUN emcc --version \
   && git config --global --add safe.directory '*'

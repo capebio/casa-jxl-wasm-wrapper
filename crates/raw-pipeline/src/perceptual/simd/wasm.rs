@@ -255,15 +255,47 @@ pub fn pixels_to_xyb_wasm(px: &[u8], n: usize, lut: &[f32; 256], x: &mut [f32], 
 /// overhead rarely beats scalar at this width; the Node flip-flop (Task D2) can
 /// revisit if profiling warrants.
 pub fn downsample_wasm(src: &[f32], dst: &mut [f32], w: usize, h: usize, dw: usize, dh: usize) {
+    // v128 box 2x: 4 outputs (8 src cols) per row via even/odd shuffle + add, both
+    // rows, *0.25. node WASM-SIMD measured ~60-65% over the scalar nested loop at
+    // 1024²/2048² (maxdiff 5.96e-8 — pure f32 add-association, well under the 1e-5
+    // oracle tolerance). The scalar tail handles leftover outputs and the odd
+    // width/height edge clamp identically to the old scalar form.
+    // Length guard mirrors scale_err_wasm: WASM ships as the primary target, so an
+    // OOB read/write must be a defined panic, not silent UB.
+    assert!(
+        src.len() >= w.saturating_mul(h) && dst.len() >= dw.saturating_mul(dh),
+        "downsample_wasm: src/dst shorter than w*h / dw*dh"
+    );
+    let quarter = f32x4_splat(0.25);
     for y in 0..dh {
         let sy0 = y << 1;
         // Use if-form instead of `.min(h - 1)` to avoid usize underflow when h==0.
         let sy1 = if sy0 + 1 < h { sy0 + 1 } else { sy0 };
-        for x in 0..dw {
+        let r0 = sy0 * w;
+        let r1 = sy1 * w;
+        let mut x = 0usize;
+        // Bulk: while the 4-output block's last source column (2x+7) is in-bounds.
+        unsafe {
+            while (x + 4) * 2 <= w {
+                let o0 = r0 + (x << 1);
+                let a0 = v128_load(src.as_ptr().add(o0) as *const v128);
+                let b0 = v128_load(src.as_ptr().add(o0 + 4) as *const v128);
+                let s0 = f32x4_add(u32x4_shuffle::<0, 2, 4, 6>(a0, b0), u32x4_shuffle::<1, 3, 5, 7>(a0, b0));
+                let o1 = r1 + (x << 1);
+                let a1 = v128_load(src.as_ptr().add(o1) as *const v128);
+                let b1 = v128_load(src.as_ptr().add(o1 + 4) as *const v128);
+                let s1 = f32x4_add(u32x4_shuffle::<0, 2, 4, 6>(a1, b1), u32x4_shuffle::<1, 3, 5, 7>(a1, b1));
+                let res = f32x4_mul(f32x4_add(s0, s1), quarter);
+                v128_store(dst.as_mut_ptr().add(y * dw + x) as *mut v128, res);
+                x += 4;
+            }
+        }
+        // Scalar tail: leftover outputs incl. odd-width clamp (avoid w-1 underflow when w==0).
+        while x < dw {
             let sx0 = x << 1;
-            // Same: avoid w - 1 underflow when w==0.
             let sx1 = if sx0 + 1 < w { sx0 + 1 } else { sx0 };
-            dst[y * dw + x] = (src[sy0 * w + sx0] + src[sy0 * w + sx1] + src[sy1 * w + sx0] + src[sy1 * w + sx1]) * 0.25;
+            dst[y * dw + x] = (src[r0 + sx0] + src[r0 + sx1] + src[r1 + sx0] + src[r1 + sx1]) * 0.25;
+            x += 1;
         }
     }
 }
@@ -274,8 +306,9 @@ mod tests {
     use crate::perceptual::butteraugli::dn2;
 
     /// Parity test: downsample_wasm must produce the same result as the scalar oracle (dn2).
-    /// This function contains no actual wasm32 intrinsics (it is a scalar nested loop),
-    /// so this test compiles and runs natively under `cargo test`.
+    /// downsample_wasm now uses v128 intrinsics, so this only executes under a wasm test
+    /// runner (the whole module is `#![cfg(target_arch = "wasm32")]`). The v128/scalar
+    /// agreement was also measured in node (maxdiff 5.96e-8 < the 1e-5 tolerance here).
     #[test]
     fn downsample_wasm_matches_dn2() {
         for (w, h) in [(64usize, 48usize), (65, 49), (2, 2), (33, 17)] {

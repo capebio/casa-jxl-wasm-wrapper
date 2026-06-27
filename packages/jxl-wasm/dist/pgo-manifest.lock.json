@@ -117,5 +117,55 @@
       "sha256": "8a09a91129c4b9b3b60cb11dffa00dc7d1a4ba232b87a3cce381a3d82248e206",
       "bytes": 148239
     }
-  ]
+  ],
+  "pgo": {
+    "enabled": true,
+    "applied": [
+      "enc:simd"
+    ],
+    "corpusHash": "768118393df7a41008c97ba69c82e58880aadb8ac96bee0ad9b8bfdcb8bb02a2",
+    "profdataSha256": "26be3c55032a54275d62de447362484c1763c38bf54339243b85d45755d34b13",
+    "scenarios": [
+      {
+        "name": "gallery-scroll",
+        "weight": 0.6,
+        "op": "encode-tiles",
+        "effort": 3,
+        "levels": null,
+        "files": [
+          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\tiles\\256\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        ]
+      },
+      {
+        "name": "pyramid-ladder",
+        "weight": 0.25,
+        "op": "encode-pyramid",
+        "effort": 3,
+        "levels": 5,
+        "files": [
+          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        ]
+      },
+      {
+        "name": "metadata-sidecars",
+        "weight": 0.1,
+        "op": "encode-container",
+        "effort": 3,
+        "levels": null,
+        "files": [
+          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\withmeta\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        ]
+      },
+      {
+        "name": "hiquality-archival",
+        "weight": 0.05,
+        "op": "encode",
+        "effort": 7,
+        "levels": null,
+        "files": [
+          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        ]
+      }
+    ]
+  }
 }

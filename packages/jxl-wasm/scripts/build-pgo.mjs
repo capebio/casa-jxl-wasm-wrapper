@@ -14,7 +14,12 @@ const corpusRoot = resolve(packageRoot, "..", "jxl-test-corpus");
 const corpusManifestPath = join(corpusRoot, "pgo-manifest.json");
 const lockPath = join(distDir, "pgo-manifest.lock.json");
 const workDir = process.env.JXL_WASM_WORKDIR ?? join(os.tmpdir(), "jxl-wasm-work");
-const sourceDir = join(workDir, "libjxl");
+// PGO builds against the in-repo libjxl-012 (the same 0.12-dev source as the
+// native jxl-ffi path + the /O2 tree), NOT a fresh v0.11.2 clone — unifies the
+// wasm PGO build with native and removes the version skew. Out-of-source: cmake
+// -B targets a temp buildDir, so the submodule tree is never written.
+const localLibjxl = resolve(packageRoot, "..", "..", "external", "libjxl-012");
+const sourceDir = process.env.JXL_PGO_LIBJXL_SRC ?? localLibjxl;
 const gitBinary = resolveGitBinary();
 const emcmakeBinary = resolveEmscriptenBinary("emcmake");
 const emppBinary = resolveEmscriptenBinary("em++");
@@ -54,6 +59,25 @@ const encTierFlags = [
   "-sINITIAL_MEMORY=268435456"
 ];
 
+// Phase 2: --mt builds the relaxed-simd-mt tier (the tier the app actually runs).
+// For PGO measurement the MT module must run in node (worker_threads + SAB), so
+// these flags pin a fixed pthread pool + node env (overrides web,worker above —
+// emcc takes the last -sENVIRONMENT). The profile counters are global in the
+// shared wasm memory, so a single __llvm_profile_write_file captures all threads.
+const MT = process.argv.includes("--mt");
+// --browser: production env (web,worker + navigator pool) for the shipped module
+// and clean MT measurement in a real browser. Default (node env + fixed pool) is
+// bench-only — node can't parallelize emscripten pthreads well. Train MUST stay
+// node (trainer runs in node); --browser is for apply/plain only.
+const MT_BROWSER = process.argv.includes("--browser");
+const mtCommon = ["-pthread", "-sUSE_PTHREADS=1", "-mrelaxed-simd", "-DHWY_WANT_WASM2"];
+const mtTierFlags = MT
+  ? (MT_BROWSER
+      ? [...mtCommon, "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency", "-sENVIRONMENT=web,worker"]
+      : [...mtCommon, "-sPTHREAD_POOL_SIZE=8", "-sENVIRONMENT=node", "-sFILESYSTEM=1", "-sNODERAWFS=1"])
+  : [];
+const tierTag = MT ? "relaxed-simd-mt" : "simd";
+
 const trainEnvFlags = [
   "-sENVIRONMENT=node",
   "-sFILESYSTEM=1",
@@ -89,8 +113,8 @@ export async function runTrainStage(options = {}) {
 
   const profilesDir = join(workDir, "profiles");
   const profdataPath = join(distDir, "jxl.profdata");
-  const trainOutJs = join(distDir, "jxl-core.enc.simd.pgo-train.js");
-  const trainOutWasm = join(distDir, "jxl-core.enc.simd.pgo-train.wasm");
+  const trainOutJs = join(distDir, `jxl-core.enc.${tierTag}.pgo-train.js`);
+  const trainOutWasm = join(distDir, `jxl-core.enc.${tierTag}.pgo-train.wasm`);
 
   await rm(profilesDir, { recursive: true, force: true });
   await mkdir(profilesDir, { recursive: true });
@@ -137,8 +161,8 @@ export async function runApplyStage(options = {}) {
   await logStep("apply", "ensure libjxl deps", () => ensureLibjxlDeps());
   await logStep("apply", "build enc simd with profile-use", () => buildEncSimd({
     mode: "use",
-    outJs: join(distDir, "jxl-core.enc.simd.js"),
-    outWasm: join(distDir, "jxl-core.enc.simd.wasm"),
+    outJs: join(distDir, `jxl-core.enc.${tierTag}.js`),
+    outWasm: join(distDir, `jxl-core.enc.${tierTag}.wasm`),
     profdataPath
   }));
 
@@ -426,7 +450,14 @@ async function mergeProfiles(profilesDir, profdataPath) {
     throw new Error(`PGO training produced no .profraw files under ${profilesDir}`);
   }
   console.log(`[pgo] merge ${profrawFiles.length} profraw files`);
-  await run("llvm-profdata", ["merge", "-output", profdataPath, ...profrawFiles], { cwd: packageRoot });
+  // MUST use the emsdk-bundled llvm-profdata: its profile format version must
+  // match the emsdk clang that consumes the .profdata via -fprofile-instr-use.
+  // A system llvm-profdata produces "unsupported instrumentation profile format
+  // version" at apply time.
+  const llvmProfdata = process.env.EMSDK
+    ? join(process.env.EMSDK, "upstream", "bin", process.platform === "win32" ? "llvm-profdata.exe" : "llvm-profdata")
+    : "llvm-profdata";
+  await run(llvmProfdata, ["merge", "-output", profdataPath, ...profrawFiles], { cwd: packageRoot });
 }
 
 async function buildEncSimd({ mode, outJs, outWasm, profilesDir, profdataPath }) {
@@ -434,11 +465,20 @@ async function buildEncSimd({ mode, outJs, outWasm, profilesDir, profdataPath })
   await rm(buildDir, { recursive: true, force: true });
   await mkdir(buildDir, { recursive: true });
 
-  const tierFlags = [...encTierFlags];
+  const tierFlags = [...encTierFlags, ...mtTierFlags];
   if (mode === "generate") {
-    tierFlags.push(`-fprofile-generate=${profilesDir}`, ...trainEnvFlags);
+    // Frontend (-fprofile-instr-generate) instead of IR-level (-fprofile-
+    // generate): IR-level marks the COMDAT profile-counter globals (__profd_ for
+    // inline/template fns like jxl::Plane<float>::Create) as wasm EXPORTED via
+    // llvm.used, and wasm-ld then exports their `.<hash>`-suffixed names →
+    // emscripten "invalid export name" (-fvisibility=hidden does NOT clear the
+    // wasm EXPORTED flag — verified). Frontend instrumentation uses different
+    // counter linkage; apply side must match with -fprofile-instr-use.
+    tierFlags.push(
+      "-fprofile-instr-generate",  // raw path via LLVM_PROFILE_FILE (set by runTrainer)
+      ...trainEnvFlags);
   } else if (mode === "use") {
-    tierFlags.push(`-fprofile-use=${profdataPath}`, ...applyProfileFlags);
+    tierFlags.push(`-fprofile-instr-use=${profdataPath}`, ...applyProfileFlags);
   }
 
   const cmakeArgs = [
@@ -487,6 +527,16 @@ async function buildEncSimd({ mode, outJs, outWasm, profilesDir, profdataPath })
     LDFLAGS: tierFlags.join(" ")
   };
 
+  // The generate (train) build must export __llvm_profile_write_file so the
+  // trainer can flush counters (atexit never fires with INVOKE_RUN=0). Combine
+  // the production exports with the profile-write fn into a train-only list.
+  let exportsFile;
+  if (mode === "generate") {
+    const base = await readFile(join(packageRoot, "exports-enc.txt"), "utf8");
+    exportsFile = join(distDir, `exports-train-${tierTag}.txt`);
+    await writeFile(exportsFile, `${base.trimEnd()}\n___llvm_profile_write_file\n`);
+  }
+
   console.log(`[pgo] configure ${mode} build: ${buildDir}`);
   await runEmscripten(emcmakeBinary, ["cmake", ...cmakeArgs], { cwd: packageRoot, env });
   console.log(`[pgo] build ${mode} build: ${buildDir}`);
@@ -494,7 +544,7 @@ async function buildEncSimd({ mode, outJs, outWasm, profilesDir, profdataPath })
 
   try {
     console.log(`[pgo] link ${mode} bridge: ${outJs}`);
-    await linkBridge({ buildDir, outJs, outWasm, tierFlags, env });
+    await linkBridge({ buildDir, outJs, outWasm, tierFlags, env, exportsFile });
   } catch (error) {
     if (mode !== "generate" || !tierFlags.includes("-flto")) throw error;
     const fallbackFlags = tierFlags.filter((flag, index) => !(flag === "-flto" && index === tierFlags.indexOf("-flto")));
@@ -511,11 +561,11 @@ async function buildEncSimd({ mode, outJs, outWasm, profilesDir, profdataPath })
     console.log(`[pgo] retry build ${mode} build without -flto: ${buildDir}`);
     await run("cmake", ["--build", buildDir, "-j", String(osCpusMinusOne())], { cwd: packageRoot, env: fallbackEnv });
     console.log(`[pgo] retry link ${mode} bridge without -flto: ${outJs}`);
-    await linkBridge({ buildDir, outJs, outWasm, tierFlags: fallbackFlags, env: fallbackEnv });
+    await linkBridge({ buildDir, outJs, outWasm, tierFlags: fallbackFlags, env: fallbackEnv, exportsFile });
   }
 }
 
-async function linkBridge({ buildDir, outJs, outWasm, tierFlags, env }) {
+async function linkBridge({ buildDir, outJs, outWasm, tierFlags, env, exportsFile }) {
   const archives = await findStaticArchives(buildDir);
   const includeDirs = [
     join(sourceDir, "lib", "include"),
@@ -523,6 +573,7 @@ async function linkBridge({ buildDir, outJs, outWasm, tierFlags, env }) {
     buildDir,
     join(buildDir, "lib", "include")
   ];
+  const exports = exportsFile ?? join(packageRoot, "exports-enc.txt");
   await runEmscripten(emppBinary, [
     join(packageRoot, "src", "bridge.cpp"),
     ...includeDirs.flatMap((dir) => ["-I", dir]),
@@ -530,9 +581,10 @@ async function linkBridge({ buildDir, outJs, outWasm, tierFlags, env }) {
     "-o",
     outJs,
     ...tierFlags,
-    `-sEXPORTED_FUNCTIONS=@${toCmakePath(join(packageRoot, "exports-enc.txt"))}`,
+    `-sEXPORTED_FUNCTIONS=@${toCmakePath(exports)}`,
     "--closure", "1",
-    "-sEVAL_CTORS=2"
+    // EVAL_CTORS is incompatible with pthreads (passive segments) — MT tier only.
+    ...(MT ? [] : ["-sEVAL_CTORS=2"])
   ], { cwd: packageRoot, env });
   const wasmBytes = await readFile(outWasm);
   if (!WebAssembly.validate(wasmBytes)) {
@@ -568,39 +620,30 @@ function sortArchivesForLink(archives) {
 }
 
 async function ensureLibjxlSource() {
+  // In-repo libjxl-012 (submodule owned by the superproject). Verify it is
+  // present; NEVER clone/checkout/rm it — PGO builds out-of-source into a temp
+  // buildDir, so the submodule tree stays untouched.
   try {
     const info = await stat(sourceDir);
-    if (!info.isDirectory()) throw new Error("libjxl source path is not a directory");
-    await access(join(sourceDir, ".git"), fsConstants.R_OK);
+    if (!info.isDirectory()) throw new Error("not a directory");
+    await access(join(sourceDir, "lib", "jxl", "enc_frame.cc"), fsConstants.R_OK);
     return;
-  } catch {
-    await rm(sourceDir, { recursive: true, force: true });
-  }
-
-  await runGit([
-    "clone",
-    "--recursive",
-    "--shallow-submodules",
-    "--branch",
-    config.libjxlTag,
-    "--depth",
-    "1",
-    config.libjxlRepo,
-    sourceDir
-  ], { cwd: packageRoot });
-  const head = await runGitCapture(["-C", sourceDir, "rev-parse", "HEAD"]);
-  if (head.trim() !== config.libjxlCommit) {
-    throw new Error(`libjxl HEAD ${head.trim()} does not match pinned commit ${config.libjxlCommit}`);
+  } catch (e) {
+    throw new Error(
+      `libjxl-012 source not found / incomplete at ${sourceDir}: ${e.message}. ` +
+      `Expected the in-repo external/libjxl-012 submodule (init it, or set ` +
+      `JXL_PGO_LIBJXL_SRC to an alternate libjxl source tree).`);
   }
 }
 
 async function ensureLibjxlDeps() {
   if (await hasReadyLibjxlDeps()) return;
-  if (process.platform === "win32") {
-    await populateLibjxlSubmodulesDirectly();
-    if (await hasReadyLibjxlDeps()) return;
-  }
-  await run(bashBinary, ["deps.sh"], { cwd: sourceDir });
+  // In-repo libjxl-012: third_party are submodules of the superproject. Do NOT
+  // clone/populate into the tree (that would mutate the repo). Fail loudly so
+  // the user inits the submodules instead.
+  throw new Error(
+    `libjxl-012 third_party deps incomplete under ${sourceDir}. Init the ` +
+    `submodules (git submodule update --init --recursive in external/libjxl-012).`);
 }
 
 async function mergeIntoBuildManifest(pgo) {
@@ -861,8 +904,22 @@ function parseArgs(argv) {
     stageOnly: argv.includes("--stage-only"),
     trainOnly: argv.includes("--train"),
     applyOnly: argv.includes("--apply"),
+    plainOnly: argv.includes("--plain"),
     configureOnly: argv.includes("--configure-only")
   };
+}
+
+// Build the enc.simd tier with NO profile instrumentation — the fair baseline to
+// measure the PGO (apply) build against. Same tier/flags as apply, minus profile.
+async function runPlainStage() {
+  await logStep("plain", "ensure libjxl source", () => ensureLibjxlSource());
+  await logStep("plain", "ensure libjxl deps", () => ensureLibjxlDeps());
+  await logStep("plain", "build enc simd (no PGO baseline)", () => buildEncSimd({
+    mode: "plain",
+    outJs: join(distDir, `jxl-core.enc.${tierTag}.plain.js`),
+    outWasm: join(distDir, `jxl-core.enc.${tierTag}.plain.wasm`)
+  }));
+  console.log(`[pgo] plain baseline built: jxl-core.enc.${tierTag}.plain.js`);
 }
 
 async function main() {
@@ -878,6 +935,10 @@ async function main() {
   }
   if (args.applyOnly) {
     await runApplyStage();
+    return;
+  }
+  if (args.plainOnly) {
+    await runPlainStage();
     return;
   }
   if (args.configureOnly) {

@@ -2310,11 +2310,22 @@ class LibjxlEncoder implements JxlEncoder {
             let exifSize = exifView.byteLength;
             let xmpSize = xmpView.byteLength;
 
-            if ((iccSize > 0 && iccPtr === 0) || (exifSize > 0 && exifPtr === 0) || (xmpSize > 0 && xmpPtr === 0)) {
-              if (iccPtr !== 0) module._free(iccPtr);
-              if (exifPtr !== 0) module._free(exifPtr);
-              if (xmpPtr !== 0) module._free(xmpPtr);
-              throw new Error("WASM OOM: failed to allocate metadata buffers; encode aborted");
+            // Optional metadata is best-effort: if a buffer can't be allocated,
+            // drop just that metadatum (zero its size; the ptr stays 0 so the
+            // HEAPU8.set below is skipped and the encoder receives size 0) and
+            // still encode the image. Core pixels are mandatory and are guarded
+            // separately at the buffered-pixels malloc above.
+            if (iccSize > 0 && iccPtr === 0) {
+              console.warn("jxl-wasm: dropping ICC profile from encode — WASM malloc failed");
+              iccSize = 0;
+            }
+            if (exifSize > 0 && exifPtr === 0) {
+              console.warn("jxl-wasm: dropping EXIF from encode — WASM malloc failed");
+              exifSize = 0;
+            }
+            if (xmpSize > 0 && xmpPtr === 0) {
+              console.warn("jxl-wasm: dropping XMP from encode — WASM malloc failed");
+              xmpSize = 0;
             }
 
             const adv = this.prepareAdvancedSettings(module);

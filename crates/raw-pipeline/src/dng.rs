@@ -129,6 +129,18 @@ fn decode_bytes_inner(data: &[u8], use_blit: bool) -> Result<DngImage> {
 
     let mut out = vec![0u16; width * height];
 
+    // Guard: decode_uncompressed assumes 1 sample/pixel (one u16 per mosaic cell).
+    // A multi-sample uncompressed DNG (e.g. linear/demosaiced RGB, cps>1) would be
+    // silently mis-decoded as Bayer data — wrong stride, garbage output. Bail early
+    // with a clear error rather than produce corrupt pixel data. Multi-sample
+    // uncompressed decode is not implemented (out of scope).
+    if raw.compression == 1 && cps != 1 {
+        bail!(
+            "DNG: uncompressed multi-sample DNG not supported (SamplesPerPixel={}); \
+             only single-sample (Bayer mosaic) is implemented",
+            cps
+        );
+    }
     match raw.compression {
         1 => decode_uncompressed(data, &raw, width, height, le, &mut out)?,
         7 if use_blit => decode_tiles_blit(data, &raw, width, height, cps, &mut out)?,

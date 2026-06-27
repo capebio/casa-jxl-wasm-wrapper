@@ -63,7 +63,9 @@ const exportedRuntimeMethods = "['HEAPU8','HEAPU32']";
 
 // Phase 1 module split: dec (viewer: decode/region/tile-container-decode, no encoder, no transcode)
 // vs enc (ingest: streaming + container encode + sidecars + metadata + gain). Lazy for enc.
-const moduleKinds = ["dec", "enc"];
+const moduleKinds = process.env.JXL_WASM_ONLY_KIND
+  ? [process.env.JXL_WASM_ONLY_KIND]
+  : ["dec", "enc"];
 
 const baseFlags = [
   "-O3",
@@ -95,7 +97,13 @@ const relaxedSimdHighwayFlags = [
   "-DHWY_WANT_WASM2"
 ];
 
-const sourceDir = join(workDir, "libjxl");
+const sourceDir = process.env.LIBJXL_SRC_DIR
+  ? resolve(process.env.LIBJXL_SRC_DIR)
+  : join(workDir, "libjxl");
+// When LIBJXL_SRC_DIR is set, build directly from that working tree (e.g. the
+// in-repo external/libjxl-012 fork) and skip the upstream clone + deps.sh fetch
+// (third_party are submodules already present in the fork).
+const useLocalSource = !!process.env.LIBJXL_SRC_DIR;
 
 async function main() {
   const insideDocker = process.argv.includes("--inside-docker");
@@ -166,8 +174,12 @@ async function main() {
   const budgetViolations = [];
 
   await validateBridgeExports();
-  await ensureLibjxlSource();
-  await ensureLibjxlDeps(hostToolchain);
+  if (useLocalSource) {
+    console.log(`[build] using local libjxl source: ${sourceDir} (skipping clone + deps.sh)`);
+  } else {
+    await ensureLibjxlSource();
+    await ensureLibjxlDeps(hostToolchain);
+  }
 
   // Phase 1/3: build matrix is (kind x tier). dec = viewer (decode + tile-decode + region, no enc, transcode=OFF).
   // enc = ingest (streaming/container encode, sidecars, metadata, gain). Lazy-loaded.
@@ -413,7 +425,7 @@ async function findStaticArchives(root) {
 
 function sortArchivesForLink(archives) {
   const priority = (path) => {
-    const name = path.replaceAll("\\", "/").split("/").pop() ?? "";
+    const name = path.replace(/\\/g, "/").split("/").pop() ?? "";
     if (name === "libjxl.a") return 0;
     if (name === "libjxl_threads.a") return 1;
     if (name === "libjxl_cms.a") return 2;
@@ -691,7 +703,7 @@ function resolveEmsdkImages() {
     return [process.env.EMSDK_IMAGE];
   }
   return [
-    "docker.io/emscripten/emsdk:4.0.14"
+    "docker.io/emscripten/emsdk:3.1.27"
   ];
 }
 
@@ -703,7 +715,7 @@ function resolveBashBinary() {
 }
 
 function toCmakePath(path) {
-  return path.replaceAll("\\", "/");
+  return path.replace(/\\/g, "/");
 }
 
 async function rmDir(path) {

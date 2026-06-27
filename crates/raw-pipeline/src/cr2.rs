@@ -678,18 +678,17 @@ fn decode_impl(
     if top  & 1 != 0 { top  -= 1; }
     // Record the Bayer CFA phase of the top-left crop pixel.
     //
-    // The LJPEG strip for most CR2 bodies starts at sensor pixel (0,0) which is
-    // the Red site, so decoded (0,0) = R and any even (row, col) origin in the
-    // decoded buffer is also an R site → phase (0,0).  However some Canon bodies
-    // have odd-sized sensor margins; after the snap-to-even the crop origin is at
-    // an even decoded index, but the LJPEG strip itself may have started at an
-    // odd sensor column (i.e. decoded col 0 = Green, not Red).  In that case
-    // the effective Bayer phase of the crop origin is (top % 2, left % 2)
-    // evaluated in sensor-coordinate parity.  Since we cannot determine the
-    // LJPEG strip's sensor origin without model tables, we expose the decoded-
-    // buffer parity; when both are zero (the common case) phase == (0,0) ==
-    // RGGB as before.  A future per-model margin table can override this.
-    let cfa_phase = ((top & 1) as u8, (left & 1) as u8);
+    // After snapping both `top` and `left` to even above, (top & 1) and
+    // (left & 1) are tautologically 0, so the decoded-buffer parity is always
+    // (0, 0).  We record it explicitly rather than computing it from the snapped
+    // coordinates to make this invariant clear.
+    //
+    // The correct per-model phase (for Canon bodies whose LJPEG strip starts at
+    // an odd sensor column, i.e. decoded col 0 = Green, not Red) requires a
+    // per-model sensor-margin table that does not yet exist.  The green-channel
+    // sanity check in the caller (src/lib.rs) detects phase errors at runtime
+    // and retries the remaining three phases as a fallback.
+    let cfa_phase: (u8, u8) = (0, 0);
 
     if left + crop_w > decoded_width || top + crop_h > sof_h {
         bail!("CR2: crop region [left={}, top={}, w={}, h={}] exceeds decoded {}×{}",

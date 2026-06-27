@@ -5,20 +5,20 @@
   "emscriptenCommit": "refresh-after-first-4.0.14-host-build",
   "emsdkImage": null,
   "buildMode": "host-toolchain",
-  "generatedAt": "2026-06-19T14:55:23.271Z",
+  "generatedAt": "2026-06-18T12:16:59.063Z",
   "note": "Phase 3 module split (dec/enc) + scalar dropped. Artifacts are now jxl-core.{dec,enc}.${tier}.js|wasm. Old scalar/simd entries removed; size budgets per cpu tier (dec target is the viewer win). Run scripts/build.mjs --host-toolchain [--include-mt] to populate real tiers + shas. P0 hygiene complete; P1 split + P3 collapse landed in generator.",
   "tiers": {
     "dec:simd": {
       "kind": "dec",
       "tier": "simd",
       "jsBytes": 5197,
-      "wasmBytes": 884851,
+      "wasmBytes": 885309,
       "jsBrotliBytes": 2132,
-      "wasmBrotliBytes": 237735,
+      "wasmBrotliBytes": 238283,
       "jsSha256": "cb2f466b8368068c6dbefa9e99ac0106869ad9caea470a5ee627a34c85d7702d",
-      "wasmSha256": "89503e715879d4ec16f540c5f22ca7ee5824eb5c7f6ce424fccd38a7d3161110",
+      "wasmSha256": "5d5cda8820394eadd81d586709eafcc52f9924abce568ac5221c9963618de806",
       "jsIntegrity": "sha384-7PMDqm/4E7/tmx2PKcwVD6Fa3jUR9hvNmV+ik7wIB2Ja5/fEWYkA7ZNXdAEAkYQz",
-      "wasmIntegrity": "sha384-o1pTxefAwPt3wE8VGi2oGManGZJudy+NcR2mbicHhXgBC5yAyurCsbRspwVbJAe+",
+      "wasmIntegrity": "sha384-bcNBFWFiAnOTNSVADziALfXEkh3TWh3NAXSYweJvUitAFZtFtKqfTLWu938odLvk",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -40,7 +40,7 @@
         "-sINITIAL_MEMORY=16777216",
         "-msimd128",
         "-sMALLOC=emmalloc",
-        "-sEXPORTED_FUNCTIONS=@C:/Foo/rcw-ssim-ec/packages/jxl-wasm/exports-dec.txt",
+        "-sEXPORTED_FUNCTIONS=@C:/Foo/raw-converter-wasm/packages/jxl-wasm/exports-dec.txt",
         "--closure",
         "1",
         "-sEVAL_CTORS=2"
@@ -50,13 +50,13 @@
       "kind": "enc",
       "tier": "simd",
       "jsBytes": 6968,
-      "wasmBytes": 2887570,
+      "wasmBytes": 2888477,
       "jsBrotliBytes": 2604,
-      "wasmBrotliBytes": 747548,
+      "wasmBrotliBytes": 748314,
       "jsSha256": "bd224e6bef20f0dfd90bd78f6c9f256cfe38fbbb09fa813f114d78fba06cf8a9",
-      "wasmSha256": "85b5d0c18d9d8fc92de40e41ef5285ecc9853b64d2fb177d3558df64bb0118ad",
+      "wasmSha256": "91a39f98758482611f8d4e8788ccb068a275c550649062a8d38b24cfb30ac822",
       "jsIntegrity": "sha384-yUP/0nO5x4lJdtb1HvKRo8RuSnsnQnLm1UTBXkTnDtkpHzFUwaupkrGxZpw6Qnxn",
-      "wasmIntegrity": "sha384-axqBK8SbOdshE5R9bHOUEHMtf7kbjvnGM1VuO0w8ec8tp4uNHz9JgLbBcEkifc96",
+      "wasmIntegrity": "sha384-ZQPE1n2+Elo4lDtYnOCjCZmfslYkx0IuzV1oYQFneazQTDmHVLK8fJMJJdDBFuUq",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -77,7 +77,7 @@
         "-sINCOMING_MODULE_JS_API=locateFile,wasmBinary",
         "-sINITIAL_MEMORY=268435456",
         "-msimd128",
-        "-sEXPORTED_FUNCTIONS=@C:/Foo/rcw-ssim-ec/packages/jxl-wasm/exports-enc.txt",
+        "-sEXPORTED_FUNCTIONS=@C:/Foo/raw-converter-wasm/packages/jxl-wasm/exports-enc.txt",
         "--closure",
         "1",
         "-sEVAL_CTORS=2"
@@ -87,13 +87,13 @@
       "kind": "dec",
       "tier": "relaxed-simd-mt",
       "jsBytes": 10017,
-      "wasmBytes": 962869,
+      "wasmBytes": 963319,
       "jsBrotliBytes": 4114,
-      "wasmBrotliBytes": 252159,
+      "wasmBrotliBytes": 252475,
       "jsSha256": "ae3c93fef9b25f095a23ef06c40edc66b56bf4001791398a2831d6b0d844221d",
-      "wasmSha256": "922f556593771dec380565606a2097c99ce7a8b4d31bcf7a2d4fcb9413fe9c43",
+      "wasmSha256": "f375a4aa5f25ff4ca4adc69a7eb8e76f6cbb24d9e8537bbb8723cf463e4804d3",
       "jsIntegrity": "sha384-lZhWYKmEnhuhhZ7STNMfE2lGMCfyhnzTvqcochJUsS8hEie9zSvhYckB2CMoChP2",
-      "wasmIntegrity": "sha384-ZfwxbyLCLed5lxvLCpuO56UKnjzLDgp5IWd9+AkqC3I/RbP/llyn/OeBfjvCkSwy",
+      "wasmIntegrity": "sha384-ZbfmYV1C4sfByoqVkar9wmJC6Ctz8YhFgXXJnoG42umz8ETTlPuLNnpwQVni7PE9",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -121,7 +121,7 @@
         "-mrelaxed-simd",
         "-DHWY_WANT_WASM2",
         "-sMALLOC=emmalloc",
-        "-sEXPORTED_FUNCTIONS=@C:/Foo/rcw-ssim-ec/packages/jxl-wasm/exports-dec.txt",
+        "-sEXPORTED_FUNCTIONS=@C:/Foo/raw-converter-wasm/packages/jxl-wasm/exports-dec.txt",
         "--closure",
         "1"
       ]
@@ -130,13 +130,13 @@
       "kind": "dec",
       "tier": "simd-mt",
       "jsBytes": 9985,
-      "wasmBytes": 900061,
+      "wasmBytes": 900511,
       "jsBrotliBytes": 4107,
-      "wasmBrotliBytes": 244022,
+      "wasmBrotliBytes": 243932,
       "jsSha256": "62896b7744f9e88d103f9a58ea02b76834782b23e780676d0559459728ebde7c",
-      "wasmSha256": "2ad0a082ac0458b695cc94b0fbb9b1fe9e37d6cabb6894c73b803e9c1178cb67",
+      "wasmSha256": "52f345e80929b0083446039a02e7f8490bca59e6b606c05ad193b99cf51eab18",
       "jsIntegrity": "sha384-Rso0mBcSECINPIKIMTDzvCyoXftPqSYxwcA58n9F1rWsxFzELdQXn+GGaPz0LcD9",
-      "wasmIntegrity": "sha384-vFLO8qqTTlOl81kenG+GHcPGSqsM4UrAFXXHEy2eugsBjrA0ZaF4Oibuk6dXqhf1",
+      "wasmIntegrity": "sha384-+n0P57uF1UySymVnNaE8I2FfD4BCuoqW8UfibZsLKNjm/iqRyggPLIwUXw6ii6+e",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -162,7 +162,7 @@
         "-sPTHREAD_POOL_SIZE_STRICT=0",
         "-msimd128",
         "-sMALLOC=emmalloc",
-        "-sEXPORTED_FUNCTIONS=@C:/Foo/rcw-ssim-ec/packages/jxl-wasm/exports-dec.txt",
+        "-sEXPORTED_FUNCTIONS=@C:/Foo/raw-converter-wasm/packages/jxl-wasm/exports-dec.txt",
         "--closure",
         "1"
       ]
@@ -171,13 +171,13 @@
       "kind": "enc",
       "tier": "relaxed-simd-mt",
       "jsBytes": 11806,
-      "wasmBytes": 2962642,
+      "wasmBytes": 2963544,
       "jsBrotliBytes": 4588,
-      "wasmBrotliBytes": 761884,
+      "wasmBrotliBytes": 762016,
       "jsSha256": "60d95f2d95aa09aef06132b126a903b5909bde4823b30a9c004291d9ede148b8",
-      "wasmSha256": "db6796f236a4c50cf46279fb3381aef94d378df28599b15772114e4e2edcc42b",
+      "wasmSha256": "aacd103106097267e98d5d4b5b424022c5a0f2b17f609cebb404b7c6f17ac315",
       "jsIntegrity": "sha384-XZyPTOV8jzRiyKO6b1hu9NJF1vHiKnv16tND8M7c93iw43U47TYz5lAgzznqGdMK",
-      "wasmIntegrity": "sha384-x6HPe/RQNcVfBzHCdz4C613sX51ULnDbJL8tug1VITQBeUMbQsmi0EloEdL6Us6i",
+      "wasmIntegrity": "sha384-pT11Xr5L0U18zlVb7Fk3MI4HxI6XxHUG3zgSsW+xefw4ybsn2HwzpzvxIdA0K3Ex",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -203,7 +203,7 @@
         "-msimd128",
         "-mrelaxed-simd",
         "-DHWY_WANT_WASM2",
-        "-sEXPORTED_FUNCTIONS=@C:/Foo/rcw-ssim-ec/packages/jxl-wasm/exports-enc.txt",
+        "-sEXPORTED_FUNCTIONS=@C:/Foo/raw-converter-wasm/packages/jxl-wasm/exports-enc.txt",
         "--closure",
         "1"
       ]
@@ -212,13 +212,13 @@
       "kind": "enc",
       "tier": "simd-mt",
       "jsBytes": 11774,
-      "wasmBytes": 2953440,
+      "wasmBytes": 2954341,
       "jsBrotliBytes": 4581,
-      "wasmBrotliBytes": 750171,
+      "wasmBrotliBytes": 751665,
       "jsSha256": "39af60cd46f8723a0fabb72c2637868beb1b9b0384d75827218059bee2e4d90d",
-      "wasmSha256": "34ba4006c1f4416a62291c65026951fd9cdd8ba31930942b305d1346e8e08f24",
+      "wasmSha256": "30e66d568b8b350997408d5359f66372ca9a30ea6d5da8d114ef5eca96293657",
       "jsIntegrity": "sha384-+8RrWhF9lmVl+yjzzA+ozybsFBYMYfqW3AByWbK5ehsWSgEnzcH1nHwaFD/CDAA6",
-      "wasmIntegrity": "sha384-LJrnHr4CwK+ZkrUMGrdaN6ZRqtLdd9Awfe/h0KfFaBmUePeeSgJjSzNT5ORsKuQ/",
+      "wasmIntegrity": "sha384-G4OtmqbbLJ37begzTiVbXfQbHNT2a4owjjuI5laXyHEgJso/wE+wMW7AFjVMvO2H",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -242,7 +242,7 @@
         "-sUSE_PTHREADS=1",
         "-sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency",
         "-msimd128",
-        "-sEXPORTED_FUNCTIONS=@C:/Foo/rcw-ssim-ec/packages/jxl-wasm/exports-enc.txt",
+        "-sEXPORTED_FUNCTIONS=@C:/Foo/raw-converter-wasm/packages/jxl-wasm/exports-enc.txt",
         "--closure",
         "1"
       ]
@@ -250,9 +250,53 @@
   },
   "skippedTiers": [],
   "pgo": {
-    "staged": true,
-    "applied": false,
-    "corpusHash": "98339041ab81130d4c22e76a39dba73ff850ab24aadc8462c0c9331a578682e5",
-    "source": "jxl-test-corpus/pgo-manifest.json"
+    "enabled": true,
+    "applied": [
+      "enc:simd"
+    ],
+    "corpusHash": "768118393df7a41008c97ba69c82e58880aadb8ac96bee0ad9b8bfdcb8bb02a2",
+    "profdataSha256": "26be3c55032a54275d62de447362484c1763c38bf54339243b85d45755d34b13",
+    "scenarios": [
+      {
+        "name": "gallery-scroll",
+        "weight": 0.6,
+        "op": "encode-tiles",
+        "effort": 3,
+        "levels": null,
+        "files": [
+          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\tiles\\256\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        ]
+      },
+      {
+        "name": "pyramid-ladder",
+        "weight": 0.25,
+        "op": "encode-pyramid",
+        "effort": 3,
+        "levels": 5,
+        "files": [
+          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        ]
+      },
+      {
+        "name": "metadata-sidecars",
+        "weight": 0.1,
+        "op": "encode-container",
+        "effort": 3,
+        "levels": null,
+        "files": [
+          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\withmeta\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        ]
+      },
+      {
+        "name": "hiquality-archival",
+        "weight": 0.05,
+        "op": "encode",
+        "effort": 7,
+        "levels": null,
+        "files": [
+          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
+        ]
+      }
+    ]
   }
 }

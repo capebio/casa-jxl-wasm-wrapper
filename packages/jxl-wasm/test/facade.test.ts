@@ -849,11 +849,12 @@ describe("@casabio/jxl-wasm facade", () => {
   });
 
   test("simulated core pixels _malloc===0 (main encode buffered path) causes fail-fast (no success with bad pointer)", async () => {
-    // Spy returns 0 for core pixels size. To make the OOM visible (facade main pixel path
-    // currently lacks if(ptr===0) before set+call; 0 offset is valid in mock heap so set succeeds),
-    // the fake encode also rejects 0-ptr as OOM (simulating what a guard or real bridge would do).
-    // This verifies critical OOM on core pixels _malloc=0 leads to hard error with the string,
-    // per task. (Aux paths gracefully fallback; core must not.)
+    // Spy returns 0 for core pixels size. The facade guards the buffered-pixels
+    // malloc directly (if (ptr === 0) throw "WASM malloc failed for buffered
+    // encode pixels"), so it fail-fasts before ever calling the encoder. The
+    // fake encode also rejects 0-ptr as a backstop in case the guard is removed.
+    // This verifies critical OOM on core pixels _malloc=0 leads to a hard error
+    // (aux metadata paths gracefully fall back; core pixels must not).
     const base = createFakeLibjxlModule() as any;
     const pixelCoreSize = 4; // 1x1 rgba8
     const origMalloc = base._malloc.bind(base);
@@ -886,7 +887,9 @@ describe("@casabio/jxl-wasm facade", () => {
 
     expect(thrown).toBeDefined();
     const msg = String((thrown as any)?.message ?? thrown);
-    expect(msg).toContain("WASM Memory Allocation OOM");
+    // Facade fail-fasts at the buffered-pixels malloc guard, before the encoder
+    // is invoked; assert that hard-error (not the encoder's backstop message).
+    expect(msg).toContain("WASM malloc failed for buffered encode pixels");
   });
 });
 

@@ -242,7 +242,7 @@ const SRGB_LUT_N: usize = 16384;
 /// post-LUT is byte-identical to the powf build and the u16 post-LUT differs by ≤1 LSB on rare
 /// entries (that 1 LSB is inherited from f32 `powf` node rounding in the table, not the lerp).
 #[inline(always)]
-fn srgb_encode_lerp(y: f32) -> f32 {
+pub(crate) fn srgb_encode_lerp(y: f32) -> f32 {
     let tbl = SRGB_ENCODE.get_or_init(|| {
         (0..=SRGB_LUT_N).map(|i| linear_to_srgb(i as f32 / SRGB_LUT_N as f32)).collect()
     });
@@ -436,14 +436,19 @@ fn hybrid_spring_and_dimishing_fc(lr: f32, lg: f32, lb: f32, luma_l: f32) -> (f3
     (r * fc_r, g * fc_g, b * fc_b)
 }
 
-/// Scaffold for precomputed multi-dimensional LUT (Lens17 #10, layer2) to execute the
-/// log-geodesic + Molchanov residuals/A_tensor + hybrid spring + Los Alamos f(c) at
-/// sub-millisecond speeds for AR/LLM/photogram/immersive use (illum-invariant).
-/// Grid would be ~17^3 or 33^3 (small memory, ~ few hundred KB for f32x3), built once
-/// or on sat/vib change, trilinear interp in hot path instead of ln/exp/sqrt per-px.
-/// Currently a stub that documents the structure; real population + sample can replace
-/// the runtime calc in the !c-perceptual pc branch of apply_tone_math.
-/// (Agent can expand without touching other files.)
+/// Live default perceptual-constancy LUT for `#[cfg(not(feature = "c-perceptual"))]` builds
+/// (WASM and native without the optional C++ AVX2 feature).
+///
+/// `new()` fully populates a 17³ grid by evaluating the complete advanced path
+/// (log-geodesic → Molchanov residuals/A_tensor → hybrid spring → f(c) hue diminishing
+/// returns) at every lattice point in [0, 1.5]³ with fixed saturation scale.
+/// `sample()` performs trilinear interpolation into that grid, replacing per-pixel
+/// `ln`/`exp`/`sqrt` calls with a handful of multiplies and adds.
+///
+/// Called per pixel in `apply_tone_math` via the `PERCEPTUAL_GRID` thread-local
+/// (lazy-initialised on first use, then borrowed read-only in the hot loop).
+/// Do not treat this as inert: removing or skipping it disables perceptual constancy
+/// for all non-c-perceptual targets.
 ///
 /// PIPE-008: data is stored as three separate planar arrays (data_r, data_g, data_b),
 /// each of length SZ^3, so the 8 corner values needed for trilinear interpolation on one
@@ -828,6 +833,24 @@ fn separable_blur_into(src: &[u16], width: usize, _height: usize,
     });
 }
 
+/// Portable fused multiply-add for the auto-vectorised blur/FIR kernels.
+///
+/// `f32::mul_add` is a single-rounding hardware FMA *only* when the target has the
+/// `fma` feature; on the default baseline `x86-64` target (no `+fma`) it lowers to a
+/// scalar `fmaf` **libcall** (~50-100 cyc) that also blocks auto-vectorisation — which
+/// made the separable blur ~3.5× slower than necessary on shipped builds (measured:
+/// `examples/blur_mul_add_flip.rs`, 12-24 MP, 13-tap, +71% saved, ≤1 LSB parity). So:
+///   - FMA build (`+fma` / `target-cpu=native`) → `mul_add` (one `vfmadd`: fastest + most accurate)
+///   - baseline build                            → `a * b + c` (LLVM emits vectorised `mulps`/`addps`)
+/// The two paths differ by ≤1 LSB on the 16-bit blur intermediate — negligible.
+#[inline(always)]
+fn bfma(a: f32, b: f32, c: f32) -> f32 {
+    #[cfg(target_feature = "fma")]
+    { a.mul_add(b, c) }
+    #[cfg(not(target_feature = "fma"))]
+    { a * b + c }
+}
+
 /// 1-D FIR on a single f32 plane with stride-1 I/O and fixed kernel length N.
 /// LLVM can unroll the ki loop and auto-vectorise the x loop.
 #[inline]
@@ -842,7 +865,7 @@ fn blur_fir_planar<const N: usize>(plane: &[f32], kernel: &[f32], half: usize, o
         let mut acc = 0f32;
         for ki in 0..N {
             let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
-            acc = plane[xi].mul_add(kernel[ki], acc);
+            acc = bfma(plane[xi], kernel[ki], acc);
         }
         out[x] = acc;
     }
@@ -851,7 +874,7 @@ fn blur_fir_planar<const N: usize>(plane: &[f32], kernel: &[f32], half: usize, o
         let b0 = x - half;
         let mut acc = 0f32;
         for ki in 0..N {
-            acc = plane[b0 + ki].mul_add(kernel[ki], acc);
+            acc = bfma(plane[b0 + ki], kernel[ki], acc);
         }
         out[x] = acc;
     }
@@ -860,7 +883,7 @@ fn blur_fir_planar<const N: usize>(plane: &[f32], kernel: &[f32], half: usize, o
         let mut acc = 0f32;
         for ki in 0..N {
             let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
-            acc = plane[xi].mul_add(kernel[ki], acc);
+            acc = bfma(plane[xi], kernel[ki], acc);
         }
         out[x] = acc;
     }
@@ -877,21 +900,21 @@ fn blur_fir_planar_dyn(plane: &[f32], kernel: &[f32], half: usize, out: &mut [f3
         let mut acc = 0f32;
         for ki in 0..kernel.len() {
             let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
-            acc = plane[xi].mul_add(kernel[ki], acc);
+            acc = bfma(plane[xi], kernel[ki], acc);
         }
         out[x] = acc;
     }
     for x in int_start..int_end {
         let b0 = x - half;
         let mut acc = 0f32;
-        for (ki, &kv) in kernel.iter().enumerate() { acc = plane[b0 + ki].mul_add(kv, acc); }
+        for (ki, &kv) in kernel.iter().enumerate() { acc = bfma(plane[b0 + ki], kv, acc); }
         out[x] = acc;
     }
     for x in int_end.max(int_start)..width {
         let mut acc = 0f32;
         for ki in 0..kernel.len() {
             let xi = (x as isize + ki as isize - half as isize).clamp(0, wm) as usize;
-            acc = plane[xi].mul_add(kernel[ki], acc);
+            acc = bfma(plane[xi], kernel[ki], acc);
         }
         out[x] = acc;
     }
@@ -934,9 +957,9 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
                     }
                     // Accumulate: stride-1 reads + writes → LLVM auto-vectorises.
                     for xi in 0..tile {
-                        acc_r[xi] = r_tap[xi].mul_add(kv, acc_r[xi]);
-                        acc_g[xi] = g_tap[xi].mul_add(kv, acc_g[xi]);
-                        acc_b[xi] = b_tap[xi].mul_add(kv, acc_b[xi]);
+                        acc_r[xi] = bfma(r_tap[xi], kv, acc_r[xi]);
+                        acc_g[xi] = bfma(g_tap[xi], kv, acc_g[xi]);
+                        acc_b[xi] = bfma(b_tap[xi], kv, acc_b[xi]);
                     }
                 }
                 for xi in 0..tile {
@@ -979,9 +1002,9 @@ fn separable_blur_with_bufs(src: &[u16], width: usize, height: usize, kernel: &[
                         b_tap[xi] = temp[b + 2] as f32;
                     }
                     for xi in 0..tile {
-                        acc_r[xi] = r_tap[xi].mul_add(kv, acc_r[xi]);
-                        acc_g[xi] = g_tap[xi].mul_add(kv, acc_g[xi]);
-                        acc_b[xi] = b_tap[xi].mul_add(kv, acc_b[xi]);
+                        acc_r[xi] = bfma(r_tap[xi], kv, acc_r[xi]);
+                        acc_g[xi] = bfma(g_tap[xi], kv, acc_g[xi]);
+                        acc_b[xi] = bfma(b_tap[xi], kv, acc_b[xi]);
                     }
                 }
                 for xi in 0..tile {
@@ -1085,13 +1108,16 @@ pub fn apply_unsharp_masks(rgb16: &mut [u16], width: usize, height: usize,
                 {
                     let n = rgb16.len();
                     let mut i = 0;
-                    let norm_4 = 4.0 / 65535.0;
                     let clarity_factor = params.clarity;
                     while i < n {
                         let orig = rgb16[i] as i32;
                         let blur = blurred[i] as i32;
-                        let v = (orig as f32) * norm_4;
-                        let w = v * (1.0 - v);
+                        // Midtone mask w = 4·v·(1−v), v = orig/65535 — peaks at v=0.5.
+                        // (The previous hoisted form folded the 4 into v as 4·orig/65535,
+                        // which computes 4v(1−4v): wrong sign and 2× magnitude at midtones.
+                        // Matches the parallel closure and the has_snap serial branch above.)
+                        let v = orig as f32 / 65535.0;
+                        let w = 4.0 * v * (1.0 - v);
                         let delta = clarity_factor * w * (orig - blur) as f32;
                         rgb16[i] = (orig as f32 + delta).round().clamp(0.0, 65535.0) as i32 as u16;
                         i += 1;

@@ -41,6 +41,12 @@ pub struct VariantSet {
 pub enum EncodeError {
     #[error("encoder failed: {0}")]
     Jxl(String),
+    #[error("encoder channel error: {0}")]
+    Channels(String),
+    #[error("encoder size mismatch: expected {expected} samples, got {got}")]
+    Size { expected: usize, got: usize },
+    #[error("encoder create failed")]
+    Create,
     #[error("resize failed")]
     Resize,
     #[error("invalid input: expected {expected} bytes, got {got}")]
@@ -51,7 +57,13 @@ pub enum EncodeError {
 
 impl From<crate::jxl_casaencoder::EncodeError> for EncodeError {
     fn from(e: crate::jxl_casaencoder::EncodeError) -> Self {
-        EncodeError::Jxl(e.to_string())
+        use crate::jxl_casaencoder::EncodeError as Src;
+        match e {
+            Src::Jxl(msg) => EncodeError::Jxl(msg),
+            Src::Channels(msg) => EncodeError::Channels(msg),
+            Src::Size { expected, got } => EncodeError::Size { expected, got },
+            Src::Create => EncodeError::Create,
+        }
     }
 }
 
@@ -392,7 +404,6 @@ pub struct PyramidLevel {
 }
 
 /// Strip RGBA8 to RGB8 without scanning for alpha (caller already knows has_alpha=false).
-/// Avoids the redundant per-pixel alpha check that `alpha_strip` performs.
 fn strip_rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     // Single bandwidth pass: reserve exact, then extend from a flat [r,g,b] byte
     // iterator. Beats both the old per-chunk `extend_from_slice` (drops the per-chunk
@@ -405,39 +416,7 @@ fn strip_rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     rgb
 }
 
-/// Single-pass alpha scan + conditional RGB strip.
-///
-/// Returns `(has_alpha, rgb_strip)`:
-/// - `has_alpha = true`: at least one pixel has alpha < 255; `rgb_strip` is `None`
-///   (caller must use the original RGBA buffer with the alpha channel).
-/// - `has_alpha = false`: all pixels are fully opaque; `rgb_strip` is `Some(rgb)`
-///   containing the packed RGB8 buffer (no alpha), built in the same pass.
-///
-/// This fuses the previous two-pass approach (scan α, then copy RGB) into a single
-/// memory-bandwidth pass — a bandwidth win identical to the traversal-fusion pattern
-/// in `examples/traversal_fusion_flipflop.rs`.
-///
-/// For RAW images (always alpha=255) this saves an entire second traversal.
-///
-/// CRAWL F1: superseded at both call sites by `has_meaningful_alpha` — the fused strip
-/// was always discarded (variants re-strip at their own sizes). Retained (allow dead) as
-/// the documented fused scan+strip helper in case a future caller needs the RGB buffer.
-#[allow(dead_code)]
-fn alpha_strip(rgba: &[u8]) -> (bool, Option<Vec<u8>>) {
-    let n = rgba.len() / 4;
-    let mut rgb = Vec::with_capacity(n * 3);
-    for px in rgba.chunks_exact(4) {
-        if px[3] < 255 {
-            // Meaningful alpha found — abandon the in-progress strip and return early.
-            return (true, None);
-        }
-        rgb.extend_from_slice(&px[0..3]);
-    }
-    (false, Some(rgb))
-}
-
 /// Returns true if any pixel has alpha < 255.
-/// Use `alpha_strip` instead when you also need the RGB buffer (avoids double pass).
 ///
 /// Alpha-only strided scan: reads just the α byte (index 3, 7, 11, …) of each pixel,
 /// skipping the RGB triples the chunks-window form materialised. flipflop: −9.1% on the

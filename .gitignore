@@ -17,6 +17,13 @@ flipflop-corpus/
 # JS / monorepo dependencies (workspaces populate these)
 node_modules/
 
+# Compiled benchmark binaries (root-level *.exe from cargo bench/example runs)
+*.exe
+
+# "Plain" measurement WASM enc builds (regenerated; not shipped)
+packages/jxl-wasm/dist/*.plain.js
+packages/jxl-wasm/dist/*.plain.wasm
+
 # Rust build artifacts (Cargo target dir)
 target/
 .cargo-home/
@@ -78,3 +85,8 @@ web/jxl-correlation-matrix.js
 
 # Research papers (large PDFs, ~57MB; kept on disk, not tracked to keep clones lean)
 Papers/
+
+# Generated PGO / test-corpus images — regenerate via
+# packages/jxl-test-corpus/scripts/generate-pgo-fixtures.mjs.
+# Full-res .ppm are ~30-70MB each (864MB this session); kept on disk, not tracked, to keep clones lean.
+packages/jxl-test-corpus/**/*.ppm
