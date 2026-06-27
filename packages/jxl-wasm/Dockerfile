@@ -1,4 +1,4 @@
-ARG EMSDK_IMAGE=docker.io/emscripten/emsdk:latest
+ARG EMSDK_IMAGE=docker.io/emscripten/emsdk:3.1.27
 FROM ${EMSDK_IMAGE}
 
 SHELL ["/bin/bash", "-lc"]
