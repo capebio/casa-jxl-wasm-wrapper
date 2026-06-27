@@ -77,8 +77,23 @@ export async function decodePyramidLevel(ctx, bytes, opts) {
  * @param {{ format?: 'rgba8'|'rgba16'; region: {x:number;y:number;w:number;h:number}; targetLongEdge?: number }} opts
  */
 export async function decodePyramidRegion(bytes, opts) {
-  const { createDecoder } = await import('@casabio/jxl-wasm');
   const format = opts.format ?? 'rgba8';
+
+  // Tiled levels are JXTC tile containers (magic 'JXTC' = 0x4A,0x58,0x54,0x43), not
+  // plain JXL bitstreams. The createDecoder path below cannot parse them ("JXL decode
+  // error: 1"); decode the requested region through the tile-container path instead
+  // (each overlapping tile is a standalone JXL). This is the same decode the tiled-pool
+  // worker runs, called directly for a single on-demand ROI (lightbox display + export).
+  if (bytes.length >= 4 && bytes[0] === 0x4A && bytes[1] === 0x58 && bytes[2] === 0x54 && bytes[3] === 0x43) {
+    if (!opts.region) throw new Error('tiled region decode requires a region');
+    const { decodeTileContainerRegionRgba8, decodeTileContainerRegionRgba16 } = await import('@casabio/jxl-wasm');
+    const fn = format === 'rgba16' ? decodeTileContainerRegionRgba16 : decodeTileContainerRegionRgba8;
+    const r = opts.region;
+    const { pixels, width, height } = await fn(bytes, { x: r.x, y: r.y, w: r.w, h: r.h });
+    return { pixels, width, height };
+  }
+
+  const { createDecoder } = await import('@casabio/jxl-wasm');
   const decoder = createDecoder({
     format,
     region: opts.region,

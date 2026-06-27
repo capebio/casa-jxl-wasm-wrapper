@@ -626,6 +626,10 @@ export function createPyramidLightbox(deps) {
     levelPixels = null; offscreen = null; levelInfo = null; levelRaw16 = null;
 
     modal.style.display = 'flex';
+    // The modal is appended INTO rootEl (the host, e.g. #pyramid-lightbox), which
+    // ships with the `hidden` attribute. Revealing only the inner modal leaves the
+    // hidden host at display:none, so un-hide the host too. close() re-hides it.
+    if (rootEl) rootEl.removeAttribute('hidden');
     updateTitle();
     const sixteen = modal ? modal.querySelector('#plb-16bit') : null;
     if (sixteen) sixteen.checked = is16bitMode;
@@ -686,6 +690,7 @@ export function createPyramidLightbox(deps) {
 
   function close() {
     if (modal) modal.style.display = 'none';
+    if (rootEl) rootEl.setAttribute('hidden', '');
     // keep LRU and last state for monotonicity on re-open
   }
 
