@@ -5,10 +5,12 @@
 // to a separate pool of jxl-worker.js instances (SIMD+MT, spawned from the
 // main thread so Emscripten Pthreads bootstrap correctly under COOP/COEP).
 //
-// Protocol — main thread posts:
+// Protocol — main thread posts (type strings centralized in
+// ./worker-message-types.js as WorkerMsg.*):
 //   { id, bytes: Uint8Array, options }
 //   { id, type: 'reprocess_live', look }
 //   { type: 'reprocess_thumb_live', taskIds: [], look }
+//   { id, type: 'release_state' } | { id, type: 'cancel' }
 //
 // Worker posts (in order, transferring buffers where safe):
 //   { id, type: 'thumb',         rgb, w, h, pipelineMs, phaseMs, wbR, wbB, ... }
@@ -18,21 +20,32 @@
 //   { id, type: 'done',          jxl, jxlMs, w, h }
 //   { id, type: 'error',         error }
 
-// COI-gated WASM build selection (single-thread fallback). The threaded build
-// (./pkg/) hard-codes shared memory and needs SharedArrayBuffer + crossOriginIsolated
-// (COOP/COEP). Where those are unavailable — a production host without the headers,
-// file://, or an older browser — that build fails to instantiate, so fall back to the
-// single-thread build (./pkg-st/, no shared memory, no rayon). Selected + bound lazily
-// in ensureWasm(), before any message handler touches these bindings.
+// WASM build selection. Only the threaded build (./pkg/) is shipped; it hard-codes
+// shared memory and needs SharedArrayBuffer + crossOriginIsolated (COOP/COEP) to
+// instantiate. A single-thread fallback (./pkg-st/) is NOT built, so we import ./pkg/
+// unconditionally rather than a nonexistent path (which 404'd on non-isolated hosts).
+// On a non-isolated host pkg/ will fail to instantiate with a clear WASM/SAB error; we
+// warn up front. If a ./pkg-st/ build is ever produced, restore the COI-gated branch.
+// Bound lazily in ensureWasm(), before any message handler touches these bindings.
+import { detectFormat } from './format-detect.js';
+import { WorkerMsg } from './worker-message-types.js';
+
 let init, rawWasm;
 // A3: rgb_to_rgba removed — send RGB8 directly to JXL worker (saves ~250ms + 25% transfer)
 let process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_with_flags, LookRenderer, rotate_rgb8;
+// Multi-format ingest: EXR/TIFF decode to a DecodedImage (mirrors jxl-benchmark.js bindings).
+let decode_exr, decode_tiff;
 async function loadWasm() {
-    const useMt = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated)
+    const isolated = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated)
         && typeof SharedArrayBuffer !== 'undefined';
-    rawWasm = await import(useMt ? './pkg/raw_converter_wasm.js' : './pkg-st/raw_converter_wasm.js');
+    if (!isolated) {
+        console.warn('[worker] not cross-origin-isolated (COOP/COEP); the threaded WASM build ' +
+            'may fail to instantiate and no single-thread (pkg-st) build is shipped.');
+    }
+    rawWasm = await import('./pkg/raw_converter_wasm.js');
     init = rawWasm.default;
-    ({ process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_with_flags, LookRenderer, rotate_rgb8 } = rawWasm);
+    ({ process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_with_flags, LookRenderer, rotate_rgb8,
+       decode_exr, decode_tiff } = rawWasm);
 }
 
 // Route a RAW buffer to the right decoder by magic bytes (robust vs. filename):
@@ -48,6 +61,30 @@ function pickRawDecoderWithFlags(bytes) {
         (b[0] === 0x4d && b[1] === 0x4d && b[3] === 0x2a)) return process_dng_with_flags; // TIFF → DNG
   }
   return process_orf_with_flags;
+}
+
+// Named-options wrapper over the positional *_with_flags WASM signature.
+// Mirrors processOrfNamed/ORF_NEUTRAL in jxl-benchmark.js, but for the
+// 16-arg flags-carrying decoders (process_orf_with_flags /
+// process_cr2_with_flags / process_dng_with_flags). Behaviour is identical —
+// it just maps a named object onto the bare positional literals so the live
+// decode call site is readable and the argument order is checked in one place.
+//
+// Positional order (MUST match src/lib.rs):
+//   (bytes, flags, exposureEv, contrast, highlights, shadows, whites, blacks,
+//    saturation, vibrance, temp, tint, wbR, wbB, texture, clarity)
+const RAW_NEUTRAL = {
+    exposureEv: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0,
+    saturation: 0, vibrance: 0, temp: 0, tint: 0,
+    wbR: NaN, wbB: NaN, texture: 0, clarity: 0,
+};
+function processRawWithFlagsNamed(decoderFn, bytes, flags, opts = RAW_NEUTRAL) {
+    const o = { ...RAW_NEUTRAL, ...opts };
+    return decoderFn(
+        bytes, flags,
+        o.exposureEv, o.contrast, o.highlights, o.shadows, o.whites, o.blacks,
+        o.saturation, o.vibrance, o.temp, o.tint, o.wbR, o.wbB, o.texture, o.clarity,
+    );
 }
 
 // EXIF orientation flag bits (mirror src/lib.rs).
@@ -74,6 +111,12 @@ let wasmReady;
 // Per-taskId state maps — survive across multiple files on this worker.
 const liveStateMap  = new Map(); // taskId → {renderer: LookRenderer, outW, outH, wbR, wbB}
 const thumbStateMap = new Map(); // taskId → same shape but thumb-sized LookRenderer
+// Tasks the main thread has cancelled (lightbox closed / card removed). The
+// synchronous WASM decode (process_*_with_flags) cannot be interrupted mid-call,
+// so cancel is best-effort *between* messages: we free cached renderer state and
+// skip emitting further output for the cancelled task. Bounded by the number of
+// live tasks; entries are cleared as soon as they are consumed.
+const cancelledTasks = new Set();
 
 async function ensureWasm() {
     if (!wasmReady) wasmReady = (async () => {
@@ -133,6 +176,195 @@ function makeLiveState(rgb16Bytes, w, h, orientation, wbR, wbB, colorMatrix, bla
     };
 }
 
+// ---------------------------------------------------------------------------
+// Multi-format (EXR / TIFF) ingest helpers.
+//
+// EXR/TIFF pixels arrive as RGBA (linear f32 for EXR, gamma-encoded sRGB u8/u16
+// for TIFF). The shared live-edit engine (LookRenderer) expects a *linear*,
+// interleaved, packed RGB16-LE buffer (6 bytes/px, no alpha) — the same format
+// the RAW pipeline feeds it — because render() applies the sRGB OETF + tonemap
+// internally. So we drop alpha and convert each source to linear RGB16 here.
+// An identity colour matrix (length != 9 → LookRenderer falls back to its
+// built-in CAM_TO_SRGB; we instead pass identity so the matrix is a no-op) and
+// black=0 keep look=0 close to the clean to_display_rgba8 preview.
+const IDENTITY_CM = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+
+// sRGB EOTF (gamma-encoded → linear), 256-entry LUT for u8 TIFF.
+const SRGB_TO_LINEAR_U8 = (() => {
+    const t = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+        const c = i / 255;
+        t[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    return t;
+})();
+function srgbToLinear(c) {
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+// Build full-res linear packed RGB16-LE (6 bytes/px) from a DecodedImage.
+// bit_depth: 8 → RGBA8 sRGB, 16 → RGBA16-LE sRGB, 32 → RGBA f32 linear.
+function decodedToLinearRgb16(dec) {
+    const w = dec.width, h = dec.height;
+    const px = w * h;
+    const out = new Uint8Array(px * 6);
+    const dv = new DataView(out.buffer);
+    const enc = (o, r, g, b) => {
+        dv.setUint16(o,     r, true);
+        dv.setUint16(o + 2, g, true);
+        dv.setUint16(o + 4, b, true);
+    };
+    const clamp16 = (v) => (v < 0 ? 0 : v > 65535 ? 65535 : v) | 0;
+    if (dec.bit_depth === 32) {
+        const f = dec.take_rgba_f32(); // RGBA, linear
+        for (let i = 0, o = 0; i < px; i++, o += 6) {
+            const s = i * 4;
+            enc(o, clamp16(f[s] * 65535 + 0.5), clamp16(f[s + 1] * 65535 + 0.5), clamp16(f[s + 2] * 65535 + 0.5));
+        }
+    } else if (dec.bit_depth === 16) {
+        const u = dec.take_rgba16_le(); // RGBA16-LE, gamma sRGB
+        const src = new DataView(u.buffer, u.byteOffset, u.byteLength);
+        for (let i = 0, o = 0; i < px; i++, o += 6) {
+            const s = i * 8;
+            const r = srgbToLinear(src.getUint16(s, true) / 65535);
+            const g = srgbToLinear(src.getUint16(s + 2, true) / 65535);
+            const b = srgbToLinear(src.getUint16(s + 4, true) / 65535);
+            enc(o, clamp16(r * 65535 + 0.5), clamp16(g * 65535 + 0.5), clamp16(b * 65535 + 0.5));
+        }
+    } else {
+        const u = dec.take_rgba8(); // RGBA8, gamma sRGB
+        for (let i = 0, o = 0; i < px; i++, o += 6) {
+            const s = i * 4;
+            enc(o, clamp16(SRGB_TO_LINEAR_U8[u[s]] * 65535 + 0.5),
+                   clamp16(SRGB_TO_LINEAR_U8[u[s + 1]] * 65535 + 0.5),
+                   clamp16(SRGB_TO_LINEAR_U8[u[s + 2]] * 65535 + 0.5));
+        }
+    }
+    return out;
+}
+
+// target_dims mirror of src/lib.rs: long-edge clamp, aspect-preserving, no upscale.
+function targetDims(w, h, longEdge) {
+    if (w >= h) { const lw = Math.min(w, longEdge); return [lw, Math.max(1, Math.floor((h * lw) / w))]; }
+    const lh = Math.min(h, longEdge); return [Math.max(1, Math.floor((w * lh) / h)), lh];
+}
+
+// Box-filter downscale of packed RGB16-LE (mirrors downscale_rgb16_impl in lib.rs).
+function downscaleRgb16LE(src, sw, sh, dw, dh) {
+    if (dw === sw && dh === sh) return src;
+    const out = new Uint8Array(dw * dh * 6);
+    const sv = new DataView(src.buffer, src.byteOffset, src.byteLength);
+    const ov = new DataView(out.buffer);
+    for (let dy = 0; dy < dh; dy++) {
+        const sy0 = Math.floor((dy * sh) / dh);
+        const sy1 = Math.max(sy0 + 1, Math.floor(((dy + 1) * sh) / dh));
+        for (let dx = 0; dx < dw; dx++) {
+            const sx0 = Math.floor((dx * sw) / dw);
+            const sx1 = Math.max(sx0 + 1, Math.floor(((dx + 1) * sw) / dw));
+            let rr = 0, gg = 0, bb = 0, n = 0;
+            for (let sy = sy0; sy < sy1; sy++) {
+                let so = (sy * sw + sx0) * 6;
+                for (let sx = sx0; sx < sx1; sx++, so += 6) {
+                    rr += sv.getUint16(so, true);
+                    gg += sv.getUint16(so + 2, true);
+                    bb += sv.getUint16(so + 4, true);
+                    n++;
+                }
+            }
+            const o = (dy * dw + dx) * 6;
+            ov.setUint16(o,     (rr / n) | 0, true);
+            ov.setUint16(o + 2, (gg / n) | 0, true);
+            ov.setUint16(o + 4, (bb / n) | 0, true);
+        }
+    }
+    return out;
+}
+
+// makeLiveState for an EXR/TIFF buffer: identity matrix, no EXIF orientation,
+// black=0. Otherwise identical shape to the RAW makeLiveState above.
+function makeImageLiveState(rgb16Bytes, w, h) {
+    const renderer = LookRenderer.new_with_options(rgb16Bytes, w, h, 1, IDENTITY_CM, false, 0);
+    return { renderer, nativeW: w, nativeH: h, outW: w, outH: h, orientation: 1, wbR: NaN, wbB: NaN };
+}
+
+// Decode + emit thumb/lightbox/live-edit/encode for an EXR or TIFF file.
+// Posts the SAME message shapes as the RAW path so main.js needs no new handler.
+function processImageFormat(id, bytes, opts, look, route) {
+    const pT0 = performance.now();
+    const dec = route === 'exr' ? decode_exr(bytes) : decode_tiff(bytes);
+    try {
+        const w = dec.width, h = dec.height;
+        const bitDepth = dec.bit_depth;
+        // Full-res linear RGB16 → drives encode (full LookRenderer) + preview downscales.
+        const fullRgb16 = decodedToLinearRgb16(dec);
+        const pipelineMs = performance.now() - pT0;
+
+        const [lbW, lbH] = targetDims(w, h, 1800);
+        const [thW, thH] = targetDims(w, h, 360);
+        const lbRgb16   = downscaleRgb16LE(fullRgb16, w, h, lbW, lbH);
+        const thRgb16   = downscaleRgb16LE(fullRgb16, w, h, thW, thH);
+
+        // Cache live-edit renderers (same maps the RAW path + reprocess uses).
+        liveStateMap.set(id, makeImageLiveState(lbRgb16, lbW, lbH));
+        thumbStateMap.set(id, makeImageLiveState(thRgb16, thW, thH));
+
+        // Minimal EXIF blob — non-RAW files carry no camera metadata here.
+        const exif = { make: null, model: null, lens: null, datetime: null,
+            exposure: null, fnumber: null, focalLength: null, focalLength35: null,
+            iso: null, orientation: 1, gps: null, quality: null, wbMode: null,
+            wbR: NaN, wbB: NaN, wbFromCamera: false, width: w, height: h,
+            format: route.toUpperCase(), bitDepth };
+
+        // thumb
+        const thumbState = thumbStateMap.get(id);
+        const thumbRgb = applyLookToState(thumbState, look);
+        self.postMessage(
+            { id, type: WorkerMsg.THUMB, rgb: thumbRgb,
+              w: thumbState.outW, h: thumbState.outH,
+              nativeW: thumbState.nativeW, nativeH: thumbState.nativeH,
+              orientation: 1,
+              pipelineMs, phaseMs: { decompress: pipelineMs, demosaic: 0, tonemap: 0, orient: 0 },
+              wbR: NaN, wbB: NaN, make: null, model: null, colorMatrixFromMn: false, exif },
+            [thumbRgb.buffer],
+        );
+
+        // lightbox
+        const lbState = liveStateMap.get(id);
+        const bigRgb = applyLookToState(lbState, look);
+        self.postMessage(
+            { id, type: WorkerMsg.LIGHTBOX, rgb: bigRgb,
+              w: lbState.outW, h: lbState.outH,
+              nativeW: lbState.nativeW, nativeH: lbState.nativeH,
+              orientation: 1 },
+            [bigRgb.buffer],
+        );
+
+        // encode: full-res look-applied RGB8 (identical rgb8 contract as RAW).
+        // EXR/TIFF have no EXIF rotation, but user 90° turns still compose.
+        const userTurns = Math.round(((opts.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
+        const encodeOrientation = composeOrientation(1, userTurns);
+        const fullRenderer = LookRenderer.new_with_options(fullRgb16, w, h, 1, IDENTITY_CM, false, 0);
+        let fullRgb;
+        try {
+            fullRgb = applyLookToState({ renderer: fullRenderer, wbR: NaN, wbB: NaN }, look);
+        } finally {
+            fullRenderer.free();
+        }
+        const rgbBuf = fullRgb.buffer.slice(fullRgb.byteOffset, fullRgb.byteOffset + fullRgb.byteLength);
+        fullRgb = null;
+        self.postMessage(
+            { id, type: WorkerMsg.ENCODE_REQUEST, pixels: rgbBuf, format: 'rgb8', width: w, height: h,
+              quality: opts.lossless ? 100 : opts.quality,
+              effort: opts.effort ?? 3,
+              lossless: !!opts.lossless,
+              orientation: encodeOrientation },
+            [rgbBuf],
+        );
+    } finally {
+        dec.free();
+    }
+}
+
 function applyLookToState(state, look) {
     return state.renderer.render(
         state.wbR, state.wbB,
@@ -147,20 +379,37 @@ function applyLookToState(state, look) {
 
 self.addEventListener('message', async (ev) => {
     // --- release cached LookRenderer state for a re-submitted task ---
-    if (ev.data.type === 'release_state') {
+    if (ev.data.type === WorkerMsg.RELEASE_STATE) {
         const lbState = liveStateMap.get(ev.data.id);
         if (lbState) { lbState.renderer.free(); liveStateMap.delete(ev.data.id); }
         const tState = thumbStateMap.get(ev.data.id);
         if (tState) { tState.renderer.free(); thumbStateMap.delete(ev.data.id); }
+        cancelledTasks.delete(ev.data.id);
+        return;
+    }
+
+    // --- cancel an in-flight / no-longer-needed task (lightbox closed, card
+    //     removed). Best-effort: frees cached renderer state and marks the task
+    //     so the pipeline below stops emitting for it. The synchronous WASM
+    //     decode itself cannot be interrupted mid-call. ---
+    if (ev.data.type === WorkerMsg.CANCEL) {
+        const cid = ev.data.id;
+        if (cid !== undefined && cid !== null) {
+            cancelledTasks.add(cid);
+            const lbState = liveStateMap.get(cid);
+            if (lbState) { lbState.renderer.free(); liveStateMap.delete(cid); }
+            const tState = thumbStateMap.get(cid);
+            if (tState) { tState.renderer.free(); thumbStateMap.delete(cid); }
+        }
         return;
     }
 
     // --- lightbox live reprocess (single image) ---
-    if (ev.data.type === 'reprocess_live') {
+    if (ev.data.type === WorkerMsg.REPROCESS_LIVE) {
         const { id, look } = ev.data;
         const state = liveStateMap.get(id);
         if (!state) {
-            self.postMessage({ id, type: 'error_live', error: 'no live state for this task' });
+            self.postMessage({ id, type: WorkerMsg.ERROR_LIVE, error: 'no live state for this task' });
             return;
         }
         try {
@@ -168,7 +417,7 @@ self.addEventListener('message', async (ev) => {
             const rgb = applyLookToState(state, look);
             const liveMs = performance.now() - t0;
             self.postMessage(
-                { id, type: 'lightbox_live', rgb,
+                { id, type: WorkerMsg.LIGHTBOX_LIVE, rgb,
                   // Phase 2: rgb is in sensor orientation (nativeW × nativeH).
                   // Display canvas is sized outW × outH. Main thread rotates via canvas transform.
                   w: state.outW, h: state.outH,
@@ -178,13 +427,13 @@ self.addEventListener('message', async (ev) => {
                 [rgb.buffer],
             );
         } catch (err) {
-            self.postMessage({ id, type: 'error_live', error: String(err?.message || err) });
+            self.postMessage({ id, type: WorkerMsg.ERROR_LIVE, error: String(err?.message || err) });
         }
         return;
     }
 
     // --- gallery thumb batch reprocess (multiple taskIds owned by this worker) ---
-    if (ev.data.type === 'reprocess_thumb_live') {
+    if (ev.data.type === WorkerMsg.REPROCESS_THUMB_LIVE) {
         const { taskIds, look } = ev.data;
         for (const tid of taskIds) {
             const state = thumbStateMap.get(tid);
@@ -192,14 +441,14 @@ self.addEventListener('message', async (ev) => {
             try {
                 const rgb = applyLookToState(state, look);
                 self.postMessage(
-                    { id: tid, type: 'thumb_live', rgb,
+                    { id: tid, type: WorkerMsg.THUMB_LIVE, rgb,
                       w: state.outW, h: state.outH,
                       nativeW: state.nativeW, nativeH: state.nativeH,
                       orientation: state.orientation },
                     [rgb.buffer],
                 );
             } catch (err) {
-                self.postMessage({ id: tid, type: 'error_live', error: String(err?.message || err) });
+                self.postMessage({ id: tid, type: WorkerMsg.ERROR_LIVE, error: String(err?.message || err) });
             }
         }
         return;
@@ -211,33 +460,73 @@ self.addEventListener('message', async (ev) => {
         // Not a pipeline message — ignore unknown types silently
         return;
     }
+    // Best-effort cancel: if the task was cancelled before we started (queued
+    // submit then lightbox closed), skip the expensive decode entirely.
+    if (cancelledTasks.has(id)) {
+        cancelledTasks.delete(id);
+        return;
+    }
     try {
         await ensureWasm();
 
+        const opts = options || {};
+        const look = opts.look || {};
+
+        // Multi-format routing by magic bytes (+ optional name). RAW keeps its
+        // exact existing path; EXR/TIFF take the image-format path; sdr/jxl/
+        // unknown are rejected here rather than misrouted to the ORF decoder.
+        const route = detectFormat(bytes, opts.name || '');
+        if (route === 'exr' || route === 'tiff') {
+            processImageFormat(id, bytes, opts, look, route);
+            return;
+        }
+        if (route === 'sdr' || route === 'jxl' || route === 'unknown') {
+            self.postMessage({
+                id, type: WorkerMsg.ERROR,
+                error: route === 'sdr'
+                    ? 'Standard images (PNG/JPEG/etc.) use the browser decode path, not the RAW pipeline.'
+                    : route === 'jxl'
+                        ? 'JXL files use the JXL decode path, not the RAW pipeline.'
+                        : `Unsupported or unrecognized file format (${opts.name || 'unknown'}).`,
+            });
+            return;
+        }
+        // route === 'raw' — fall through to the unchanged RAW pipeline below.
+
         const pT0 = performance.now();
-        const look = options.look || {};
         // OUT_NO_ORIENT: skip apply_orientation on the full RGB8 — JXL records
         // rotation as metadata, so pixels stay sensor-native and we avoid the
         // 60–200 MB intermediate buffer + cache-hostile transpose at encode prep.
         const fullPipeFlags = OUT_FULL_RGB8 | OUT_LIGHTBOX | OUT_THUMB | OUT_NO_ORIENT;
-        const result = pickRawDecoderWithFlags(bytes)(
+        const result = processRawWithFlagsNamed(
+            pickRawDecoderWithFlags(bytes),
             bytes,
             fullPipeFlags,
-            look.exposureEv ?? 0,
-            look.contrast   ?? 0,
-            look.highlights ?? 0,
-            look.shadows    ?? 0,
-            look.whites     ?? 0,
-            look.blacks     ?? 0,
-            look.saturation ?? 0,
-            look.vibrance   ?? 0,
-            look.temp       ?? 0,
-            look.tint       ?? 0,
-            Number.isFinite(options.wbR) ? options.wbR : NaN,
-            Number.isFinite(options.wbB) ? options.wbB : NaN,
-            look.texture ?? 0,
-            look.clarity ?? 0,
+            {
+                exposureEv: look.exposureEv ?? 0,
+                contrast:   look.contrast   ?? 0,
+                highlights: look.highlights ?? 0,
+                shadows:    look.shadows    ?? 0,
+                whites:     look.whites     ?? 0,
+                blacks:     look.blacks     ?? 0,
+                saturation: look.saturation ?? 0,
+                vibrance:   look.vibrance   ?? 0,
+                temp:       look.temp       ?? 0,
+                tint:       look.tint       ?? 0,
+                wbR: Number.isFinite(opts.wbR) ? opts.wbR : NaN,
+                wbB: Number.isFinite(opts.wbB) ? opts.wbB : NaN,
+                texture: look.texture ?? 0,
+                clarity: look.clarity ?? 0,
+            },
         );
+        // Best-effort cancel checkpoint: the synchronous decode could not be
+        // interrupted, but if the task was cancelled while it ran, free the
+        // decode result and emit nothing further (no renderer state cached yet).
+        if (cancelledTasks.has(id)) {
+            cancelledTasks.delete(id);
+            result.free();
+            return;
+        }
         // OUT_NO_ORIENT: result.width/height are sensor dims (pre-rotation).
         let w = result.width;
         let h = result.height;
@@ -291,7 +580,7 @@ self.addEventListener('message', async (ev) => {
         const thumbState = thumbStateMap.get(id);
         const thumbRgb = applyLookToState(thumbState, look);
         self.postMessage(
-            { id, type: 'thumb', rgb: thumbRgb,
+            { id, type: WorkerMsg.THUMB, rgb: thumbRgb,
               w: thumbState.outW, h: thumbState.outH,
               nativeW: thumbState.nativeW, nativeH: thumbState.nativeH,
               orientation: thumbState.orientation,
@@ -303,7 +592,7 @@ self.addEventListener('message', async (ev) => {
         const lbState = liveStateMap.get(id);
         const bigRgb = applyLookToState(lbState, look);
         self.postMessage(
-            { id, type: 'lightbox', rgb: bigRgb,
+            { id, type: WorkerMsg.LIGHTBOX, rgb: bigRgb,
               w: lbState.outW, h: lbState.outH,
               nativeW: lbState.nativeW, nativeH: lbState.nativeH,
               orientation: lbState.orientation },
@@ -313,7 +602,7 @@ self.addEventListener('message', async (ev) => {
         // JXL records orientation as metadata — no pixel rotation needed for the
         // EXIF tag. User rotation (90° turns from the UI) composes into the
         // same tag, so userTurns also never triggers a CPU rotate.
-        const userTurns = Math.round(((options.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
+        const userTurns = Math.round(((opts.userRotation || 0) % 360 + 360) % 360 / 90) % 4;
         const encodeOrientation = composeOrientation(ori, userTurns);
         let fullRgb = result.take_rgb();
 
@@ -325,10 +614,10 @@ self.addEventListener('message', async (ev) => {
         const rgbBuf = fullRgb.buffer;
         fullRgb = null; // allow GC (the transfer detaches the buffer anyway)
         self.postMessage(
-            { id, type: 'encode_request', pixels: rgbBuf, format: 'rgb8', width: w, height: h,
-              quality: options.lossless ? 100 : options.quality,
-              effort: options.effort ?? 3,
-              lossless: !!options.lossless,
+            { id, type: WorkerMsg.ENCODE_REQUEST, pixels: rgbBuf, format: 'rgb8', width: w, height: h,
+              quality: opts.lossless ? 100 : opts.quality,
+              effort: opts.effort ?? 3,
+              lossless: !!opts.lossless,
               orientation: encodeOrientation },
             [rgbBuf],
         );
@@ -345,7 +634,7 @@ self.addEventListener('message', async (ev) => {
         }
         self.postMessage({
             id,
-            type: 'error',
+            type: WorkerMsg.ERROR,
             error: (err && (err.message || String(err))) || 'unknown error',
         });
     }

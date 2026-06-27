@@ -7,6 +7,14 @@
 // `navigator.hardwareConcurrency` so a batch saturates all cores.
 
 import { getContext } from './jxl-browser-context.js';
+import { WorkerMsg } from './worker-message-types.js';
+import { createTauriParityLightbox } from './tauri-parity-lightbox.js';
+// Capability-detection namespace import over the RAW WASM pkg. Binding the
+// module does NOT instantiate WASM (init is lazy via default()/initSync), so
+// this is safe at page load. We only read which functions the build exported —
+// the H29 develop-channel fns (apply_look_stream / jxl_progressive_pass) are
+// absent until the Rust H29 work is built, so the channel path stays gated.
+import * as rawWasm from './pkg/raw_converter_wasm.js';
 import {
     applyLens, estimateSceneWhiteLms,
     normalizedLabBuffer, selectByColour, unionMask, maskBorder, maskCoverage,
@@ -642,7 +650,7 @@ class WorkerPool {
             for (const [id, t] of this.tasks) {
                 if (t.worker === w && !t.released) {
                     if (t.handlers.onError) {
-                        t.handlers.onError({ type: 'error', error: ev.message || 'worker crashed' });
+                        t.handlers.onError({ type: WorkerMsg.ERROR, error: ev.message || 'worker crashed' });
                     }
                     this.tasks.delete(id);
                     break;
@@ -700,15 +708,15 @@ class WorkerPool {
 
     _onMessage(worker, ev) {
         const { id, type } = ev.data;
-        if (type === 'lightbox_live' || type === 'error_live') {
+        if (type === WorkerMsg.LIGHTBOX_LIVE || type === WorkerMsg.ERROR_LIVE) {
             if (this._liveHandler) this._liveHandler(ev.data);
             return;
         }
-        if (type === 'thumb_live') {
+        if (type === WorkerMsg.THUMB_LIVE) {
             if (this._thumbLiveHandler) this._thumbLiveHandler(ev.data);
             return;
         }
-        if (type === 'encode_request') {
+        if (type === WorkerMsg.ENCODE_REQUEST) {
             const { id, pixels, rgba, format, width, height, quality, effort, lossless, progressive, orientation } = ev.data;
             const t0 = performance.now();
             // A3: accept new pixels/format fields; fall back to legacy rgba field for jxl-progressive.js
@@ -717,14 +725,14 @@ class WorkerPool {
                     const jxlMs = performance.now() - t0;
                     const t = this.tasks.get(id);
                     if (t?.handlers.onDone) {
-                        t.handlers.onDone({ id, type: 'done', jxl, jxlMs, w: width, h: height, effortUsed: effort, effortRequested: effort });
+                        t.handlers.onDone({ id, type: WorkerMsg.DONE, jxl, jxlMs, w: width, h: height, effortUsed: effort, effortRequested: effort });
                     }
                     this.tasks.delete(id);
                 })
                 .catch((err) => {
                     const t = this.tasks.get(id);
                     if (t?.handlers.onError) {
-                        t.handlers.onError({ type: 'error', error: String(err?.message ?? err) });
+                        t.handlers.onError({ type: WorkerMsg.ERROR, error: String(err?.message ?? err) });
                     }
                     this.tasks.delete(id);
                 });
@@ -733,14 +741,14 @@ class WorkerPool {
         const t = this.tasks.get(id);
         if (!t) return;
         const handlers = t.handlers;
-        if (type === 'thumb' && handlers.onThumb) handlers.onThumb(ev.data);
-        else if (type === 'lightbox' && handlers.onLightbox) {
+        if (type === WorkerMsg.THUMB && handlers.onThumb) handlers.onThumb(ev.data);
+        else if (type === WorkerMsg.LIGHTBOX && handlers.onLightbox) {
             handlers.onLightbox(ev.data);
             // Release worker after lightbox — JXL encode is now handled by
             // jxl-worker.js, so the RAW worker is free for the next file.
             this._releaseWorker(worker, id);
         }
-        else if (type === 'done') {
+        else if (type === WorkerMsg.DONE) {
             if (handlers.onDone) handlers.onDone(ev.data);
             this.tasks.delete(id);  // Worker already freed on lightbox
             // KEEP workerForTask[id] alive — the owning worker still holds
@@ -748,7 +756,7 @@ class WorkerPool {
             // know which worker to message even long after JXL is done.
             // Mapping is overwritten if the same card is re-submitted (new
             // taskId issued), so it doesn't leak.
-        } else if (type === 'error') {
+        } else if (type === WorkerMsg.ERROR) {
             if (handlers.onError) handlers.onError(ev.data);
             // Error may arrive before or after lightbox — only release worker if not yet done.
             if (!t.released) this._releaseWorker(worker, id);
@@ -839,7 +847,7 @@ class WorkerPool {
     reprocessLive(taskId, look) {
         const worker = this.workerForTask.get(taskId);
         if (!worker) return false;
-        worker.postMessage({ id: taskId, type: 'reprocess_live', look });
+        worker.postMessage({ id: taskId, type: WorkerMsg.REPROCESS_LIVE, look });
         return true;
     }
 
@@ -849,7 +857,7 @@ class WorkerPool {
         for (const w of this.workers) {
             if (!w._taskIds) continue;
             const mine = [...w._taskIds].filter(id => wanted.has(id));
-            if (mine.length) w.postMessage({ type: 'reprocess_thumb_live', taskIds: mine, look });
+            if (mine.length) w.postMessage({ type: WorkerMsg.REPROCESS_THUMB_LIVE, taskIds: mine, look });
         }
     }
 
@@ -859,9 +867,21 @@ class WorkerPool {
     releaseState(taskId) {
         const worker = this.workerForTask.get(taskId);
         if (!worker) return;
-        worker.postMessage({ type: 'release_state', id: taskId });
+        worker.postMessage({ type: WorkerMsg.RELEASE_STATE, id: taskId });
         this.workerForTask.delete(taskId);
         if (worker._taskIds) worker._taskIds.delete(taskId);
+    }
+
+    // Cancel an in-flight / no-longer-needed RAW task (lightbox closed, card
+    // removed). Best-effort: the worker frees cached renderer state and stops
+    // emitting further output for this task between messages (the synchronous
+    // WASM decode itself cannot be interrupted). Fire-and-forget; safe to call
+    // even if the task already completed or never reached a worker.
+    cancelTask(taskId) {
+        if (taskId == null) return;
+        const worker = this.workerForTask.get(taskId)
+            || this.tasks.get(taskId)?.worker;
+        if (worker) worker.postMessage({ type: WorkerMsg.CANCEL, id: taskId });
     }
 }
 
@@ -933,7 +953,7 @@ function triggerLiveUpdate(look) {
 }
 
 pool.setLiveHandler((msg) => {
-    if (msg.type === 'error_live') {
+    if (msg.type === WorkerMsg.ERROR_LIVE) {
         console.warn('live reprocess error:', msg.error);
         liveInFlight = false;
         if (livePendingLook) {
@@ -946,7 +966,7 @@ pool.setLiveHandler((msg) => {
     liveInFlight = false;
     if (lightboxIndex >= 0) {
         const card = cards[lightboxIndex];
-        if (msg.type === 'lightbox_live' && card && msg.id === card._taskId) {
+        if (msg.type === WorkerMsg.LIGHTBOX_LIVE && card && msg.id === card._taskId) {
             // Phase 2: worker sends sensor-orientation pixels + orientation tag.
             // Apply rotation via GPU canvas transform — no CPU pixel-shuffle.
             const sW = msg.nativeW ?? msg.w;
@@ -1004,6 +1024,31 @@ pool.setThumbLiveHandler((msg) => {
 // Card grid + per-file state
 // ---------------------------------------------------------------------------
 const cards = []; // ordered list of card elements for lightbox prev/next
+
+// Remove a card from the gallery and tear down everything that referenced it:
+//   - cancel its in-flight RAW worker task (best-effort between chunks),
+//   - drop it from BOTH index maps (cardByTaskId keyed on _taskId, and the
+//     Tauri cardByFilename keyed on the full path) so neither map leaks an entry
+//     pointing at a detached DOM node,
+//   - release any worker-side LookRenderer state and revoke blob URLs,
+//   - splice it out of `cards` and remove the DOM element.
+// Single source of truth for card teardown — any future delete/clear UI must
+// route through here rather than dropping the element directly.
+function removeCard(card) {
+    if (!card) return;
+    if (card._taskId != null) {
+        pool.cancelTask(card._taskId);
+        try { pool.releaseState(card._taskId); } catch {}
+        cardByTaskId.delete(card._taskId);
+    }
+    if (card._tauriPath != null) cardByFilename.delete(card._tauriPath);
+    if (card._blobUrl) { try { URL.revokeObjectURL(card._blobUrl); } catch {} card._blobUrl = null; }
+    const i = cards.indexOf(card);
+    if (i !== -1) cards.splice(i, 1);
+    try { card.remove(); } catch {}
+}
+// Expose for any external/UI caller wiring a delete affordance.
+window.removeCard = removeCard;
 
 const MAX_FILE_BYTES = 200 * 1024 * 1024; // 200 MB hard limit before WASM
 const seenFiles = new Set(); // "name|size|lastModified" — prevents duplicate-drop cards
@@ -1072,7 +1117,11 @@ function makeCard(name) {
             try {
                 const [settings, token] = await Promise.all([invoke('get_settings'), invoke('get_token')]);
                 const { jxl, exif } = card._tauriResult;
-                const _jb = new Uint8Array(jxl); let _js = ''; for (let _i = 0; _i < _jb.length; _i++) _js += String.fromCharCode(_jb[_i]);
+                const _jb = new Uint8Array(jxl); let _js = '';
+                // Chunked binary-string build: String.fromCharCode.apply over
+                // 0x8000-byte windows avoids the super-linear cost of per-byte
+                // string concat on MB-scale JXL payloads. Identical base64 out.
+                for (let _i = 0; _i < _jb.length; _i += 0x8000) _js += String.fromCharCode.apply(null, _jb.subarray(_i, _i + 0x8000));
                 const jxl_b64 = btoa(_js);
                 const result = await invoke('push_to_planner', {
                     payload: { filename: name, jxl_b64, exif, planner_url: settings.planner_url, token: token ?? '' },
@@ -1623,6 +1672,10 @@ function startConvert(file, existingCard) {
             const bytes = new Uint8Array(buf);
             const opts = currentOptions();
             opts.userRotation = userRotations[file.name] || 0;
+            // Carry the filename so the worker's detectFormat can disambiguate
+            // TIFF-magic RAW (orf/dng/cr2) from developed TIFF. Detection still
+            // works on magic bytes alone if name is absent (e.g. EXR/CR2).
+            opts.name = file.name || '';
             const initialPriority = card._pendingPriority || 'normal';
             card._pendingPriority = null;
             const taskId = pool.submit(bytes, opts, {
@@ -1793,10 +1846,12 @@ async function handleFileList(fileList) {
     for (const f of orfs) startConvert(f);
 }
 
-// Supported RAW formats: Olympus ORF, Canon CR2, Adobe/Pixel DNG. (Name kept `isOrf`
-// for the many existing call sites; predicate now matches all three.)
+// Supported pipeline formats: RAW (Olympus ORF, Canon CR2, Adobe/Pixel DNG) plus
+// developed high-bit images (EXR, TIFF) which the worker decodes via decode_exr/
+// decode_tiff and renders through the same LookRenderer live-edit engine. (Name
+// kept `isOrf` for the many existing call sites.)
 function isOrf(file) {
-    return /\.(orf|cr2|dng)$/i.test(file.name);
+    return /\.(orf|cr2|dng|exr|tif|tiff)$/i.test(file.name);
 }
 
 // Walk a DataTransfer entry tree (only available on `drop` via
@@ -2033,6 +2088,12 @@ const colourSelect = { labBuf: null, mask: null, tolerance: 30, seeds: [] };
 function captureCleanAndApplyLens(imageData) {
     cleanSnapshot = imageData;
     if (typeof setCleanCanvas === 'function') setCleanCanvas(imageData);
+    // Feed the Tauri-parity M2 FilterEngine the clean 8-bit baseline (the
+    // pre-lens snapshot) so its colour sliders have pixels to transform. This is
+    // the only caller; without it paintFromBaseline always missed and the panel
+    // was inert. Pass the snapshot directly to avoid a canvas read-back and to
+    // avoid capturing lens-modified pixels.
+    feedTauriParityBaseline(imageData);
     applyPerceptualLens();
 }
 
@@ -3526,9 +3587,16 @@ function lookToSnake(look) {
 }
 
 function rgbToRgbaArr(rgb) {
-    const rgba = new Uint8ClampedArray(rgb.length / 3 * 4);
-    for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
-        rgba[j] = rgb[i]; rgba[j+1] = rgb[i+1]; rgba[j+2] = rgb[i+2]; rgba[j+3] = 255;
+    // Same fast packer as rgbToRgba (one Uint32 store per pixel, ~4x fewer
+    // stores than the byte-wise form). Derives n from the RGB24 length so the
+    // existing single-arg call sites (decoded-frame paint paths) are unchanged.
+    // Little-endian => 0xFFBBGGRR; alpha fixed at 255. Byte-identical output.
+    const n = (rgb.length / 3) | 0;
+    const buf = new ArrayBuffer(n * 4);
+    const rgba = new Uint8ClampedArray(buf);
+    const u32 = new Uint32Array(buf);
+    for (let i = 0, p = 0; i < n; i++, p += 3) {
+        u32[i] = (rgb[p]) | (rgb[p + 1] << 8) | (rgb[p + 2] << 16) | 0xFF000000;
     }
     return rgba;
 }
@@ -3536,8 +3604,8 @@ function rgbToRgbaArr(rgb) {
 const cardByFilename = new Map();
 
 function findTauriCard(path) {
-    const name = path.split(/[\\/]/).pop();
-    return cardByFilename.get(name);
+    // Keyed on the full path — see cardByFilename note in startBatchTauri.
+    return cardByFilename.get(path);
 }
 
 let tauriStatSeq = 0;
@@ -3575,9 +3643,13 @@ function updateBatchRollups(encodeMs) {
         `avg ${avgEnc} ms/file  throughput ${throughput.toFixed(2)} files/s`);
 }
 
-function onFileDoneTauri(filename, result) {
-    const card = cardByFilename.get(filename);
+function onFileDoneTauri(path, result) {
+    // cardByFilename is keyed on the full path (collision-resistant): two folders
+    // can hold the same basename. `filename` is the basename, used only for the
+    // display labels below.
+    const card = cardByFilename.get(path);
     if (!card) return;
+    const filename = path.split(/[\\/]/).pop();
     card.classList.remove('busy');
 
     // Drop any stale JXL bitmap from a prior process so the new RAW thumb
@@ -3699,7 +3771,10 @@ async function startBatchTauri(paths) {
         const card = makeCard(filename);
         card._file = { name: filename };
         card._tauriPath = path;
-        cardByFilename.set(filename, card);
+        // Key on the full path, not the basename — distinct folders can hold the
+        // same filename, and a basename key would silently collide (one card
+        // shadowing the other in every findTauriCard / onFileDoneTauri lookup).
+        cardByFilename.set(path, card);
         cards.push(card);
         grid.appendChild(card);
         if (typeof loadSidecar === 'function') {
@@ -3785,7 +3860,6 @@ async function startBatchTauri(paths) {
     });
 
     await Promise.allSettled(paths.map(async (path) => {
-        const filename = path.split(/[\\/]/).pop();
         try {
             const result = await invoke('process_file', {
                 path,
@@ -3799,10 +3873,14 @@ async function startBatchTauri(paths) {
                     wb_b: null,
                 },
             });
-            onFileDoneTauri(filename, result);
+            onFileDoneTauri(path, result);
         } catch (err) {
-            const card = cardByFilename.get(filename);
-            if (card) { card.classList.add('error'); card.querySelector('.time').textContent = String(err); }
+            const card = cardByFilename.get(path);
+            if (card) {
+                card.classList.add('error');
+                const meta = card.querySelector('.time');
+                if (meta) meta.textContent = String(err);
+            }
         }
     }));
 
@@ -4150,8 +4228,8 @@ async function runVarianceBench() {
         matrix.push({ effort: e, ...r });
         const ok = r.perFile.filter(p => !p.error);
         const totalKB = ok.reduce((s, p) => s + p.jxl_bytes, 0) / 1024;
-        const avgKB   = totalKB / ok.length;
-        const avgEnc  = ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length;
+        const avgKB   = ok.length ? totalKB / ok.length : 0;
+        const avgEnc  = ok.length ? ok.reduce((s, p) => s + p.enc_ms, 0) / ok.length : 0;
         pushStat(`[var] e=${e}  wall ${(r.wallMs/1000).toFixed(2)}s  enc ${avgEnc.toFixed(0)} ms/f  avg ${avgKB.toFixed(0)} KB  total ${totalKB.toFixed(0)} KB`);
     }
 
@@ -4390,6 +4468,51 @@ let peepQuality = PEEP_INITIAL_Q;
 // peepCache: Map<photoIdx, { jxlBytes:{q:Uint8Array}, decoded:{q:{rgba,w,h}}, encodeMs:{q:number}, sizeBytes:{q:number}, doneCount:number }>
 const peepCache = new Map();
 
+// Bounded LRU over decoded full-res RGBA variants. Without this, the peep cache
+// accumulates one RGBA buffer per (photo × quality) it ever decodes — N photos
+// × up to 11 qualities, each potentially tens of MB — and never frees them, so
+// a long peep session over a folder grows memory without bound. We keep the
+// small jxlBytes/sizeBytes/encodeMs metadata (cheap) but cap the count of heavy
+// decoded RGBA buffers, evicting the least-recently-used. Cap ≈ 2 full quality
+// ladders so the current photo plus a neighbour stay hot; evicted variants are
+// transparently re-decoded from the retained jxlBytes on demand.
+const PEEP_DECODED_LRU_MAX = 24;
+// Insertion-ordered Map keyed "idx:q" → true. Map iteration order is insertion
+// order, so the first key is the LRU victim; touching = delete+re-set.
+const peepDecodedLru = new Map();
+const peepLruKey = (idx, q) => `${idx}:${q}`;
+
+// Record a freshly-decoded variant as most-recently-used and evict the oldest
+// decoded RGBA(s) if we are over the cap. Frees the evicted buffer from its
+// owning peepCache entry so it can be GC'd.
+function peepLruRecord(idx, q) {
+    const key = peepLruKey(idx, q);
+    peepDecodedLru.delete(key);
+    peepDecodedLru.set(key, true);
+    while (peepDecodedLru.size > PEEP_DECODED_LRU_MAX) {
+        const oldest = peepDecodedLru.keys().next().value;
+        peepDecodedLru.delete(oldest);
+        const sep = oldest.lastIndexOf(':');
+        const oIdx = Number(oldest.slice(0, sep));
+        const oQ = oldest.slice(sep + 1);
+        const oEntry = peepCache.get(oIdx);
+        // PEEP_QUALITIES are numbers except 'lossless'; restore the number type
+        // so the delete hits the same key the decoded variant was stored under.
+        const qKey = oQ === 'lossless' ? oQ : Number(oQ);
+        if (oEntry?.decoded) delete oEntry.decoded[qKey];
+    }
+}
+
+// Mark an already-decoded variant as recently used (e.g. on paint/nav) without
+// inserting one that was never decoded.
+function peepLruTouch(idx, q) {
+    const key = peepLruKey(idx, q);
+    if (peepDecodedLru.has(key)) {
+        peepDecodedLru.delete(key);
+        peepDecodedLru.set(key, true);
+    }
+}
+
 async function runPixelPeep() {
     if (!IS_TAURI) { pushStat('[peep] tauri-only'); return; }
     let paths;
@@ -4402,6 +4525,7 @@ async function runPixelPeep() {
     peepIdx = 0;
     peepQuality = PEEP_INITIAL_Q;
     peepCache.clear();
+    peepDecodedLru.clear();
     // Seed cache entries so .then() callbacks can locate their photo idx.
     for (let i = 0; i < paths.length; i++) {
         peepCache.set(i, { jxlBytes: {}, decoded: {}, encodeMs: {}, sizeBytes: {}, doneCount: 0 });
@@ -4539,6 +4663,7 @@ function decodePeepQuality(idx, q) {
         }
         const e = peepCache.get(idx);
         e.decoded[q] = { rgba: msg.rgba, w: msg.w, h: msg.h };
+        peepLruRecord(idx, q);
         pushStat(`[peep]   photo ${idx+1} ${fmtPeepQ(q)} decoded  ${msg.w}×${msg.h}`);
         if (idx === peepIdx) { paintPeepCurrent(); updatePeepBadges(); }
     });
@@ -4572,6 +4697,9 @@ function paintPeepCurrent() {
         return;
     }
     const { dec, q: paintedQ, fallback } = pick;
+    // Painting this variant makes it most-recently-used so navigation back and
+    // forth across photos doesn't evict what's currently on screen.
+    peepLruTouch(peepIdx, paintedQ);
     try {
         lightboxCanvas.width = dec.w;
         lightboxCanvas.height = dec.h;
@@ -4618,6 +4746,7 @@ function peepCycleQuality(delta) {
 function exitPixelPeep() {
     pixelPeepActive = false;
     peepCache.clear();
+    peepDecodedLru.clear();
     peepPaths = [];
     lightbox.hidden = true;
     lightbox.classList.remove('peep-mode');
@@ -5084,3 +5213,109 @@ if (IS_TAURI) {
         await invoke('set_settings', { settings: { planner_url: urlInput.value } });
     });
 }
+
+// ---------------------------------------------------------------------------
+// Tauri-parity M2 develop lightbox + H29 streaming-look channel
+// ---------------------------------------------------------------------------
+//
+// The Tauri-parity lightbox (CasaBio FilterEngine M2 + optional 16-bit WebGL
+// HDR) is wired into the browser bench here. In the bench there is no Tauri
+// `invoke` and no pyramid client, so those are nulled out — the component is
+// written to no-op gracefully (selectors → null, 16-bit toggle stays hidden,
+// export ROI falls back to a plain canvas PNG). The M2 sliders drive an in-DOM
+// FilterEngine repaint over an 8-bit baseline we hand it via onBaseFramePainted.
+//
+// H29 (Rust streaming develop channel) is capability-detected, not assumed:
+// apply_look_stream / jxl_progressive_pass are absent from the shipped pkg
+// until the H29 Rust work is built, so `h29` is null today and the channel
+// path degrades to the existing live-update flow. When a future WASM rebuild
+// exports them, `h29` becomes live and the M2 develop adjustments stream
+// through apply_look_stream with jxl_progressive_pass driving refinement.
+const h29 = (typeof rawWasm.apply_look_stream === 'function'
+          && typeof rawWasm.jxl_progressive_pass === 'function')
+    ? { applyLookStream: rawWasm.apply_look_stream, progressivePass: rawWasm.jxl_progressive_pass }
+    : null;
+let h29WarnedOnce = false;
+
+// Translate the current M2 develop adjustments into a streaming look update.
+// Real reference to the H29 exports (capability-gated); when the build lacks
+// them it logs exactly once and lets the standard repaint path handle it.
+function runH29DevelopChannel(adjustments) {
+    if (!h29) {
+        if (!h29WarnedOnce) {
+            h29WarnedOnce = true;
+            console.info('[H29] streaming develop channel unavailable — '
+                + 'apply_look_stream / jxl_progressive_pass not in this WASM build; '
+                + 'using standard live-update repaint. Rebuild raw-pipeline to enable.');
+        }
+        return false;
+    }
+    const card = cards[lightboxIndex];
+    if (!card || !card._taskId) return false;
+    try {
+        // Stream the develop-slider deltas, then drive a progressive refinement
+        // pass. Both are the real H29 exports detected above.
+        h29.applyLookStream(card._taskId, lookToSnake(adjustments));
+        h29.progressivePass(card._taskId);
+        return true;
+    } catch (e) {
+        console.warn('[H29] develop channel failed, falling back:', e);
+        return false;
+    }
+}
+
+// Derive a normalised viewport ROI (in source pixels) from the lightbox zoom/pan
+// so Export ROI crops what the user is actually looking at. Falls back to the
+// full frame when nothing is zoomed.
+function lightboxViewportRegion(imgW, imgH) {
+    const full = { x: 0, y: 0, w: imgW, h: imgH };
+    const cv = lightboxCanvas;
+    if (!cv.width || !cv.height || lbZoom <= 1.0001) return full;
+    const vp = lbViewport.getBoundingClientRect();
+    // Visible source pixels = viewport size / zoom, centred on the pan offset.
+    const visW = Math.min(imgW, Math.ceil((vp.width / lbZoom) * (imgW / cv.width)));
+    const visH = Math.min(imgH, Math.ceil((vp.height / lbZoom) * (imgH / cv.height)));
+    const cx = (cv.width / 2 - lbPanX / lbZoom) * (imgW / cv.width);
+    const cy = (cv.height / 2 - lbPanY / lbZoom) * (imgH / cv.height);
+    const x = Math.max(0, Math.min(imgW - visW, Math.round(cx - visW / 2)));
+    const y = Math.max(0, Math.min(imgH - visH, Math.round(cy - visH / 2)));
+    return { x, y, w: visW, h: visH };
+}
+
+const tauriParityLb = createTauriParityLightbox({
+    rootEl: lightbox,
+    canvas: lightboxCanvas,
+    histCanvas: lightbox.querySelector('[data-m2-hist]'),
+    // Bench has no Tauri bridge: pass the real invoke when present, else null.
+    invoke: (typeof invoke === 'function') ? invoke : null,
+    getActiveCard: () => (lightboxIndex >= 0 ? cards[lightboxIndex] : null) || null,
+    // When the M2 FilterEngine has no cached baseline (bench single-image), ask
+    // the develop channel / live pipeline to re-render the current frame.
+    onRepaintRequest: () => {
+        const adj = tauriParityLb?.state?.adjustments;
+        if (adj && runH29DevelopChannel(adj)) return;
+        scheduleLiveUpdate();
+    },
+    pyramidClient: null,
+    getViewportRegion: lightboxViewportRegion,
+    getZoom: () => lbZoom,
+});
+window.tauriParityLb = tauriParityLb;
+
+// Feed the M2 FilterEngine a clean 8-bit baseline whenever a fresh frame lands
+// on the lightbox canvas, so its sliders have pixels to transform.
+function feedTauriParityBaseline(snapshot) {
+    if (!tauriParityLb || lightboxIndex < 0) return;
+    const card = cards[lightboxIndex];
+    if (!card) return;
+    try {
+        let img = snapshot;
+        if (!img) {
+            if (!lightboxCanvas.width || !lightboxCanvas.height) return;
+            const ctx = lightboxCanvas.getContext('2d');
+            img = ctx.getImageData(0, 0, lightboxCanvas.width, lightboxCanvas.height);
+        }
+        tauriParityLb.onBaseFramePainted(card, img.data, img.width, img.height);
+    } catch { /* cross-tainted canvas or 0-size: skip baseline feed */ }
+}
+window.feedTauriParityBaseline = feedTauriParityBaseline;

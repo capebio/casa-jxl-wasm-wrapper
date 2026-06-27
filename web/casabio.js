@@ -12,6 +12,19 @@
 
     const STORAGE_KEY = "casabio.baseUrl";
 
+    // Validate a base URL coming from an untrusted source (deep-link handoff).
+    // Only https is accepted, except http on loopback for local dev. Returns the
+    // normalised origin+path string, or null if the input is malformed/disallowed.
+    function validateBaseUrl(raw) {
+        if (typeof raw !== "string" || !raw) return null;
+        let u;
+        try { u = new URL(raw); } catch { return null; }
+        const isLoopback = u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+        if (u.protocol === "https:") return u.href;
+        if (u.protocol === "http:" && isLoopback) return u.href;
+        return null;
+    }
+
     function getBaseUrl() {
         const url = ($("#casabio-base-url").value || "").trim();
         if (!url) throw new Error("Set Casabio base URL first");
@@ -148,10 +161,20 @@
                     const expId = url.searchParams.get("expeditionId");
                     const jxlSettingsRaw = url.searchParams.get("jxlSettings");
 
-                    if (base) {
-                        $("#casabio-base-url").value = base;
-                        localStorage.setItem(STORAGE_KEY, base);
+                    // Untrusted deep-link: never persist a token destined for an
+                    // unvalidated base URL. Require a well-formed https (or loopback
+                    // http) baseUrl before saving anything.
+                    const validBase = validateBaseUrl(base);
+                    if (!validBase) {
+                        console.warn("casabio-handoff rejected: missing or non-https baseUrl");
+                        const li = appendQueueItem("web-handoff");
+                        setQueueStatus(li, "handoff rejected — invalid or non-https base URL", "error");
+                        return;
                     }
+
+                    $("#casabio-base-url").value = validBase;
+                    localStorage.setItem(STORAGE_KEY, validBase);
+
                     if (token) {
                         // Save directly to keychain via the existing command (no plaintext in UI)
                         invoke("casabio_set_token", { token }).then(() => {

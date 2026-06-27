@@ -19,7 +19,8 @@ test('every test page exposes the shared home bar', () => {
 });
 
 test('page headings say what the pages do', () => {
-    expect(indexHtml).toContain('ORF to JPEG XL browser test bench');
+    // updated: index.html h1 reworded for multi-format ingest (ORF/CR2/DNG); see index.html:111
+    expect(indexHtml).toContain('RAW (ORF / CR2 / DNG) to JPEG XL browser test bench');
     expect(indexHtml).toContain('Encode, benchmark, and inspect timing across the browser pipeline.');
     expect(progressiveHtml).toContain('JPEG XL progressive decode test bench');
     expect(wrapperHtml).toContain('JPEG XL wrapper test lab');

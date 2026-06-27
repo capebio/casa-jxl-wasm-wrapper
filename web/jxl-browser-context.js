@@ -13,24 +13,29 @@ export function getContext() {
             _ctx = createBrowserContext();
         } catch (err) {
             console.error('[jxl-browser-context] Failed to create JxlContext:', err);
-            // No-op context so callers don't hard-crash on import map misconfiguration.
-            _ctx = {
-                decode() { throw new Error('[jxl-browser-context] Context unavailable'); },
-                encode() { throw new Error('[jxl-browser-context] Context unavailable'); },
-                capabilities() { return {}; },
-                async shutdown() {},
-            };
+            // Surface the real failure immediately rather than installing a no-op
+            // stub that defers it to first decode/encode with a generic message
+            // (and whose capabilities() === {} reads as "feature absent"). Leave
+            // _ctx null so a later call can retry once the misconfiguration is fixed.
+            throw new Error(
+                '[jxl-browser-context] Failed to create JxlContext: ' + (err?.message ?? String(err)),
+                { cause: err },
+            );
         }
     }
     return _ctx;
 }
 
 export async function resetContext() {
-    if (_ctx?.shutdown) {
+    // Capture and detach the old context BEFORE awaiting its shutdown so a
+    // concurrent getContext() can never observe the mid-shutdown instance —
+    // it will create a fresh one instead.
+    const old = _ctx;
+    _ctx = null;
+    if (old?.shutdown) {
         try {
-            await _ctx.shutdown();
+            await old.shutdown();
         } catch {}
     }
-    _ctx = null;
     return getContext();
 }

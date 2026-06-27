@@ -312,7 +312,11 @@
     function triggerSidecarSave(card) {
         const filename = card?._tauriPath || card?._file?.name;
         if (filename && typeof window.saveSidecar === 'function') {
-            window.saveSidecar(filename).catch(() => {});
+            // Surface persist failures instead of silently swallowing them — a
+            // failed save after Apply would otherwise be invisible to the user.
+            window.saveSidecar(filename).catch((err) => {
+                console.error('[crop] sidecar save failed for', filename, err);
+            });
         }
     }
 
@@ -634,16 +638,25 @@
     // outside the lightbox-active path so subject siblings can appear in the
     // grid the moment a folder is scanned, not only after the user opens the
     // file in the lightbox.
+    // Clamp a normalised box so that x,y ∈ [0,1], w,h ≥ 0.001, and the box
+    // stays on-image: x+w ≤ 1 and y+h ≤ 1. Width/height take precedence over
+    // origin (origin is pulled back if the box would overflow the right/bottom).
+    function clampNormBox(x, y, w, h) {
+        const cx = clamp01(x);
+        const cy = clamp01(y);
+        const cw = Math.max(0.001, Math.min(1 - cx, w));
+        const ch = Math.max(0.001, Math.min(1 - cy, h));
+        return { x: cx, y: cy, w: cw, h: ch };
+    }
+
     function applyCropAndSubjectsToCard(card, sidecar) {
         if (!card || !sidecar) return;
         if (sidecar.crop && typeof sidecar.crop === 'object'
             && Number.isFinite(sidecar.crop.x) && Number.isFinite(sidecar.crop.y)
             && Number.isFinite(sidecar.crop.w) && Number.isFinite(sidecar.crop.h)) {
+            const b = clampNormBox(sidecar.crop.x, sidecar.crop.y, sidecar.crop.w, sidecar.crop.h);
             card._crop = {
-                x: clamp01(sidecar.crop.x),
-                y: clamp01(sidecar.crop.y),
-                w: Math.max(0.001, Math.min(1, sidecar.crop.w)),
-                h: Math.max(0.001, Math.min(1, sidecar.crop.h)),
+                x: b.x, y: b.y, w: b.w, h: b.h,
                 ratio: typeof sidecar.crop.ratio === 'string' ? sidecar.crop.ratio : 'free',
             };
         }
@@ -651,15 +664,16 @@
             card._subjects = sidecar.subjects
                 .filter(s => s && Number.isFinite(s.x) && Number.isFinite(s.y)
                           && Number.isFinite(s.w) && Number.isFinite(s.h))
-                .map(s => ({
-                    id: s.id || ('s-' + Math.random().toString(36).slice(2, 8)),
-                    x: clamp01(s.x), y: clamp01(s.y),
-                    w: Math.max(0.001, Math.min(1, s.w)),
-                    h: Math.max(0.001, Math.min(1, s.h)),
-                    label: typeof s.label === 'string' ? s.label : '',
-                    note:  typeof s.note  === 'string' ? s.note  : '',
-                    status: ['unknown','tentative','confirmed'].includes(s.status) ? s.status : 'unknown',
-                }));
+                .map(s => {
+                    const b = clampNormBox(s.x, s.y, s.w, s.h);
+                    return {
+                        id: s.id || ('s-' + Math.random().toString(36).slice(2, 8)),
+                        x: b.x, y: b.y, w: b.w, h: b.h,
+                        label: typeof s.label === 'string' ? s.label : '',
+                        note:  typeof s.note  === 'string' ? s.note  : '',
+                        status: ['unknown','tentative','confirmed'].includes(s.status) ? s.status : 'unknown',
+                    };
+                });
         }
         rebuildSubjectCards(card);
     }
@@ -683,8 +697,12 @@
             after.parentNode.insertBefore(card, after.nextSibling);
             after = card;
         });
-        // Trigger paint pass.
-        renderSubjectThumb(parentCard).catch(() => {});
+        // Trigger paint pass. Surface decode/paint failures rather than
+        // silently swallowing them (a swallowed reject leaves a blank thumb
+        // indistinguishable from a real error).
+        renderSubjectThumb(parentCard).catch((err) => {
+            console.error('[crop] renderSubjectThumb failed', err);
+        });
     }
     window.rebuildSubjectCards = rebuildSubjectCards;
 
@@ -734,6 +752,10 @@
         if (!parentCard._jxlDecoded && parentCard._blobUrl
             && typeof window.decodeFullJxlFor === 'function') {
             await window.decodeFullJxlFor(parentCard);
+            // The decode is unabortable; by the time it resolves the parent card
+            // may have been torn down (lightbox exit) or its subject siblings
+            // rebuilt. Bail rather than paint into stale/detached nodes.
+            if (!parentCard.isConnected) return;
         }
         const jd = parentCard._jxlDecoded;
         if (!jd) return; // JXL not available — bail silently

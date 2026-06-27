@@ -197,6 +197,11 @@ function syncPushedAction() {
 function wireProgressivePaintHandoff() {
   window.addEventListener('message', (ev) => {
     if (ev.origin !== location.origin) return;
+    // Hardening: only accept pushes from our opener (the Progressive Paint window
+    // that launched us). Symmetric with the sender's ev.source !== targetWindow
+    // guard in jxl-progressive-paint.js. Tolerate a missing opener (e.g. direct
+    // open / autopush) so non-opener flows are not broken.
+    if (window.opener && ev.source && ev.source !== window.opener) return;
     if (ev.data?.type === 'progressive-gallery-push') {
       const payload = ev.data.payload;
       ingestPushedGalleryPayload(payload)
@@ -747,7 +752,16 @@ async function startGallery(selectedFiles, { encodeOnTheFly = false } = {}) {
           totalBytes: buffer.byteLength,
           stage: ev.type === 'final' ? 'final' : ev.stage,
         };
-        framesByFile.get(fileId).push(enriched);
+        // Invariant: framesByFile (arrival-order push, read by the lightbox as
+        // frames[frameIndex]) and the coordinator (sparse frames[frameIndex]=)
+        // stay consistent only because frameIndex is a per-file monotone counter
+        // pushed in lockstep. Guard it so a gap/reorder desyncs loudly instead of
+        // silently mis-indexing the lightbox.
+        const fileFrames = framesByFile.get(fileId);
+        if (fileFrames.length !== enriched.frameIndex) {
+          console.error('[gallery] frame-store desync', { fileId, pushIndex: fileFrames.length, frameIndex: enriched.frameIndex });
+        }
+        fileFrames.push(enriched);
         coordinator.registerFrame(fileId, enriched);
         requestRender(fileId);
         const frameLine = `${file.name}: [${enriched.stage}] ${elapsedMs.toFixed(1)} ms · ${bytesFed.toLocaleString()} / ${buffer.byteLength.toLocaleString()} B · ${percentFed.toFixed(1)}%`;

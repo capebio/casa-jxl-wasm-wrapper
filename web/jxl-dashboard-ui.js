@@ -2,7 +2,6 @@ export function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
-let escapeWired = false;
 let helpCloseWired = false;
 
 export function wireSlideoutPanel({
@@ -24,12 +23,12 @@ export function wireSlideoutPanel({
         setOpen(panel.dataset.open !== 'true');
     });
     closeButton?.addEventListener('click', () => setOpen(false));
-    if (!escapeWired) {
-        document.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape') setOpen(false);
-        });
-        escapeWired = true;
-    }
+    // Per-panel Escape handler: each wired panel closes itself when it is open.
+    // (A previous module-global guard meant only the first panel ever responded
+    // to Escape.) The open-check keeps this inert for closed panels.
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && panel.dataset.open === 'true') setOpen(false);
+    });
 
     setOpen(defaultOpen);
     return {

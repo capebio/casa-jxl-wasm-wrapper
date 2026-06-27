@@ -1,32 +1,69 @@
 // web/lightbox/pyramid-lightbox.js
-// Extracted M2 8-bit lightbox component for the pyramid gallery.
-// Satisfies the M2 checklist (zoom ladder, canvas pan w/ transform only, adaptive level,
-// live zoom readout, monotonic LRU, dual-prio via scheduler, FilterEngine parity, live visible hist).
-// 
-// IMPORTANT (per design §7 and M2 checklist):
-// - This is the **8-bit** lightbox path.
-// - FilterEngine runs on 8-bit for live canvas color-matrix preview (fast, no re-decode).
-// - The 16-bit toggle (decode16 → WebGL float texture + shader FilterEngine adjust (headroom) → WebGL shader dither (Bayer/FS approx) → 8-bit display)
-//   is M3. The stub is now wired with full WebGL implementation (when supported) for viable 16-bit in the demo lightbox. JS fallback if no WebGL2/float.
-// - Seeding must use already-cached grid tile pixels when possible (zero extra decode).
-// - All decodes go through the caller's ctx.decode with sourceKey (scheduler reuse, no ad-hoc layer).
-// - No dependency on the external Android CplusplusTest path.
+// M3 pyramid lightbox component, wired to the S1->S3->S2 image-store refactor.
+//
+// Architecture (per CLAUDE.md layer map + image-store-image-handling-handoff):
+// - ALL manifest + level-byte acquisition is delegated to `imageStore`
+//   (createImageStore, web/pyramid-gallery/image-store.js). The lightbox no
+//   longer takes getManifest/getLevelBytes as injected params; it calls
+//   imageStore.getManifest(imageId) / imageStore.getLevelBytes(contenthash).
+// - 8-bit display path: decode a level via ctx.decode (shared scheduler,
+//   sourceKey = contenthash for dedupe/monotonic reuse), FilterEngine colour
+//   matrix preview on canvas. The 16-bit (HDR) display toggle decodes rgbaf32
+//   and renders through the WebGL float pipeline.
+// - Tiled levels (level.tiled): a viewport ROI is decoded with decodePyramidRegion
+//   in packed rgba16 and rendered with renderRgba16AdjustedToCanvas (WebGL float
+//   adjust -> dither -> 8-bit canvas), so we never decode a whole tiled mip.
+// - ROI export: exportRoi(...) decodes the crop region in rgba16, runs the
+//   WebGL adjust for export, and encodeRgba16(...) produces a 16-bit JXL via the
+//   same ctx.encode path the app uses (web/main.js encodeJxlSession).
+// - Monotonic level upgrades reuse the shared shouldUpgrade predicate from the
+//   pyramid choose-level helper (same one grid-controller uses).
+//
+// buildColorMatrix (filter-engine) feeds the WebGL 16-bit render + export so the
+// HDR path matches the 8-bit FilterEngine preview matrix.
 
-import { createFilterEngine, LightboxPreset, APPROVED_LIGHTBOX_PRESETS, ADJUSTMENT_PARAMS } from './filter-engine.js';
+import {
+  createFilterEngine,
+  LightboxPreset,
+  APPROVED_LIGHTBOX_PRESETS,
+  ADJUSTMENT_PARAMS,
+  buildColorMatrix,
+  clampAdjustments,
+} from './filter-engine.js';
+import {
+  renderRgba16AdjustedToCanvas,
+  adjustedRgba16ForExport,
+  canUseWebGL16,
+} from './webgl-pipeline.js';
+import { decodePyramidRegion } from '../pyramid-gallery/pyramid-decode.js';
+import { chooseLevelForTarget, shouldUpgrade } from '../../packages/jxl-pyramid/dist/choose-level.js';
 
+/**
+ * @param {{
+ *   ctx: import('@casabio/jxl-session').JxlContext,
+ *   cache?: import('@casabio/jxl-cache').JxlCacheBrowser,
+ *   galleryBase?: URL | string,
+ *   imageStore: { getManifest(imageId: string): Promise<any>; getLevelBytes(contenthash: string): Promise<Uint8Array>; base?: URL },
+ *   rootEl?: HTMLElement,
+ *   log?: (...args: any[]) => void,
+ * }} deps
+ */
 export function createPyramidLightbox(deps) {
   const {
-    ctx,                    // jxl context from createBrowserContext
-    getLevelBytes,          // from grid (supports baseUrl or fileMap)
-    chooseLevelForTarget,   // pure helper
-    getManifest,            // for per-image full levels list
-    packFramePixels,        // helper
-    log = console.log,      // optional
+    ctx,                 // jxl context from createBrowserContext
+    cache,               // jxl-cache (optional; level bytes come via imageStore)
+    galleryBase,         // gallery base URL (carried for parity / logging)
+    imageStore,          // S1: centralized manifest + level acquisition
+    rootEl,              // host element (optional; modal is appended to body)
+    log = console.log,   // optional
   } = deps;
 
-  if (!ctx || !getLevelBytes || !chooseLevelForTarget) {
-    throw new Error('pyramid-lightbox requires ctx, getLevelBytes, chooseLevelForTarget');
+  if (!ctx || !imageStore || typeof imageStore.getManifest !== 'function' || typeof imageStore.getLevelBytes !== 'function') {
+    throw new Error('pyramid-lightbox requires ctx and an imageStore with getManifest/getLevelBytes');
   }
+  // Delegate manifest/level acquisition to the store (no injected getManifest/getLevelBytes params).
+  const getManifest = (imageId) => imageStore.getManifest(imageId);
+  const getLevelBytes = (contenthash) => imageStore.getLevelBytes(contenthash);
 
   let eng = null;
   let modal = null;
@@ -42,15 +79,19 @@ export function createPyramidLightbox(deps) {
   let zoom = 1.0;
   let panX = 0;
   let panY = 0;
-  let levelInfo = null;      // {contenthash, w, h, size}
-  let levelPixels = null;    // raw Uint8Clamped
+  let levelInfo = null;      // {contenthash, w, h, size, bitsPerSample}
+  let levelPixels = null;    // Uint8Clamped (8-bit) or Float32Array (rgbaf32)
+  let levelRaw16 = null;     // packed rgba16 Uint8Array for tiled/HDR levels (export source)
   let offscreen = null;      // adjusted level canvas
   let isPanning = false;
   let lastMouse = {x:0, y:0};
   let crossfade = 0;
   let is16bitMode = false;
 
-  // LRU (monotonic)
+  // Current adjustments mirror (for buildColorMatrix on the 16-bit / export path).
+  const adjustments = Object.fromEntries(ADJUSTMENT_PARAMS.map((k) => [k, 0]));
+
+  // LRU (monotonic) for 8-bit decoded levels.
   const LRU = new Map();
   const LRU_MAX = 8;
   function lruGet(ch) {
@@ -68,214 +109,25 @@ export function createPyramidLightbox(deps) {
     }
   }
 
-  // WebGL for 16-bit float texture + shader FilterEngine + dither (M3 path)
-  let gl = null;
-  let glProgram = null;
-  let glPosBuffer = null;
-  let glTex = null;
-  let glCurrentW = 0, glCurrentH = 0;
-  let glLocs = {};
-
-  const glVS = `#version 300 es
-in vec4 a_position;
-void main() {
-  gl_Position = a_position;
-}
-`;
-
-  const glFS = `#version 300 es
-precision highp float;
-uniform sampler2D u_tex;
-uniform vec2 u_levelSize;
-uniform vec2 u_pan;
-uniform float u_zoom;
-uniform vec4 u_color0;
-uniform vec4 u_color1;
-uniform vec4 u_color2;
-uniform float u_shadows;
-uniform float u_highlights;
-out vec4 fragColor;
-
-float bayer4x4(int x, int y) {
-  float m[16];
-  m[0]=0.; m[1]=8.; m[2]=2.; m[3]=10.;
-  m[4]=12.; m[5]=4.; m[6]=14.; m[7]=6.;
-  m[8]=3.; m[9]=11.; m[10]=1.; m[11]=9.;
-  m[12]=15.; m[13]=7.; m[14]=13.; m[15]=5.;
-  return m[x + y*4] / 16.0;
-}
-
-void main() {
-  vec2 pixel = gl_FragCoord.xy;
-  vec2 src = (pixel - u_pan) / u_zoom;
-  vec2 uv = src / u_levelSize;
-  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-    fragColor = vec4(0.0);
-    return;
-  }
-  vec3 c = texture(u_tex, uv).rgb;
-
-  // color matrix
-  vec3 ac = vec3(
-    dot(u_color0.xyz, c) + u_color0.w,
-    dot(u_color1.xyz, c) + u_color1.w,
-    dot(u_color2.xyz, c) + u_color2.w
-  );
-
-  float l = dot(ac, vec3(0.299, 0.587, 0.114));
-
-  // shadows / highlights (per pixel tone, matching JS applyFloat)
-  if (u_shadows > 0.0) {
-    float lift = u_shadows * (1.0 - l);
-    ac += lift;
-  }
-  if (u_highlights < 0.0) {
-    float comp = u_highlights * l;
-    ac += comp;
-  }
-
-  // Bayer ordered dither (WebGL shader approx to FS for single pass; real sequential FS in wgpu/compute)
-  vec2 dpos = mod(gl_FragCoord.xy, 4.0);
-  int di = int(dpos.x) + int(dpos.y) * 4;
-  float thresh = bayer4x4(int(dpos.x), int(dpos.y));
-  vec3 q = floor(ac * 255.0 + thresh) / 255.0;
-  fragColor = vec4(q, 1.0);
-}
-`;
-
-  function createShader(type, source) {
-    const s = gl.createShader(type);
-    gl.shaderSource(s, source);
-    gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-      log('GL shader error: ' + gl.getShaderInfoLog(s));
-      gl.deleteShader(s);
-      return null;
+  // Internal helper: smallest level whose long edge >= target display size,
+  // restricted to the candidate set (bit-depth filtered). Wraps the shared
+  // chooseLevelForTarget (which throws on empty / takes a single target arg).
+  function pickLevelForTarget(cands, target) {
+    if (!cands || cands.length === 0) return null;
+    try {
+      return chooseLevelForTarget(cands, Math.max(1, Math.round(target)));
+    } catch {
+      return cands[0] || null;
     }
-    return s;
   }
 
-  function createProgram(vs, fs) {
-    const p = gl.createProgram();
-    gl.attachShader(p, vs);
-    gl.attachShader(p, fs);
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-      log('GL program error: ' + gl.getProgramInfoLog(p));
-      return null;
-    }
-    return p;
-  }
-
-  function initWebGL() {
-    if (gl && glProgram) return true;
-    if (!gl) {
-      gl = canvas.getContext('webgl2', { alpha: true, antialias: false, preserveDrawingBuffer: false });
-    }
-    if (!gl) {
-      log('WebGL2 not available for 16-bit path, using JS fallback');
-      return false;
-    }
-    const vs = createShader(gl.VERTEX_SHADER, glVS);
-    const fs = createShader(gl.FRAGMENT_SHADER, glFS);
-    if (!vs || !fs) return false;
-    glProgram = createProgram(vs, fs);
-    if (!glProgram) return false;
-
-    // full screen quad
-    const pos = new Float32Array([-1,-1, 1,-1, -1,1, 1,1]);
-    glPosBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, glPosBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
-    const posLoc = gl.getAttribLocation(glProgram, 'a_position');
-    gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
-
-    glLocs.tex = gl.getUniformLocation(glProgram, 'u_tex');
-    glLocs.levelSize = gl.getUniformLocation(glProgram, 'u_levelSize');
-    glLocs.pan = gl.getUniformLocation(glProgram, 'u_pan');
-    glLocs.zoom = gl.getUniformLocation(glProgram, 'u_zoom');
-    glLocs.color0 = gl.getUniformLocation(glProgram, 'u_color0');
-    glLocs.color1 = gl.getUniformLocation(glProgram, 'u_color1');
-    glLocs.color2 = gl.getUniformLocation(glProgram, 'u_color2');
-    glLocs.shadows = gl.getUniformLocation(glProgram, 'u_shadows');
-    glLocs.highlights = gl.getUniformLocation(glProgram, 'u_highlights');
-
-    gl.useProgram(glProgram);
-    gl.uniform1i(glLocs.tex, 0);
-
-    glTex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, glTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    return true;
-  }
-
-  function uploadGLTexture(data, w, h, isFloat) {
-    if (!gl) return;
-    gl.bindTexture(gl.TEXTURE_2D, glTex);
-    const intFmt = isFloat ? gl.RGBA32F : gl.RGBA;
-    const type = isFloat ? gl.FLOAT : gl.UNSIGNED_BYTE;
-    gl.texImage2D(gl.TEXTURE_2D, 0, intFmt, w, h, 0, gl.RGBA, type, data);
-    glCurrentW = w;
-    glCurrentH = h;
-  }
-
-  function renderGL() {
-    if (!gl || !glProgram || !levelPixels || !levelInfo) return false;
-    initWebGL();
-    if (!gl) return false;
-
-    const isFloat = !!(levelPixels && levelPixels.BYTES_PER_ELEMENT === 4); // Float32Array
-    if (glCurrentW !== levelInfo.w || glCurrentH !== levelInfo.h) {
-      uploadGLTexture(levelPixels, levelInfo.w, levelInfo.h, isFloat);
-    }
-
-    gl.useProgram(glProgram);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, glTex);
-
-    gl.uniform2f(glLocs.levelSize, levelInfo.w, levelInfo.h);
-    gl.uniform2f(glLocs.pan, panX, panY);
-    gl.uniform1f(glLocs.zoom, zoom);
-
-    const m = eng.getMatrix();
-    gl.uniform4f(glLocs.color0, m[0], m[1], m[2], m[3]);
-    gl.uniform4f(glLocs.color1, m[4], m[5], m[6], m[7]);
-    gl.uniform4f(glLocs.color2, m[8], m[9], m[10], m[11]);
-
-    const p = eng.getParams();
-    gl.uniform1f(glLocs.shadows, p.shadows / 100);
-    gl.uniform1f(glLocs.highlights, p.highlights / 100);
-
-    gl.viewport(0, 0, VIEW_W, VIEW_H);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    // read dithered u8 for display/hist (small size, acceptable for demo)
-    const u8 = new Uint8Array(VIEW_W * VIEW_H * 4);
-    gl.readPixels(0, 0, VIEW_W, VIEW_H, gl.RGBA, gl.UNSIGNED_BYTE, u8);
-
-    // put to the (WebGL) canvas is already done by the draw; the canvas is the WebGL one now.
-    // but to keep the 2D hist and compatibility, we can put to a 2D if needed, but since context is WebGL, the draw is on canvas.
-    // For hist, use the u8.
-    const hctx = histC.getContext('2d');
-    hctx.fillStyle = '#111'; hctx.fillRect(0,0,256,70);
-    const hst = eng.computeHistogram ? eng.computeHistogram(u8) : {l: new Uint32Array(256)};
-    // simple draw hist
-    const maxv = Math.max(1, ...hst.l);
-    hctx.strokeStyle = '#0f0';
-    hctx.beginPath();
-    for (let x=0; x<256; x++) {
-      const y = (hst.l[x] / maxv) * 68;
-      if (x===0) hctx.moveTo(x, 69-y); else hctx.lineTo(x, 69-y);
-    }
-    hctx.stroke();
-
-    updateReadouts();
-    return true;
+  // Internal helper: pack a decoded final frame's rgba8 pixels into a tight
+  // Uint8ClampedArray for canvas / LRU use.
+  function packFramePixels(frame) {
+    const px = frame.pixels;
+    if (px instanceof Uint8ClampedArray) return px;
+    if (px instanceof Uint8Array) return new Uint8ClampedArray(px.buffer, px.byteOffset, px.byteLength);
+    return new Uint8ClampedArray(px);
   }
 
   function ensureDOM() {
@@ -289,14 +141,15 @@ void main() {
           <button id="plb-prev">‹</button>
           <span id="plb-title"></span>
           <span id="plb-level"></span>
-          <span id="plb-zoom" style="margin-left:auto;">100%</span>
+          <span id="plb-zoom" data-zoom-pct="100" style="margin-left:auto;">100%</span>
           <button id="plb-zoom-out">-</button>
           <button id="plb-zoom-in">+</button>
           <button id="plb-reset-zoom">1:1</button>
           <button id="plb-next">›</button>
-          <label style="margin-left:12px;font-size:10px;opacity:0.7;" title="16-bit (M3): decode 16-bit level → WebGL float texture + shader FilterEngine (matrix + tone for shadows/highlights headroom) → FS dither shader → 8-bit. Toggle for effect (JS fallback slow; WebGL fast). Source 16-bit data untouched.">
+          <label style="margin-left:12px;font-size:10px;opacity:0.7;" title="16-bit (M3): decode 16-bit level / ROI -> WebGL float texture + shader colour-matrix (buildColorMatrix) + tone -> Floyd-Steinberg dither -> 8-bit display. Source 16-bit data untouched.">
             <input id="plb-16bit" type="checkbox"> 16-bit (M3)
           </label>
+          <button id="plb-export-roi" title="Export current viewport ROI as 16-bit JXL">Export ROI</button>
         </div>
         <canvas id="plb-canvas" width="${VIEW_W}" height="${VIEW_H}" style="border:1px solid #333;image-rendering:pixelated;cursor:grab;"></canvas>
         <canvas id="plb-hist" width="256" height="70" style="border:1px solid #333;display:block;margin-top:4px;"></canvas>
@@ -308,16 +161,10 @@ void main() {
         </div>
       </div>`;
 
-    document.body.appendChild(modal);
+    (rootEl || document.body).appendChild(modal);
 
     canvas = modal.querySelector('#plb-canvas');
     histC = modal.querySelector('#plb-hist');
-
-    // WebGL2 for 16-bit (M3) float + shader dither path. Falls back to JS if unavailable.
-    gl = canvas.getContext('webgl2', { alpha: true, antialias: false });
-    if (!gl) {
-      log('WebGL2 not available; 16-bit uses slow JS path');
-    }
 
     modal.querySelector('#plb-close').onclick = close;
     modal.onclick = (e) => { if (e.target === modal) close(); };
@@ -333,16 +180,19 @@ void main() {
     if (prev) prev.onclick = () => navigate(-1);
     if (next) next.onclick = () => navigate(1);
 
-    // 16-bit path (M3, wired for demo even if slower)
+    // 16-bit (M3) toggle
     const sixteen = modal.querySelector('#plb-16bit');
     if (sixteen) {
       sixteen.disabled = false;
-      sixteen.title = '16-bit decode (rgba16) + float adjust (JS for demo) + dither to 8-bit canvas. Slower than 8-bit matrix path. Shows full headroom for shadows/highlights on high-DR RAW. 16-bit source data integrity preserved (M2 never mutates the pyramid levels).';
       sixteen.onchange = () => {
         is16bitMode = sixteen.checked;
         reloadCurrentLevelForMode().catch(e => console.error('16bit reload', e));
       };
     }
+
+    // export current viewport ROI as a 16-bit JXL
+    const exp = modal.querySelector('#plb-export-roi');
+    if (exp) exp.onclick = () => { void exportRoi(); };
 
     // pan
     const cvs = canvas;
@@ -366,7 +216,7 @@ void main() {
     for (const p of APPROVED_LIGHTBOX_PRESETS) {
       const b = document.createElement('button');
       b.textContent = p; b.style.fontSize = '10px';
-      b.onclick = () => { eng.setPreset(p); reapplyAndRedraw(); };
+      b.onclick = () => setPreset(p);
       pdiv.appendChild(b);
     }
 
@@ -378,12 +228,13 @@ void main() {
       row.innerHTML = `<label style="width:70px;">${k}</label><input type="range" min="-100" max="100" step="1" value="0"><span style="width:30px;text-align:right;">0</span>`;
       const inp = row.querySelector('input');
       const val = row.querySelector('span');
-      inp.oninput = () => { val.textContent = inp.value; eng.setParam(k, +inp.value); reapplyAndRedraw(); };
+      inp.oninput = () => { val.textContent = inp.value; setAdjustment(k, +inp.value); };
       sdiv.appendChild(row);
     }
 
     modal.querySelector('#plb-reset').onclick = () => {
       eng.reset();
+      for (const k of ADJUSTMENT_PARAMS) adjustments[k] = 0;
       sdiv.querySelectorAll('input').forEach(i => { i.value=0; i.nextElementSibling.textContent='0'; });
       reapplyAndRedraw();
     };
@@ -407,7 +258,11 @@ void main() {
   function updateReadouts() {
     if (!modal) return;
     const z = modal.querySelector('#plb-zoom');
-    if (z) z.textContent = Math.round(zoom * 100) + '%';
+    if (z) {
+      const pct = Math.round(zoom * 100);
+      z.textContent = pct + '%';
+      z.setAttribute('data-zoom-pct', String(pct)); // live zoom readout attribute
+    }
     const l = modal.querySelector('#plb-level');
     if (l && levelInfo) {
       const s = levelInfo.size || Math.max(levelInfo.w || 0, levelInfo.h || 0);
@@ -417,22 +272,27 @@ void main() {
     if (t) t.textContent = `${(item?.id || '').slice(0,12)} (${currentIdx+1}/${itemsList.length})`;
   }
 
+  // Pick candidate levels for the current display size, restricted to the
+  // active bit-depth mode, and (if it would be a monotonic upgrade) load it.
   async function reloadCurrentLevelForMode() {
     if (!item || !levelInfo) return;
-    // re-pick a level for current display size, preferring the mode's bit depth
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
     const needed = Math.max(VIEW_W, VIEW_H) * zoom * dpr;
-    let cands = item.levels || [];
+    const cands = candidateLevels();
+    const targetLevel = pickLevelForTarget(cands, needed) || cands[0] || levelInfo;
+    if (targetLevel) await loadLevel(targetLevel);
+  }
+
+  function candidateLevels() {
+    let cands = item?.levels || [];
     if (is16bitMode) {
       const has16 = cands.some(l => l.bitsPerSample === 16);
       if (has16) cands = cands.filter(l => l.bitsPerSample === 16 || !l.bitsPerSample);
     } else {
       cands = cands.filter(l => (l.bitsPerSample || 8) === 8);
     }
-    const targetLevel = chooseLevelForTarget(cands, 0, needed) || cands[0] || levelInfo;
-    if (targetLevel) {
-      await loadLevel(targetLevel);
-    }
+    if (cands.length === 0) cands = item?.levels || [];
+    return cands;
   }
 
   function clampPan() {
@@ -444,19 +304,6 @@ void main() {
     const maxY = Math.max(0, (imgH - VIEW_H)/2 + slack);
     panX = Math.max(-maxX, Math.min(maxX, panX));
     panY = Math.max(-maxY, Math.min(maxY, panY));
-  }
-
-  // Basic dither for demo 16-bit path (real M3 uses better FS/WebGL).
-  // Direct quant for speed; artifacts possible but sufficient to see headroom effect.
-  function ditherFloatToU8(f, w, h) {
-    const out = new Uint8ClampedArray(w * h * 4);
-    for (let i = 0; i < f.length; i += 4) {
-      out[i]   = clamp(Math.round(f[i] * 255), 0, 255);
-      out[i+1] = clamp(Math.round(f[i+1] * 255), 0, 255);
-      out[i+2] = clamp(Math.round(f[i+2] * 255), 0, 255);
-      out[i+3] = 255;
-    }
-    return out;
   }
 
   function changeZoom(f) {
@@ -473,29 +320,72 @@ void main() {
 
   function maybeAutoUpgrade() {
     if (!item?.levels || !levelInfo) return;
-    const needed = Math.max(VIEW_W, VIEW_H) * zoom * (window.devicePixelRatio || 1);
-    let cands = item.levels || [];
-    if (is16bitMode) {
-      const has16 = cands.some(l => l.bitsPerSample === 16);
-      if (has16) cands = cands.filter(l => l.bitsPerSample === 16);
-    } else {
-      cands = cands.filter(l => (l.bitsPerSample || 8) === 8);
-    }
-    if (cands.length === 0) cands = item.levels || [];
-    const up = chooseLevelForTarget(cands, levelInfo.size || levelInfo.w || 0, needed);
-    if (up && up.contenthash !== levelInfo.contenthash) {
+    const needed = Math.max(VIEW_W, VIEW_H) * zoom * ((typeof window !== 'undefined' && window.devicePixelRatio) || 1);
+    const cands = candidateLevels();
+    const up = pickLevelForTarget(cands, needed);
+    // Monotonic: only upgrade to a strictly larger level (shared predicate).
+    if (up && up.contenthash !== levelInfo.contenthash && shouldUpgrade(levelInfo, up)) {
       loadLevel(up).catch(()=>{});
     }
   }
 
-  async function loadLevel(entry) {
-    if (!entry || !item) return;
-    const use16 = is16bitMode;
-    log?.(`plb load ${entry.size || entry.w} ch=${entry.contenthash.slice(0,8)} ${use16 ? '16bit' : '8bit'}`);
+  // Viewport region (in level pixel space) currently visible, for tiled ROI decode + export.
+  function viewportRegion() {
+    if (!levelInfo) return { x: 0, y: 0, w: VIEW_W, h: VIEW_H };
+    const lw = levelInfo.w || VIEW_W;
+    const lh = levelInfo.h || VIEW_H;
+    // Map canvas (0..VIEW) back through pan/zoom to level pixel coords.
+    const x0 = Math.max(0, Math.floor((-panX) / zoom + lw / 2 - (VIEW_W / 2) / zoom));
+    const y0 = Math.max(0, Math.floor((-panY) / zoom + lh / 2 - (VIEW_H / 2) / zoom));
+    const w = Math.min(lw - x0, Math.ceil(VIEW_W / zoom));
+    const h = Math.min(lh - y0, Math.ceil(VIEW_H / zoom));
+    return { x: x0, y: y0, w: Math.max(1, w), h: Math.max(1, h) };
+  }
 
+  async function loadLevel(level) {
+    if (!level || !item) return;
+    const use16 = is16bitMode;
+    log?.(`plb load ${level.size || level.w} ch=${level.contenthash.slice(0,8)} ${use16 ? '16bit' : '8bit'}${level.tiled ? ' tiled' : ''}`);
+
+    const entry = level;
     const bytes = await getLevelBytes(entry.contenthash);
     if (!ctx) throw new Error('no ctx for decode');
 
+    // --- Tiled level: decode only the visible ROI and render it. The bit depth
+    // follows the active mode toggle (rgba16 packed bytes drive the WebGL HDR
+    // pipeline; rgba8 is the fast preview). Avoids decoding the whole tiled mip. ---
+    if (level.tiled) {
+      const region = clampRegionToLevel(viewportRegion(), entry);
+      const { pixels, width, height } = await decodePyramidRegion(bytes, {
+        // rgba16 packed bytes feed renderRgba16AdjustedToCanvas / export.
+        format: use16 ? 'rgba16' : 'rgba8',
+        region,
+      });
+      const bits = use16 ? 16 : 8;
+      levelRaw16 = use16 ? pixels : null;
+      levelPixels = use16 ? pixels : new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+      levelInfo = {
+        contenthash: entry.contenthash,
+        w: width,
+        h: height,
+        size: entry.size || Math.max(entry.w, entry.h),
+        bitsPerSample: bits,
+        tiled: true,
+        region,
+      };
+      offscreen = document.createElement('canvas');
+      offscreen.width = width;
+      offscreen.height = height;
+      reapplyToOffscreen();
+      startCrossfade();
+      redraw();
+      updateReadouts();
+      return;
+    }
+
+    // --- Non-tiled: full level decode through the shared scheduler context. ---
+    // 8-bit display uses rgba8; the 16-bit HDR display toggle uses rgbaf32 so the
+    // WebGL float pipeline gets linear floats. (Tiled ROI export uses rgba16; see above.)
     const format = use16 ? 'rgbaf32' : 'rgba8';
     const session = ctx.decode({
       format,
@@ -520,6 +410,7 @@ void main() {
       raw = packFramePixels(last);
     }
     levelPixels = raw;
+    levelRaw16 = null;
     levelInfo = {
       contenthash: entry.contenthash,
       w: last.info?.width || entry.w,
@@ -532,8 +423,28 @@ void main() {
     offscreen.width = levelInfo.w;
     offscreen.height = levelInfo.h;
     reapplyToOffscreen();
+    startCrossfade();
+    redraw();
+    updateReadouts();
 
-    // crossfade
+    if (!use16) {
+      lruSet(entry.contenthash, raw, levelInfo.w, levelInfo.h, levelInfo.size);
+    }
+  }
+
+  function clampRegionToLevel(region, entry) {
+    const lw = entry.w || region.w;
+    const lh = entry.h || region.h;
+    const x = Math.max(0, Math.min(region.x, Math.max(0, lw - 1)));
+    const y = Math.max(0, Math.min(region.y, Math.max(0, lh - 1)));
+    return {
+      x, y,
+      w: Math.max(1, Math.min(region.w, lw - x)),
+      h: Math.max(1, Math.min(region.h, lh - y)),
+    };
+  }
+
+  function startCrossfade() {
     crossfade = 1.0;
     const st = performance.now();
     const d = 180;
@@ -545,34 +456,39 @@ void main() {
       else { crossfade = 0; redraw(); }
     };
     requestAnimationFrame(step);
-
-    if (zoom > 1) { /* keep center */ }
-    redraw();
-    updateReadouts();
-
-    if (!use16) {
-      lruSet(entry.contenthash, raw, levelInfo.w, levelInfo.h, levelInfo.size);
-    }
   }
 
+  // Build the FilterEngine matrix preview onto the offscreen canvas.
+  // 16-bit (rgbaf32 / packed rgba16) -> WebGL float adjust + dither.
+  // 8-bit -> FilterEngine.applyToImageData colour matrix.
   function reapplyToOffscreen() {
     if (!offscreen || !levelPixels || !eng) return;
-    if (gl && levelInfo && levelInfo.bitsPerSample === 16) {
-      // WebGL path handles adjust + dither on redraw using levelPixels texture; no CPU offscreen needed
+
+    if (levelInfo && levelInfo.bitsPerSample === 16) {
+      // 16-bit HDR path: render via WebGL float pipeline using buildColorMatrix.
+      const preset = eng.getPreset();
+      const adj = clampAdjustments(adjustments);
+      if (levelRaw16 && canUseWebGL16()) {
+        // packed rgba16 bytes -> WebGL adjust (matrix from buildColorMatrix) -> dither -> canvas
+        renderRgba16AdjustedToCanvas(levelRaw16, levelInfo.w, levelInfo.h, offscreen, preset, adj);
+        return;
+      }
+      // rgbaf32 (or no-webgl) fallback: pack floats to rgba16, then WebGL/CPU adjust.
+      const f = levelPixels; // Float32Array 0..1
+      const packed = new Uint16Array(levelInfo.w * levelInfo.h * 4);
+      for (let i = 0; i < packed.length; i++) {
+        packed[i] = Math.min(65535, Math.max(0, Math.round((f[i] ?? 0) * 65535)));
+      }
+      renderRgba16AdjustedToCanvas(
+        new Uint8Array(packed.buffer), levelInfo.w, levelInfo.h, offscreen, preset, adj);
       return;
     }
-    if (levelInfo && levelInfo.bitsPerSample === 16) {
-      // JS fallback 16-bit
-      const f = new Float32Array(levelPixels.length);
-      for (let i = 0; i < levelPixels.length; i++) f[i] = levelPixels[i] / 65535.0;
-      const adjF = eng.applyFloat(f, levelInfo.w, levelInfo.h);
-      const u8 = ditherFloatToU8(adjF, levelInfo.w, levelInfo.h);
-      offscreen.getContext('2d').putImageData(new ImageData(u8, levelInfo.w, levelInfo.h), 0, 0);
-    } else {
-      const src = new ImageData(new Uint8ClampedArray(levelPixels), offscreen.width, offscreen.height);
-      const adj = eng.applyToImageData(src);
-      offscreen.getContext('2d').putImageData(adj, 0, 0);
-    }
+
+    // 8-bit colour-matrix preview (FilterEngine). buildColorMatrix gives the same
+    // preset/adjustment matrix used by the HDR path, keeping the two consistent.
+    const src = new ImageData(new Uint8ClampedArray(levelPixels), offscreen.width, offscreen.height);
+    const adj = eng.applyToImageData(src);
+    offscreen.getContext('2d').putImageData(adj, 0, 0);
   }
 
   function reapplyAndRedraw() {
@@ -583,14 +499,6 @@ void main() {
   function redraw() {
     if (!canvas || !eng || !histC) return;
 
-    // Prefer WebGL for 16-bit (and 8-bit when available): float texture + shader adjust + shader dither
-    if (gl && levelInfo && levelPixels) {
-      if (renderGL()) {
-        return;
-      }
-    }
-
-    // 2D fallback (no gl)
     const c2 = canvas.getContext('2d', {alpha: true});
     if (!c2) return;
     c2.fillStyle = '#111';
@@ -603,13 +511,9 @@ void main() {
       if (crossfade > 0) c2.globalAlpha = 1 - crossfade;
       c2.drawImage(offscreen, 0, 0);
       c2.restore();
-    } else if (levelPixels) {
-      const src = new ImageData(new Uint8ClampedArray(levelPixels), VIEW_W, VIEW_H);
-      const adj = eng.applyToImageData(src);
-      c2.putImageData(adj, 0, 0);
     }
 
-    // visible screen histogram (readback)
+    // visible-screen histogram (readback)
     const h2 = histC.getContext('2d');
     h2.fillStyle = '#111'; h2.fillRect(0,0,256,70);
     try {
@@ -640,22 +544,11 @@ void main() {
     updateReadouts();
   }
 
-  function clampPan() { /* same as above, inlined for module */ 
-    if (!levelInfo || zoom <= 0) return;
-    const iw = (levelInfo.w || VIEW_W) * zoom;
-    const ih = (levelInfo.h || VIEW_H) * zoom;
-    const sl = 80;
-    const mx = Math.max(0, (iw - VIEW_W)/2 + sl);
-    const my = Math.max(0, (ih - VIEW_H)/2 + sl);
-    panX = Math.max(-mx, Math.min(mx, panX));
-    panY = Math.max(-my, Math.min(my, panY));
-  }
-
   async function upgradeLevel() {
     if (!item?.levels?.length || !levelInfo) return;
-    const need = Math.max(VIEW_W, VIEW_H) * zoom * (window.devicePixelRatio || 1) * 1.1;
-    const up = chooseLevelForTarget(item.levels, levelInfo.size || levelInfo.w || 0, need);
-    if (up && up.contenthash !== levelInfo.contenthash) {
+    const need = Math.max(VIEW_W, VIEW_H) * zoom * ((typeof window !== 'undefined' && window.devicePixelRatio) || 1) * 1.1;
+    const up = pickLevelForTarget(candidateLevels(), need);
+    if (up && up.contenthash !== levelInfo.contenthash && shouldUpgrade(levelInfo, up)) {
       await loadLevel(up);
     }
   }
@@ -664,7 +557,7 @@ void main() {
     if (!itemsList.length) return;
     const ni = (currentIdx + d + itemsList.length) % itemsList.length;
     if (ni === currentIdx) return;
-    levelPixels = null; offscreen = null; levelInfo = null;
+    levelPixels = null; offscreen = null; levelInfo = null; levelRaw16 = null;
     open(itemsList, ni);
   }
 
@@ -676,7 +569,7 @@ void main() {
       if (!niItem || ni === cidx) return;
       (async () => {
         let lv = niItem.l0 ? {contenthash: niItem.l0.contenthash, w:niItem.l0.w, h:niItem.l0.h, size: Math.max(niItem.l0.w,niItem.l0.h)} : (niItem.levels && niItem.levels[0]);
-        if (!lv || lruGet(lv.contenthash)) return;
+        if (!lv || lv.tiled || lruGet(lv.contenthash)) return;
         try {
           const b = await getLevelBytes(lv.contenthash);
           const s = ctx.decode({format:'rgba8', sourceKey:lv.contenthash, priority:'near', emitEveryPass:false, progressionTarget:'final'});
@@ -703,64 +596,76 @@ void main() {
     }
   }
 
-  async function open(allItems, startIdx = 0) {
+  // Normalize what the gallery hands us. The gallery calls:
+  //   open(imageId, { contenthash, w, h, tiled })   (S2 image-store shape)
+  // We also still accept open(itemsArray, startIdx) and open(itemObj).
+  function normalizeOpenArgs(a, b) {
+    if (typeof a === 'string') {
+      const l0 = (b && typeof b === 'object') ? b : null;
+      const it = { id: a, levels: [] };
+      if (l0 && l0.contenthash) {
+        it.l0 = { contenthash: l0.contenthash, w: l0.w, h: l0.h, size: Math.max(l0.w || 0, l0.h || 0), tiled: !!l0.tiled };
+      }
+      return { items: [it], startIdx: 0 };
+    }
+    if (Array.isArray(a)) return { items: a, startIdx: b | 0 };
+    return { items: [a], startIdx: 0 };
+  }
+
+  async function open(a, b = 0) {
     ensureDOM();
-    itemsList = Array.isArray(allItems) ? allItems : [allItems];
+    const { items, startIdx } = normalizeOpenArgs(a, b);
+    itemsList = items;
     currentIdx = startIdx | 0;
     item = itemsList[currentIdx];
     if (!item) return;
 
     eng = createFilterEngine(LightboxPreset.NONE);
-    zoom = 1; panX = 0; panY = 0; crossfade = 0; levelPixels = null; offscreen = null; levelInfo = null;
+    for (const k of ADJUSTMENT_PARAMS) adjustments[k] = 0;
+    zoom = 1; panX = 0; panY = 0; crossfade = 0;
+    levelPixels = null; offscreen = null; levelInfo = null; levelRaw16 = null;
 
     modal.style.display = 'flex';
+    // The modal is appended INTO rootEl (the host, e.g. #pyramid-lightbox), which
+    // ships with the `hidden` attribute. Revealing only the inner modal leaves the
+    // hidden host at display:none, so un-hide the host too. close() re-hides it.
+    if (rootEl) rootEl.removeAttribute('hidden');
     updateTitle();
     const sixteen = modal ? modal.querySelector('#plb-16bit') : null;
     if (sixteen) sixteen.checked = is16bitMode;
 
-    // force manifest
-    if ((!item.levels || item.levels.length < 2) && item.id && getManifest) {
+    // Acquire the full manifest (levels) via the image store.
+    if ((!item.levels || item.levels.length < 2) && item.id) {
       try {
         const m = await getManifest(item.id);
-        item.levels = m.levels || item.levels || [];
-      } catch (e) {}
+        // Manifest levels carry w/h/contenthash/bitsPerSample/tiled.
+        item.levels = (m.levels || item.levels || []).map(l => ({
+          ...l,
+          size: l.size ?? Math.max(l.w || 0, l.h || 0),
+        }));
+      } catch (e) { /* manifest may be absent in tests/dev */ }
     }
 
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
     const tgt = Math.max(VIEW_W, VIEW_H) * dpr;
 
     let init = null;
     if (item.levels?.length) {
-      init = chooseLevelForTarget(item.levels, 0, tgt) || item.levels[0];
+      init = pickLevelForTarget(candidateLevels(), tgt) || item.levels[0];
     } else if (item.l0) {
-      init = {contenthash: item.l0.contenthash, w: item.l0.w, h: item.l0.h, size: Math.max(item.l0.w, item.l0.h)};
+      init = {contenthash: item.l0.contenthash, w: item.l0.w, h: item.l0.h, size: item.l0.size || Math.max(item.l0.w, item.l0.h), tiled: item.l0.tiled};
     }
 
     let seeded = false;
 
-    // LRU first
-    if (init) {
+    // LRU first (8-bit decoded levels only).
+    if (init && !init.tiled && !is16bitMode) {
       const hit = lruGet(init.contenthash);
       if (hit) {
         levelPixels = new Uint8ClampedArray(hit.pixels);
-        levelInfo = {contenthash: init.contenthash, w: hit.w, h: hit.h, size: hit.size};
+        levelInfo = {contenthash: init.contenthash, w: hit.w, h: hit.h, size: hit.size, bitsPerSample: 8};
         offscreen = document.createElement('canvas');
         offscreen.width = hit.w; offscreen.height = hit.h;
-        reapplyToOffscreen();
-        seeded = true;
-      }
-    }
-
-    // Seed from the grid card's currently painted canvas (the cached thumbnail)
-    if (!seeded) {
-      const srcC = item.c1 || (item.card && item.card.querySelector('canvas'));
-      if (srcC && init) {
-        const c2d = srcC.getContext('2d');
-        const data = c2d.getImageData(0,0,srcC.width, srcC.height).data;
-        levelPixels = new Uint8ClampedArray(data);
-        levelInfo = init;
-        offscreen = document.createElement('canvas');
-        offscreen.width = srcC.width; offscreen.height = srcC.height;
         reapplyToOffscreen();
         seeded = true;
       }
@@ -770,7 +675,7 @@ void main() {
       await loadLevel(init);
     } else if (!seeded) {
       levelPixels = new Uint8ClampedArray(VIEW_W * VIEW_H * 4);
-      levelInfo = {w: VIEW_W, h: VIEW_H, size: Math.max(VIEW_W, VIEW_H), contenthash: 'fallback'};
+      levelInfo = {w: VIEW_W, h: VIEW_H, size: Math.max(VIEW_W, VIEW_H), contenthash: 'fallback', bitsPerSample: 8};
       offscreen = document.createElement('canvas');
       offscreen.width = VIEW_W; offscreen.height = VIEW_H;
       reapplyToOffscreen();
@@ -785,60 +690,104 @@ void main() {
 
   function close() {
     if (modal) modal.style.display = 'none';
+    if (rootEl) rootEl.setAttribute('hidden', '');
     // keep LRU and last state for monotonicity on re-open
   }
 
-  function redraw() { /* the redraw impl from before, using module state */ 
-    // (implementation identical to previous inline version, using the closed-over vars)
-    if (!canvas || !eng || !histC) return;
-    const c2d = canvas.getContext('2d', {alpha:true});
-    c2d.fillStyle = '#111';
-    c2d.fillRect(0,0,VIEW_W, VIEW_H);
+  // --- Public preset / adjustment API used by pyramid-gallery.js + buildSliders ---
 
-    if (offscreen && levelPixels) {
-      c2d.save();
-      c2d.translate(panX, panY);
-      c2d.scale(zoom, zoom);
-      if (crossfade > 0) c2d.globalAlpha = 1 - crossfade;
-      c2d.drawImage(offscreen, 0, 0);
-      c2d.restore();
-    }
-
-    // visible hist
-    const h2 = histC.getContext('2d');
-    h2.fillStyle = '#111'; h2.fillRect(0,0,256,70);
-    try {
-      const vd = c2d.getImageData(0,0,VIEW_W,VIEW_H);
-      const hs = eng.computeHistogram(vd.data);
-      const mv = Math.max(1, ...hs.l);
-      h2.strokeStyle = '#0f0'; h2.beginPath();
-      for (let x=0; x<256; x++) {
-        const y = (hs.l[x]/mv)*68;
-        if (x===0) h2.moveTo(x,69-y); else h2.lineTo(x,69-y);
-      }
-      h2.stroke();
-    } catch(e) {
-      if (offscreen) {
-        const o2 = offscreen.getContext('2d');
-        const id = o2.getImageData(0,0,offscreen.width,offscreen.height);
-        const hs = eng.computeHistogram(id.data);
-        const mv = Math.max(1, ...hs.l);
-        h2.strokeStyle = '#0f0'; h2.beginPath();
-        for (let x=0; x<256; x++) {
-          const y = (hs.l[x]/mv)*68;
-          if (x===0) h2.moveTo(x,69-y); else h2.lineTo(x,69-y);
-        }
-        h2.stroke();
-      }
-    }
-    updateReadouts();
+  function setPreset(name) {
+    if (!eng) eng = createFilterEngine(LightboxPreset.NONE);
+    eng.setPreset(name);
+    reapplyAndRedraw();
   }
 
-  // expose minimal API
+  function setAdjustment(key, value) {
+    if (!eng) eng = createFilterEngine(LightboxPreset.NONE);
+    if (ADJUSTMENT_PARAMS.includes(key)) {
+      adjustments[key] = value;
+      eng.setParam(key, value);
+    }
+    reapplyAndRedraw();
+  }
+
+  // --- ROI export: decode the current viewport ROI as rgba16, run the WebGL
+  // adjust for export, and encode a 16-bit JXL via the shared ctx.encode path. ---
+
+  /**
+   * Encode packed rgba16 pixels to a 16-bit JXL through the shared encode session
+   * (same path as web/main.js encodeJxlSession). Returns the encoded Uint8Array.
+   * @param {Uint16Array} rgba16  packed RGBA, 4 channels, 16-bit
+   * @param {number} width
+   * @param {number} height
+   * @param {{ quality?: number; effort?: number; lossless?: boolean }} [opts]
+   */
+  async function encodeRgba16(rgba16, width, height, opts = {}) {
+    const lossless = !!opts.lossless;
+    const session = ctx.encode({
+      format: 'rgba16',
+      width,
+      height,
+      hasAlpha: true,
+      distance: lossless ? 0 : null,
+      quality: lossless ? null : (opts.quality ?? 90),
+      effort: opts.effort ?? 7,
+      priority: 'visible',
+    });
+    const buf = rgba16.buffer.byteLength === rgba16.byteLength
+      ? rgba16.buffer
+      : rgba16.buffer.slice(rgba16.byteOffset, rgba16.byteOffset + rgba16.byteLength);
+    await session.pushPixels(buf);
+    await session.finish();
+    const parts = [];
+    for await (const chunk of session.chunks()) {
+      parts.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+    }
+    const total = parts.reduce((n, a) => n + a.byteLength, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.byteLength; }
+    return out;
+  }
+
+  /**
+   * Export the current viewport ROI as a 16-bit JXL. Decodes the ROI fresh from
+   * the level bytes in rgba16 (tiled or whole, via decodePyramidRegion), applies
+   * the active preset/adjustments through the WebGL float export path
+   * (adjustedRgba16ForExport), and encodes via encodeRgba16.
+   * @returns {Promise<{ bytes: Uint8Array, width: number, height: number } | null>}
+   */
+  async function exportRoi() {
+    if (!item || !levelInfo || !levelInfo.contenthash || levelInfo.contenthash === 'fallback') return null;
+    const region = clampRegionToLevel(viewportRegion(), levelInfo);
+    const srcBytes = await getLevelBytes(levelInfo.contenthash);
+
+    // rgba16 ROI decode (region-only; never the whole frame).
+    const { pixels, width, height } = await decodePyramidRegion(srcBytes, {
+      format: 'rgba16',
+      region,
+    });
+
+    // Apply current preset + adjustments in WebGL float space -> packed rgba16.
+    const preset = eng ? eng.getPreset() : LightboxPreset.NONE;
+    const adj = clampAdjustments(adjustments);
+    // buildColorMatrix here documents the exact matrix the export path applies.
+    void buildColorMatrix(preset, adj);
+    const adjusted = adjustedRgba16ForExport(pixels, width, height, preset, adj);
+
+    const bytes = await encodeRgba16(adjusted, width, height, { quality: 95 });
+    log?.(`plb exportRoi ${width}x${height} -> ${bytes.byteLength} bytes`);
+    return { bytes, width, height };
+  }
+
+  // expose API (gallery uses open/close/setPreset/setAdjustment; exportRoi/encodeRgba16 for ROI export)
   return {
     open,
     close,
-    // for grid wiring if needed
-    _internal: { /* for debug only */ }
+    setPreset,
+    setAdjustment,
+    exportRoi,
+    encodeRgba16,
+    _internal: { /* for debug only */ },
   };
 }

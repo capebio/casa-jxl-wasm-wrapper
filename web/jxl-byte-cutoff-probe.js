@@ -54,12 +54,6 @@ export function buildByteCutoffPlan(totalBytes, options = DEFAULT_BYTE_CUTOFFS, 
   }
 
   plan.sort((a, b) => a.bytes - b.bytes);
-  // Snap each cutoff to the nearest transport chunk boundary for realistic progressive checkpoints
-  plan = plan.map((entry) => {
-    const chunkSize = config.minSpacingBytes || 4096;
-    const snappedBytes = Math.round(entry.bytes / chunkSize) * chunkSize;
-    return { ...entry, bytes: Math.min(snappedBytes, total) };
-  });
   const bounded = plan.slice(0, Math.max(0, config.maxSteps));
   const finalPlan = bounded.map((entry) => Object.freeze({
     ...entry,

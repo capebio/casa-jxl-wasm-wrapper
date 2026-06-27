@@ -107,14 +107,10 @@ function combineParams(base, params) {
   const mid = 0.5 * (1 - ct);
   off[0] += mid; off[1] += mid; off[2] += mid;
 
-  // saturation: reduce chroma toward luma
+  // saturation: applied once per-pixel in apply() (luma-based chroma scale).
+  // We deliberately do NOT bake it into the matrix here — a partial m[0]-only
+  // bake was both asymmetric (red row only) and double-applied with apply().
   const sat = 1 + p.saturation;
-  const lumR = 0.299, lumG = 0.587, lumB = 0.114;
-  const s = sat;
-  // simple: boost off-luma
-  m[0] = m[0] * 0.5 + lumR * (1-0.5) * s + (1-s)*lumR; // rough
-  // Better practical: keep matrix but post-process chroma
-  // We handle extra in apply for sat, clarity, dehaze, shadows etc.
 
   return { m, off, sat: clamp(sat, 0, 2), ...p };
 }
@@ -208,15 +204,27 @@ export function createFilterEngine() {
         nr += mid; ng += mid; nb += mid;
       }
 
-      // cheap sharpness (unsharp via local contrast, 1px approx)
-      // For real would need full unsharp mask; here a cheap highpass on luma diff
-      if (sharpAmt > 0 && i > 4 && i < rgba.length - 4) {
-        // sample neighbors (very rough, skips edges)
+      // cheap sharpness (unsharp via horizontal local contrast, 1px approx)
+      // For real would need full unsharp mask; here a cheap highpass on luma diff.
+      // Respect row boundaries (use width) so we never sample across scanlines,
+      // and average only the in-row neighbours that actually exist (no `||`
+      // fallback — that would swallow legitimate black (0) neighbours).
+      if (sharpAmt > 0) {
         const y = luma(nr, ng, nb);
-        const yL = luma( (rgba[i-4]||r*255)/255 , (rgba[i-3]||g*255)/255 , (rgba[i-2]||b*255)/255 );
-        const yR = luma( (rgba[i+4]||r*255)/255 , (rgba[i+5]||g*255)/255 , (rgba[i+6]||b*255)/255 );
-        const edge = (y - (yL + yR) * 0.5) * sharpAmt;
-        nr += edge; ng += edge; nb += edge;
+        const col = (i >> 2) % width;
+        let neighSum = 0, neighN = 0;
+        if (col > 0) {
+          neighSum += luma(rgba[i - 4] / 255, rgba[i - 3] / 255, rgba[i - 2] / 255);
+          neighN++;
+        }
+        if (col < width - 1) {
+          neighSum += luma(rgba[i + 4] / 255, rgba[i + 5] / 255, rgba[i + 6] / 255);
+          neighN++;
+        }
+        if (neighN > 0) {
+          const edge = (y - neighSum / neighN) * sharpAmt;
+          nr += edge; ng += edge; nb += edge;
+        }
       }
 
       // clamp + to 8-bit

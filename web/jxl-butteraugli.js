@@ -21,6 +21,12 @@ const _sqrtLin = (() => {
 // Convert RGBA uint8 pixels → XYB float32 channels (allocation-free variant).
 // outX, outY, outB must be pre-allocated Float32Arrays of size n.
 export function pixelsToXybInto(pixels, n, outX, outY, outB) {
+    // Guard the stride invariant: the loop reads pixels[j..j+2] up to j=(n-1)*4,
+    // so pixels must hold at least n*4 bytes (RGBA stride). Reading past the end
+    // would silently yield undefined → NaN channels.
+    if (pixels.length < n * 4) {
+        throw new RangeError(`pixelsToXyb: pixels.length (${pixels.length}) < n*4 (${n * 4})`);
+    }
     for (let i = 0, j = 0; i < n; i++, j += 4) {
         const r = _sqrtLin[pixels[j]];
         const g = _sqrtLin[pixels[j + 1]];
@@ -254,11 +260,15 @@ export function computeInformationField(image, width, height) {
 // Returns a non-negative float; 0 = identical, ~0.5 = excellent, >1.5 = visible.
 // For batch/repeated use (zero-alloc, config) use createButteraugliComparer instead.
 export function computeButteraugliVsFinal(refXyb, testPixels, width, height) {
+    // Validate dimensions BEFORE dispatching to either backend so the WASM path
+    // is guarded identically to the JS path (was previously unchecked, passing
+    // mismatched buffers straight into native code).
+    const n = width * height;
+    if (!n || testPixels.length !== n * 4) return NaN;
+
     if (_backend.score) {
         return _backend.score(refXyb, testPixels, width, height);
     }
-    const n = width * height;
-    if (!n || testPixels.length !== n * 4) return NaN;
 
     const ref = prepRef(refXyb, width, height);
     let [tX, tY, tB] = pixelsToXyb(testPixels, n);
@@ -301,12 +311,15 @@ export function computeButteraugliApproxVsFinal(refXyb, testPixels, width, heigh
 
 // Multi-scale score on pre-converted XYB channel arrays.
 // Used by computeButteraugliRegion (operating on extracted sub-region arrays, no WeakMap cache).
-function _multiScaleScore(rX, rY, rB, tX, tY, tB, w, h) {
+function _multiScaleScore(rX, rY, rB, tX, tY, tB, w, h, mask0 = null) {
     const weights = [4, 2, 1];
     let total = 0;
     for (let s = 0; s < 3; s++) {
         const blurR = Math.max(1, Math.min(8, w >> 6));
-        const mask = boxBlur(rY, w, h, blurR);
+        // s=0 runs at full scale; the caller (computeButteraugliRegion) has already
+        // computed this exact blur (same rY/w/h/blurR) for the max-error scan, so reuse
+        // it instead of recomputing one full-resolution separable blur.
+        const mask = (s === 0 && mask0) ? mask0 : boxBlur(rY, w, h, blurR);
         total += scaleErr(mask, rX, rY, rB, tX, tY, tB, w, h) * weights[s];
         if (s < 2 && w > 1 && h > 1) {
             let nw, nh;
@@ -385,7 +398,7 @@ export function computeButteraugliRegion(refXyb, pixels, x, y, width, height, im
         }
     }
 
-    const score = _multiScaleScore(rX, rY, rB, tX, tY, tB, width, height);
+    const score = _multiScaleScore(rX, rY, rB, tX, tY, tB, width, height, mask);
     return { score, maxError, location: { x: x + maxPx, y: y + maxPy } };
 }
 

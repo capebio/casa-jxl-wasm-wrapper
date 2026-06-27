@@ -17,6 +17,25 @@ const resetBtn = document.getElementById('reset-adjust');
 const params = new URLSearchParams(location.search);
 if (params.get('gallery')) urlInput.value = params.get('gallery');
 
+/**
+ * Lightweight zero-dep index.json validator. Mirrors image-store validateManifest:
+ * throws on structural violation so bad/undefined l0/contenthash cannot flow into decode.
+ * @param {any} idx
+ */
+function validateIndex(idx) {
+  if (!idx || typeof idx !== 'object') throw new Error('index must be object');
+  if (!Array.isArray(idx.images)) throw new Error('index.images must be array');
+  for (const entry of idx.images) {
+    if (!entry || typeof entry !== 'object') throw new Error('index entry must be object');
+    if (typeof entry.imageId !== 'string' || entry.imageId.length === 0) throw new Error('index entry imageId required');
+    if (typeof entry.aspect !== 'number' || !(entry.aspect > 0)) throw new Error('index entry aspect must be positive number');
+    const l0 = entry.l0;
+    if (!l0 || typeof l0 !== 'object') throw new Error('index entry l0 required');
+    if (typeof l0.contenthash !== 'string' || l0.contenthash.length === 0) throw new Error('index entry l0 contenthash required');
+    if (typeof l0.w !== 'number' || typeof l0.h !== 'number' || l0.w <= 0 || l0.h <= 0) throw new Error('index entry l0 w/h must be positive');
+  }
+}
+
 const ctx = createBrowserContext();
 const cache = new JxlCacheBrowser({ memoryLimit: 128 * 1024 * 1024, persistentLimit: 512 * 1024 * 1024, persistent: true });
 await cache.init();
@@ -53,6 +72,7 @@ async function loadGallery(baseUrl) {
   const indexRes = await fetch(new URL('index.json', galleryBase));
   if (!indexRes.ok) throw new Error(`index.json ${indexRes.status}`);
   const index = await indexRes.json();
+  validateIndex(index);
 
   gridEl.replaceChildren();
   for (const entry of index.images) {
@@ -88,10 +108,14 @@ async function loadGallery(baseUrl) {
 
   for (const cell of gridEl.querySelectorAll('[data-image-id]')) {
     cell.addEventListener('click', () => {
-      const imageId = cell.dataset.imageId;
-      const entry = index.images.find((e) => e.imageId === imageId);
-      if (!entry) return;
-      void lightbox.open(imageId, { contenthash: entry.l0.contenthash, w: entry.l0.w, h: entry.l0.h, tiled: false });
+      try {
+        const imageId = cell.dataset.imageId;
+        const entry = indexByImageId.get(imageId);
+        if (!entry || !entry.l0) return;
+        void lightbox.open(imageId, { contenthash: entry.l0.contenthash, w: entry.l0.w, h: entry.l0.h, tiled: false });
+      } catch (err) {
+        console.error('lightbox open', err);
+      }
     });
   }
 

@@ -53,7 +53,8 @@
             <a class="home-bar-link" href="./jxl-progressive-paint.html">Progressive paint</a>
             <a class="home-bar-link" href="./jxl-single-progressive.html">Single progressive</a>
             <a class="home-bar-link" href="./jxl-progressive-gallery.html">Progressive gallery</a>
-            <a class="home-bar-link" href="./pyramid-gallery.html">Pyramid M1 grid (index + L0 + scheduler upgrades)</a>
+            <a class="home-bar-link" href="./pyramid-gallery.html">Pyramid gallery (M1 grid)</a>
+            <a class="home-bar-link" href="./pyramid-gallery/pyramid-gallery.html">Pyramid gallery (modular — tiled-pool grid + lightbox, in-browser verified; 16-bit HDR pending WASM rebuild)</a>
             <a class="home-bar-link" href="./jxl-crop-benchmark.html">Crop benchmark</a>
             <a class="home-bar-link" href="./jxl-preset-benchmark.html">Preset benchmark</a>
             <a class="home-bar-link" href="./jxl-encode-space.html">Encode Space</a>
@@ -437,6 +438,56 @@
                       <div id="lb-overlay-chips" class="lb-chip-group"></div>
                       <div id="lb-vignette-controls" hidden></div>
                       <div style="margin-top:8px;font-size:11px;color:#666">Ctrl+1–9 B&amp;W · Ctrl+0 clear</div>
+                    </div>
+                </div>
+                <!-- Tauri-parity M2 develop panel: CasaBio FilterEngine + 16-bit
+                     HDR path. Wired by createTauriParityLightbox() in
+                     tauri-parity-lightbox.js (queried off the #lightbox root).
+                     Constructs safely in the browser bench: invoke=null, the
+                     16-bit toggle stays hidden unless a Tauri pyramid/full-res
+                     source is present. -->
+                <div id="lb-panel-m2" class="lb-panel">
+                    <button class="lb-panel-btn" data-panel="m2" title="Develop (M2)">
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor">
+                            <path d="M3 3h12v2H3V3zm0 5h8v2H3V8zm0 5h12v2H3v-2z"/>
+                        </svg>
+                    </button>
+                    <div class="lb-panel-body" hidden>
+                      <div data-tauri-m2-panel hidden style="min-width:220px">
+                        <div style="font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Develop · M2</div>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px">
+                          Preset
+                          <select data-m2-preset style="flex:1;background:#222;color:#eee;border:1px solid #444;border-radius:4px;padding:2px 4px">
+                            <option value="NONE">None</option>
+                          </select>
+                        </label>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:8px" hidden>
+                          <input type="checkbox" data-toggle-16bit> 16-bit HDR
+                        </label>
+                        <div class="lb-m2-sliders" style="display:flex;flex-direction:column;gap:4px">
+                          <label style="display:flex;align-items:center;gap:6px;font-size:11px">Brightness
+                            <input type="range" data-m2="brightness" min="-100" max="100" value="0" step="1" style="flex:1"></label>
+                          <label style="display:flex;align-items:center;gap:6px;font-size:11px">Contrast
+                            <input type="range" data-m2="contrast" min="-100" max="100" value="0" step="1" style="flex:1"></label>
+                          <label style="display:flex;align-items:center;gap:6px;font-size:11px">Saturation
+                            <input type="range" data-m2="saturation" min="-100" max="100" value="0" step="1" style="flex:1"></label>
+                          <label style="display:flex;align-items:center;gap:6px;font-size:11px">Shadows
+                            <input type="range" data-m2="shadows" min="0" max="100" value="0" step="1" style="flex:1"></label>
+                          <label style="display:flex;align-items:center;gap:6px;font-size:11px">Highlights
+                            <input type="range" data-m2="highlights" min="-100" max="0" value="0" step="1" style="flex:1"></label>
+                          <label style="display:flex;align-items:center;gap:6px;font-size:11px">Clarity
+                            <input type="range" data-m2="clarity" min="0" max="100" value="0" step="1" style="flex:1"></label>
+                          <label style="display:flex;align-items:center;gap:6px;font-size:11px">Dehaze
+                            <input type="range" data-m2="dehaze" min="0" max="100" value="0" step="1" style="flex:1"></label>
+                          <label style="display:flex;align-items:center;gap:6px;font-size:11px">Sharpness
+                            <input type="range" data-m2="sharpness" min="0" max="100" value="0" step="1" style="flex:1"></label>
+                        </div>
+                        <canvas data-m2-hist width="220" height="64" style="width:220px;height:64px;display:block;margin-top:8px;background:#111"></canvas>
+                        <div style="display:flex;gap:6px;margin-top:8px">
+                          <button data-m2-reset class="lb-chip" style="font-size:11px;padding:2px 8px">Reset</button>
+                          <button data-export-roi class="lb-chip" style="font-size:11px;padding:2px 8px">Export ROI</button>
+                        </div>
+                      </div>
                     </div>
                 </div>
             </div>

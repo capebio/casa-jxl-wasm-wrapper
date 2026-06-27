@@ -1155,8 +1155,11 @@ async function loadRandomSources(count = MAX_BATCH_LIMIT) {
         const workers = Array.from({ length: Math.min(RANDOM_LOAD_CONCURRENCY, total) }, async () => {
             while (nextIndex < total && loadId === activeLoadId) {
                 const index = nextIndex++;
-                loaded[index] = await loadRandomFileSource();
+                const source = await loadRandomFileSource();
+                // Drop a stale result rather than writing it: a newer load (activeLoadId
+                // bumped) may have already taken over `loaded`/selectedSources.
                 if (loadId !== activeLoadId) return;
+                loaded[index] = source;
                 completed++;
                 batchStatus.textContent = `Loading Gobabeb files ${completed}/${total}...`;
                 selectionStatus.textContent = `Loaded ${completed}/${total} random Gobabeb files.`;
@@ -1632,11 +1635,13 @@ async function processOneSource(source, index, runId) {
         : source.width;
 
     let encodeSource = source;
+    let resizeMs = 0;
     if (needsResize) {
         const rt0 = performance.now();
         const resized = await resizeRgba(source.rgba, source.width, source.height, thumbW);
+        resizeMs = performance.now() - rt0;
         encodeSource = { ...source, ...resized };
-        dbgLog(`  resize → ${resized.width}×${resized.height} · ${fmtBytes(resized.rgba.byteLength)} rgba · ${fmtMs(performance.now() - rt0)}`);
+        dbgLog(`  resize → ${resized.width}×${resized.height} · ${fmtBytes(resized.rgba.byteLength)} rgba · ${fmtMs(resizeMs)}`);
     }
 
     let existingResult = null;
@@ -1655,6 +1660,9 @@ async function processOneSource(source, index, runId) {
                 dbgLog(`  session enc → ${sessionSource.width}×${sessionSource.height} · q=${getQuality()} effort=${getEffort()}`);
                 try {
                     existingResult = await runExistingSessionPipeline(sessionSource, 1);
+                    // A successful session encode clears any prior transient-failure latch
+                    // so one stall doesn't permanently bypass the session backend.
+                    sessionBackendBroken = false;
                 } catch (error) {
                     const msg = error?.message || String(error);
                     dbgLog(`  session stall`, msg, 'error');
@@ -1664,7 +1672,8 @@ async function processOneSource(source, index, runId) {
                     existingResult.fallback = 'wrapper';
                 }
             }
-            existingResult.totalMs = performance.now() - existingStartedAt;
+            existingResult.resizeMs = resizeMs;
+            existingResult.totalMs = (performance.now() - existingStartedAt) + resizeMs;
             existingResult.loadMs = source.loadMs ?? null;
             existingResult.firstPaintMs = null;
         }
@@ -1672,7 +1681,8 @@ async function processOneSource(source, index, runId) {
         if (currentMode === 'wrapper' || currentMode === 'compare' || currentMode === 'race') {
             const wrapperStartedAt = performance.now();
             wrapperResult = await runWrapperPipeline(encodeSource, 'wrapper');
-            wrapperResult.totalMs = performance.now() - wrapperStartedAt;
+            wrapperResult.resizeMs = resizeMs;
+            wrapperResult.totalMs = (performance.now() - wrapperStartedAt) + resizeMs;
             wrapperResult.loadMs = source.loadMs ?? null;
             wrapperResult.firstPaintMs = null;
         }

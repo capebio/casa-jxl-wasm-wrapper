@@ -38,7 +38,8 @@ test('shared chrome uses compact control sizing', () => {
     expect(wrapperCss).toContain('font-size: 24px;');
     expect(baseCss).toContain('font: 14px/1.4');
     expect(baseCss).toContain('padding: 6px 10px 8px;');
-    expect(casabioCss).toContain('padding: 3px 8px;');
+    // updated: .casabio-toggle padding bumped 3px 8px → 5px 14px in b648247b (casabio button fix); see casabio.css .casabio-toggle
+    expect(casabioCss).toContain('padding: 5px 14px;');
 });
 
 test('progressive page tracks transport iterations in script state', () => {

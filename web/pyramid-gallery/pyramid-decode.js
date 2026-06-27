@@ -13,13 +13,21 @@ export async function decodePyramidLevel(ctx, bytes, opts) {
   if (opts.tiled) {
     if (!opts.region) throw new Error('tiled decode requires a viewport region');
     const { decodeTiledViewportPooled } = await import('../../packages/jxl-pyramid/dist/tiled-decode-pool.js');
-    return decodeTiledViewportPooled(bytes, opts.region, {
+    // Forward the same contract fields as the non-tiled session branch so the tiled path
+    // is cancellable (signal), format-correct (rgba8/rgba16), and dedupe/priority-aware.
+    const tiled = await decodeTiledViewportPooled(bytes, opts.region, {
       parallel: true,
+      format: opts.format ?? 'rgba8',
+      priority: opts.priority ?? 'visible',
+      sourceKey: opts.contenthash,
+      signal: opts.signal ?? undefined,
       workerFactory: () => new Worker(
         new URL('../lightbox/tiled-decode-worker.js', import.meta.url),
         { type: 'module' },
       ),
     });
+    // Align to the session branch shape ({ pixels, width, height }).
+    return { pixels: tiled.pixels, width: tiled.width, height: tiled.height };
   }
 
   const session = ctx.decode({
@@ -44,14 +52,16 @@ export async function decodePyramidLevel(ctx, bytes, opts) {
   let rgba = null;
   let width = 0;
   let height = 0;
+  // jxl-session frames() yields frame events keyed by `stage` (header|dc|pass|final),
+  // NOT `type` — the terminal frame is stage === 'final'. (The facade decoder.events()
+  // used by decodePyramidRegion below is a different contract that keys on `type`.)
+  // Errors surface by frames() throwing, not as an event, so they propagate out of this loop.
   for await (const ev of session.frames()) {
-    if (ev.type === 'final') {
+    if (ev.stage === 'final') {
       // Preserve packed bytes for rgba16 (len = w*h*8); Uint8Array container passed through to webgl-pipeline / export.
       rgba = ev.pixels instanceof Uint8Array ? ev.pixels : new Uint8Array(ev.pixels);
       width = ev.info.width;
       height = ev.info.height;
-    } else if (ev.type === 'error') {
-      throw new Error(`${ev.code}: ${ev.message}`);
     }
   }
   await session.done();
@@ -67,8 +77,23 @@ export async function decodePyramidLevel(ctx, bytes, opts) {
  * @param {{ format?: 'rgba8'|'rgba16'; region: {x:number;y:number;w:number;h:number}; targetLongEdge?: number }} opts
  */
 export async function decodePyramidRegion(bytes, opts) {
-  const { createDecoder } = await import('@casabio/jxl-wasm');
   const format = opts.format ?? 'rgba8';
+
+  // Tiled levels are JXTC tile containers (magic 'JXTC' = 0x4A,0x58,0x54,0x43), not
+  // plain JXL bitstreams. The createDecoder path below cannot parse them ("JXL decode
+  // error: 1"); decode the requested region through the tile-container path instead
+  // (each overlapping tile is a standalone JXL). This is the same decode the tiled-pool
+  // worker runs, called directly for a single on-demand ROI (lightbox display + export).
+  if (bytes.length >= 4 && bytes[0] === 0x4A && bytes[1] === 0x58 && bytes[2] === 0x54 && bytes[3] === 0x43) {
+    if (!opts.region) throw new Error('tiled region decode requires a region');
+    const { decodeTileContainerRegionRgba8, decodeTileContainerRegionRgba16 } = await import('@casabio/jxl-wasm');
+    const fn = format === 'rgba16' ? decodeTileContainerRegionRgba16 : decodeTileContainerRegionRgba8;
+    const r = opts.region;
+    const { pixels, width, height } = await fn(bytes, { x: r.x, y: r.y, w: r.w, h: r.h });
+    return { pixels, width, height };
+  }
+
+  const { createDecoder } = await import('@casabio/jxl-wasm');
   const decoder = createDecoder({
     format,
     region: opts.region,
@@ -101,10 +126,18 @@ export async function decodePyramidRegion(bytes, opts) {
     }
   })();
 
-  await decoder.push(view);
-  await decoder.close();
-  await drain;
-  await decoder.dispose();
+  // dispose() must always run (handle leak otherwise); the drain rejection must always be
+  // awaited so push/close failures don't leave an unhandled rejection on the drain promise.
+  try {
+    await decoder.push(view);
+    await decoder.close();
+    await drain;
+  } finally {
+    // Swallow a late drain rejection here only to avoid an unhandledrejection; the original
+    // error (if any) still propagates from the awaited statements above.
+    drain.catch(() => {});
+    await decoder.dispose();
+  }
   if (!pixels) throw new Error('region decode produced no final frame');
   return { pixels, width, height };
 }

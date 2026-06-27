@@ -107,9 +107,16 @@ function logToPanel(level, args) {
     consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
 }
 
-console.log   = (...a) => { _log(...a);   logToPanel('log',   a); };
-console.warn  = (...a) => { _warn(...a);  logToPanel('warn',  a); };
-console.error = (...a) => { _error(...a); logToPanel('error', a); };
+// Only mirror console output into the in-page panel when this tool's console
+// output element is actually present, and only install the override once.
+// This keeps the override scoped to the encode-space page rather than
+// unconditionally clobbering the global console on import.
+if (consoleOutputEl && !console.__encodeSpacePatched) {
+    console.__encodeSpacePatched = true;
+    console.log   = (...a) => { _log(...a);   logToPanel('log',   a); };
+    console.warn  = (...a) => { _warn(...a);  logToPanel('warn',  a); };
+    console.error = (...a) => { _error(...a); logToPanel('error', a); };
+}
 
 btnConsole.addEventListener('click', () => {
     consolePanelOpen = !consolePanelOpen;
@@ -359,6 +366,10 @@ async function runSweep() {
                 const sizeKb = jxlBytes.byteLength / 1024;
                 const bpp    = calcBpp(jxlBytes.byteLength, imgW, imgH);
                 const bitmap = await decodeToImageBitmap(jxlBytes, imgW, imgH);
+                // The encode/decode above cannot be interrupted; if Stop was
+                // pressed while they ran, discard this stale cell rather than
+                // mutating the cache/matrix after abort.
+                if (signal.aborted) break;
                 const result = { bitmap, sizeKb, bpp, encodeMs };
                 cellCache.set(cellKey(effort, distance), result);
                 updateMatrixCell(effort, distance, result);

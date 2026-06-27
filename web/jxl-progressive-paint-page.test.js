@@ -35,7 +35,9 @@ test('progressive paint page streams encoder chunks into decoder instead of push
     expect(source).toContain('for await (const chunk of encoder.chunks())');
     expect(source).toContain('await streamIntoDecoder(decoder, jxlBytes, requestedPassCount);');
     expect(source).toContain('Streaming bytes…');
-    expect(source).toContain('await decoder.push(exactBuffer(jxlBytes));');
+    // updated: streamIntoDecoder restored true byte-stepping (commit 9622a314) — pushes per-step chunks
+    // via splitEncodedBytesIntoSteps, not a single full-buffer push. This matches the test's own title.
+    expect(source).toContain('await decoder.push(exactBuffer(step));');
     expect(source).toContain('await decoder.close();');
     expect(source).not.toContain('Pushing all bytes…');
     expect(source).toContain('rebuild jxl-wasm to enable true chunk streaming');
@@ -193,8 +195,9 @@ test('A3: thumbCanvases cleared on timeline reset', () => {
     expect(clearBody).toContain('thumbCanvases.clear()');
 });
 
-test('A4: stats gated behind STATS_ENABLED — analyzeProgressiveFrame not called unconditionally', () => {
-    expect(source).toContain('STATS_ENABLED');
+test('A4: stats gated behind statsEnabled — analyzeProgressiveFrame not called unconditionally', () => {
+    // updated: STATS_ENABLED back-compat alias removed (commit f56843e1); canonical flag is statsEnabled (?stats=1)
+    expect(source).toContain('statsEnabled');
     const paintPassIdx = source.indexOf('function paintPass(');
     const paintPassEnd = source.indexOf('\nfunction ', paintPassIdx + 1);
     const paintPassBody = paintPassEnd === -1 ? source.slice(paintPassIdx) : source.slice(paintPassIdx, paintPassEnd);
@@ -205,7 +208,8 @@ test('A4: stats gated behind STATS_ENABLED — analyzeProgressiveFrame not calle
 test('A4: per-pass dbgLog shows pass N · partial|final when stats off', () => {
     expect(source).toContain('partial');
     expect(source).toContain('final');
-    expect(source).toContain('STATS_ENABLED');
+    // updated: STATS_ENABLED alias removed (commit f56843e1); canonical flag is statsEnabled
+    expect(source).toContain('statsEnabled');
 });
 
 test('progressive paint prewarms and reports browser decode tier', () => {
@@ -215,13 +219,15 @@ test('progressive paint prewarms and reports browser decode tier', () => {
     expect(source).toContain('detectTier()');
 });
 
-test('progressive paint local decode pushes bytes once and gates probes behind toggles', () => {
+test('progressive paint local decode byte-steps the feed and gates probes behind toggles', () => {
+    // updated: streamIntoDecoder restored true byte-stepping (commit 9622a314) via splitEncodedBytesIntoSteps —
+    // it no longer pushes the whole buffer once. Assert the per-step push + step splitting it now uses.
     const streamIdx = source.indexOf('async function streamIntoDecoder(');
     const streamEnd = source.indexOf('\nfunction renderProgressiveComparison', streamIdx);
     const streamBody = source.slice(streamIdx, streamEnd);
-    expect(streamBody).toContain('await decoder.push(exactBuffer(jxlBytes));');
-    expect(streamBody).not.toContain('splitEncodedBytesIntoSteps');
-    expect(streamBody).not.toContain('for (let i = 0; i < streamSteps.length; i++)');
+    expect(streamBody).toContain('splitEncodedBytesIntoSteps(jxlBytes, stepCount)');
+    expect(streamBody).toContain('await decoder.push(exactBuffer(step));');
+    expect(streamBody).toContain('for (const step of steps)');
 
     expect(html).toContain('id="run-one-shot-comparison"');
     expect(html).toContain('id="run-byte-cutoff-probe"');
