@@ -144,6 +144,75 @@ test('duplicate progressive flush suppression is opt-in experiment only', () => 
   expect(bridge).toContain('last_progress_hash');
 });
 
+test('progressive paint-target knob is wired core -> C API -> bridge -> facade', () => {
+  const decFrameH = readFileSync(new URL('../../../external/libjxl-012/lib/jxl/dec_frame.h', import.meta.url), 'utf8');
+  const decodeCc = readFileSync(new URL('../../../external/libjxl-012/lib/jxl/decode.cc', import.meta.url), 'utf8');
+  const decodeApiH = readFileSync(new URL('../../../external/libjxl-012/lib/include/jxl/decode.h', import.meta.url), 'utf8');
+
+  // Core FrameDecoder: paint-target field + even-spaced schedule builder, and the
+  // per-frame reset of the pause schedule (no cross-frame accumulation).
+  expect(decFrameH).toContain('void SetProgressivePaintTarget(size_t paints)');
+  expect(decFrameH).toContain('void BuildPassPauseSchedule()');
+  expect(decFrameH).toContain('size_t progressive_paint_target_ = 0;');
+  expect(decFrameH).toContain('passes_to_pause_.clear();');
+
+  // Public C API extension + driver wiring at the TOC stage.
+  expect(decodeApiH).toContain('JxlDecoderSetProgressivePaintTarget(JxlDecoder* dec, uint32_t paints)');
+  expect(decodeCc).toContain('JxlDecoderStatus JxlDecoderSetProgressivePaintTarget(');
+  expect(decodeCc).toContain('dec->frame_dec->SetProgressivePaintTarget(dec->prog_paint_target)');
+
+  // Bridge export + facade plumbing (option, module decl, call site).
+  expect(bridge).toContain('void jxl_wasm_dec_set_paint_target(JxlWasmDecState* s, uint32_t paints)');
+  expect(bridge).toContain('JxlDecoderSetProgressivePaintTarget(s->dec, paints)');
+  expect(facade).toContain('progressivePaintTarget?: number;');
+  expect(facade).toContain('_jxl_wasm_dec_set_paint_target?(state: number, paints: number): void;');
+  expect(facade).toContain('module._jxl_wasm_dec_set_paint_target(dec, paintTarget)');
+});
+
+test('alpha-progressive opt-in is wired core -> C API -> bridge flag -> facade', () => {
+  const decFrameH = readFileSync(new URL('../../../external/libjxl-012/lib/jxl/dec_frame.h', import.meta.url), 'utf8');
+  const decodeCc = readFileSync(new URL('../../../external/libjxl-012/lib/jxl/decode.cc', import.meta.url), 'utf8');
+  const decodeApiH = readFileSync(new URL('../../../external/libjxl-012/lib/include/jxl/decode.h', import.meta.url), 'utf8');
+
+  // Core: member-flag guard relaxation (env hack must be gone).
+  expect(decFrameH).toContain('void SetAllowExtraChannelProgressive(bool allow)');
+  expect(decFrameH).toContain('allow_extra_channel_progressive_');
+  expect(decFrameH).not.toContain('JXL_ALLOW_ALPHA_PROGRESSIVE');
+  expect(decFrameH).not.toContain('std::getenv');
+  // Public C API + driver wiring.
+  expect(decodeApiH).toContain('JxlDecoderSetAllowAlphaProgressive(JxlDecoder* dec, JXL_BOOL allow)');
+  expect(decodeCc).toContain('JxlDecoderStatus JxlDecoderSetAllowAlphaProgressive(');
+  expect(decodeCc).toContain('dec->frame_dec->SetAllowExtraChannelProgressive(');
+  // Bridge reuses the create flags channel (bit 1) — no new export needed.
+  expect(bridge).toContain('flags & 2u');
+  expect(bridge).toContain('JxlDecoderSetAllowAlphaProgressive(dec, JXL_TRUE)');
+  // Facade: flag constant + option + OR into decFlags.
+  expect(facade).toContain('DEC_FLAG_ALLOW_ALPHA_PROGRESSIVE = 2;');
+  expect(facade).toContain('allowAlphaProgressive?: boolean;');
+  expect(facade).toContain('this.options.allowAlphaProgressive ? DEC_FLAG_ALLOW_ALPHA_PROGRESSIVE : 0');
+});
+
+test('paint-target symbol is exported from dec + enc + monolithic builds', () => {
+  const exportsDec = readFileSync(new URL('../exports-dec.txt', import.meta.url), 'utf8');
+  const exportsEnc = readFileSync(new URL('../exports-enc.txt', import.meta.url), 'utf8');
+  const exportsMono = readFileSync(new URL('../exports.txt', import.meta.url), 'utf8');
+  expect(exportsDec).toContain('_jxl_wasm_dec_set_paint_target');
+  expect(exportsEnc).toContain('_jxl_wasm_dec_set_paint_target');
+  expect(exportsMono).toContain('_jxl_wasm_dec_set_paint_target');
+});
+
+test('reusable ProcessSections scratch replaces per-call vectors (byte-exact, flattened)', () => {
+  const decFrameCc = readFileSync(new URL('../../../external/libjxl-012/lib/jxl/dec_frame.cc', import.meta.url), 'utf8');
+  const decFrameH = readFileSync(new URL('../../../external/libjxl-012/lib/jxl/dec_frame.h', import.meta.url), 'utf8');
+  // The former per-call vector-of-vectors must be gone (one heap alloc per AC group/call).
+  expect(decFrameCc).not.toContain('std::vector<std::vector<size_t>> ac_group_sec');
+  // Decoder-owned reusable scratch, flattened to [group * num_passes + pass].
+  expect(decFrameH).toContain('ps_ac_group_sec_');
+  expect(decFrameCc).toContain('std::vector<size_t>& ac_group_sec = ps_ac_group_sec_;');
+  expect(decFrameCc).toContain('ac_group_sec.assign(num_groups * num_passes, num);');
+  expect(decFrameCc).toContain('ac_group_sec[acg * num_passes + acp] = i;');
+});
+
 describe('VarDCT progressive decode emits multiple passes (libjxl 0.11.2 fix)', () => {
   // Synthetic noise image: enough entropy that the encoder cannot collapse to a
   // single trivial pass under VarDCT progressive_ac.

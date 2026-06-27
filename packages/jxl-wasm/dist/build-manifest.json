@@ -5,20 +5,20 @@
   "emscriptenCommit": "refresh-after-first-4.0.14-host-build",
   "emsdkImage": null,
   "buildMode": "host-toolchain",
-  "generatedAt": "2026-06-18T12:16:59.063Z",
+  "generatedAt": "2026-06-27T09:01:52.810Z",
   "note": "Phase 3 module split (dec/enc) + scalar dropped. Artifacts are now jxl-core.{dec,enc}.${tier}.js|wasm. Old scalar/simd entries removed; size budgets per cpu tier (dec target is the viewer win). Run scripts/build.mjs --host-toolchain [--include-mt] to populate real tiers + shas. P0 hygiene complete; P1 split + P3 collapse landed in generator.",
   "tiers": {
     "dec:simd": {
       "kind": "dec",
       "tier": "simd",
-      "jsBytes": 5197,
-      "wasmBytes": 885309,
-      "jsBrotliBytes": 2132,
-      "wasmBrotliBytes": 238283,
-      "jsSha256": "cb2f466b8368068c6dbefa9e99ac0106869ad9caea470a5ee627a34c85d7702d",
-      "wasmSha256": "5d5cda8820394eadd81d586709eafcc52f9924abce568ac5221c9963618de806",
-      "jsIntegrity": "sha384-7PMDqm/4E7/tmx2PKcwVD6Fa3jUR9hvNmV+ik7wIB2Ja5/fEWYkA7ZNXdAEAkYQz",
-      "wasmIntegrity": "sha384-bcNBFWFiAnOTNSVADziALfXEkh3TWh3NAXSYweJvUitAFZtFtKqfTLWu938odLvk",
+      "jsBytes": 5235,
+      "wasmBytes": 1031213,
+      "jsBrotliBytes": 2149,
+      "wasmBrotliBytes": 303997,
+      "jsSha256": "98792c5181cc90e83cb7549b8d3eb965fc19744ba06f5a9d4242dfcc8870c0ac",
+      "wasmSha256": "1689104df967c82c8458e35c72016eafad270a62cbc6f16a51caeee9f46c9ba7",
+      "jsIntegrity": "sha384-MBHfARBXOd4bys8vSEZLjWErg/12Vn4pM8YOnl9iRAj3raARvChf0dVEHWg+Kdpz",
+      "wasmIntegrity": "sha384-uREYxLb5/sn1W0gwx9Ab85ffTjmCPz+WhhjzJKoQvdKXkZtCBejsS+wWp/W4j5LL",
       "flags": [
         "-O3",
         "-sENVIRONMENT=web,worker",
@@ -81,90 +81,6 @@
         "--closure",
         "1",
         "-sEVAL_CTORS=2"
-      ]
-    },
-    "dec:relaxed-simd-mt": {
-      "kind": "dec",
-      "tier": "relaxed-simd-mt",
-      "jsBytes": 10017,
-      "wasmBytes": 963319,
-      "jsBrotliBytes": 4114,
-      "wasmBrotliBytes": 252475,
-      "jsSha256": "ae3c93fef9b25f095a23ef06c40edc66b56bf4001791398a2831d6b0d844221d",
-      "wasmSha256": "f375a4aa5f25ff4ca4adc69a7eb8e76f6cbb24d9e8537bbb8723cf463e4804d3",
-      "jsIntegrity": "sha384-lZhWYKmEnhuhhZ7STNMfE2lGMCfyhnzTvqcochJUsS8hEie9zSvhYckB2CMoChP2",
-      "wasmIntegrity": "sha384-ZbfmYV1C4sfByoqVkar9wmJC6Ctz8YhFgXXJnoG42umz8ETTlPuLNnpwQVni7PE9",
-      "flags": [
-        "-O3",
-        "-sENVIRONMENT=web,worker",
-        "-sMODULARIZE=1",
-        "-sEXPORT_ES6=1",
-        "-sEXPORT_NAME=createJxlModule",
-        "-sALLOW_MEMORY_GROWTH=1",
-        "-sMAXIMUM_MEMORY=4294967296",
-        "-sFILESYSTEM=0",
-        "-sASSERTIONS=0",
-        "-sINVOKE_RUN=0",
-        "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
-        "-sWASM_BIGINT=1",
-        "-flto",
-        "-mnontrapping-fptoint",
-        "-fno-rtti",
-        "-fno-exceptions",
-        "-sINCOMING_MODULE_JS_API=locateFile,wasmBinary",
-        "-sINITIAL_MEMORY=16777216",
-        "-pthread",
-        "-sUSE_PTHREADS=1",
-        "-sPTHREAD_POOL_SIZE=4",
-        "-sPTHREAD_POOL_SIZE_STRICT=0",
-        "-msimd128",
-        "-mrelaxed-simd",
-        "-DHWY_WANT_WASM2",
-        "-sMALLOC=emmalloc",
-        "-sEXPORTED_FUNCTIONS=@C:/Foo/raw-converter-wasm/packages/jxl-wasm/exports-dec.txt",
-        "--closure",
-        "1"
-      ]
-    },
-    "dec:simd-mt": {
-      "kind": "dec",
-      "tier": "simd-mt",
-      "jsBytes": 9985,
-      "wasmBytes": 900511,
-      "jsBrotliBytes": 4107,
-      "wasmBrotliBytes": 243932,
-      "jsSha256": "62896b7744f9e88d103f9a58ea02b76834782b23e780676d0559459728ebde7c",
-      "wasmSha256": "52f345e80929b0083446039a02e7f8490bca59e6b606c05ad193b99cf51eab18",
-      "jsIntegrity": "sha384-Rso0mBcSECINPIKIMTDzvCyoXftPqSYxwcA58n9F1rWsxFzELdQXn+GGaPz0LcD9",
-      "wasmIntegrity": "sha384-+n0P57uF1UySymVnNaE8I2FfD4BCuoqW8UfibZsLKNjm/iqRyggPLIwUXw6ii6+e",
-      "flags": [
-        "-O3",
-        "-sENVIRONMENT=web,worker",
-        "-sMODULARIZE=1",
-        "-sEXPORT_ES6=1",
-        "-sEXPORT_NAME=createJxlModule",
-        "-sALLOW_MEMORY_GROWTH=1",
-        "-sMAXIMUM_MEMORY=4294967296",
-        "-sFILESYSTEM=0",
-        "-sASSERTIONS=0",
-        "-sINVOKE_RUN=0",
-        "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32']",
-        "-sWASM_BIGINT=1",
-        "-flto",
-        "-mnontrapping-fptoint",
-        "-fno-rtti",
-        "-fno-exceptions",
-        "-sINCOMING_MODULE_JS_API=locateFile,wasmBinary",
-        "-sINITIAL_MEMORY=16777216",
-        "-pthread",
-        "-sUSE_PTHREADS=1",
-        "-sPTHREAD_POOL_SIZE=4",
-        "-sPTHREAD_POOL_SIZE_STRICT=0",
-        "-msimd128",
-        "-sMALLOC=emmalloc",
-        "-sEXPORTED_FUNCTIONS=@C:/Foo/raw-converter-wasm/packages/jxl-wasm/exports-dec.txt",
-        "--closure",
-        "1"
       ]
     },
     "enc:relaxed-simd-mt": {
@@ -248,55 +164,14 @@
       ]
     }
   },
-  "skippedTiers": [],
+  "skippedTiers": [
+    "dec:relaxed-simd-mt",
+    "dec:simd-mt"
+  ],
   "pgo": {
-    "enabled": true,
-    "applied": [
-      "enc:simd"
-    ],
-    "corpusHash": "768118393df7a41008c97ba69c82e58880aadb8ac96bee0ad9b8bfdcb8bb02a2",
-    "profdataSha256": "26be3c55032a54275d62de447362484c1763c38bf54339243b85d45755d34b13",
-    "scenarios": [
-      {
-        "name": "gallery-scroll",
-        "weight": 0.6,
-        "op": "encode-tiles",
-        "effort": 3,
-        "levels": null,
-        "files": [
-          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\tiles\\256\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
-        ]
-      },
-      {
-        "name": "pyramid-ladder",
-        "weight": 0.25,
-        "op": "encode-pyramid",
-        "effort": 3,
-        "levels": 5,
-        "files": [
-          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
-        ]
-      },
-      {
-        "name": "metadata-sidecars",
-        "weight": 0.1,
-        "op": "encode-container",
-        "effort": 3,
-        "levels": null,
-        "files": [
-          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\withmeta\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
-        ]
-      },
-      {
-        "name": "hiquality-archival",
-        "weight": 0.05,
-        "op": "encode",
-        "effort": 7,
-        "levels": null,
-        "files": [
-          "C:\\Foo\\raw-converter-wasm\\packages\\jxl-test-corpus\\full\\PXL_20260527_180319603.RAW-02.ORIGINAL.ppm"
-        ]
-      }
-    ]
+    "staged": true,
+    "applied": false,
+    "corpusHash": "c87a1daadf9d6525391cb87e18d6636d1298260da6a5659f86d6058590bc4ec9",
+    "source": "jxl-test-corpus/pgo-manifest.json"
   }
 }

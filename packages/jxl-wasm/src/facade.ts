@@ -5,6 +5,7 @@ export type DecodeStage = "header" | "dc" | "pass" | "final";
 export type Region = { x: number; y: number; w: number; h: number };
 export type ProgressiveDetail = "dc" | "lastPasses" | "passes" | "dcProgressive";
 const DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS = 1;
+const DEC_FLAG_ALLOW_ALPHA_PROGRESSIVE = 2;
 const TEXT_ENCODER = new TextEncoder();
 export type CachePolicy = "onFirst" | "onFinal" | "onProgress" | "disabled";
 
@@ -90,6 +91,24 @@ export interface DecoderOptions {
   progressionTarget: "header" | "dc" | "pass" | "final";
   emitEveryPass: boolean;
   progressiveDetail?: ProgressiveDetail;
+  /**
+   * Target number of progressive AC paints (including the final image) when
+   * `progressiveDetail` resolves to `"passes"`. Undefined/0 keeps libjxl's
+   * per-pass pausing. A value in [2, num_passes) makes the decoder emit ~N
+   * evenly spaced ::JXL_DEC_FRAME_PROGRESSION events instead of one per encoded
+   * pass, trading refinement granularity against per-paint flush cost.
+   * @note Requires a WASM rebuild exposing `_jxl_wasm_dec_set_paint_target`;
+   * silently ignored on older modules.
+   */
+  progressivePaintTarget?: number;
+  /**
+   * Allow progressive pausing for VarDCT images with alpha (or other extra
+   * channels). libjxl disables progressive pausing whenever an extra channel is
+   * present; this opt-in lifts that — intermediate flushes are valid and the
+   * final image is byte-exact. No effect on modular images.
+   * @note Requires a WASM rebuild from the patched libjxl; ignored otherwise.
+   */
+  allowAlphaProgressive?: boolean;
   /**
    * Strip ICC profile from decoded output.
    * @note **WASM no-op.** `_jxl_wasm_dec_create` has no ICC-strip parameter.
@@ -403,6 +422,7 @@ interface LibjxlWasmModule {
   // Stateful progressive decoder (present after WASM rebuild with new bridge)
   _jxl_wasm_dec_create?(format: number, progressiveDetail: number): number;
   _jxl_wasm_dec_create_x?(format: number, progressiveDetail: number, flags: number): number;
+  _jxl_wasm_dec_set_paint_target?(state: number, paints: number): void;
   _jxl_wasm_dec_push?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_dec_close_input?(state: number): void;
   _jxl_wasm_dec_width?(state: number): number;
@@ -1275,6 +1295,7 @@ export interface DecodeViewportOptions {
   progressionTarget?: "header" | "dc" | "pass" | "final";
   emitEveryPass?: boolean;
   progressiveDetail?: ProgressiveDetail;
+  progressivePaintTarget?: number;
 }
 
 export function decodeViewport(options: DecodeViewportOptions): JxlDecoder {
@@ -1290,6 +1311,7 @@ export function decodeViewport(options: DecodeViewportOptions): JxlDecoder {
     targetHeight: options.targetHeight ?? null,
     fitMode: options.fitMode ?? null,
     ...(options.progressiveDetail !== undefined ? { progressiveDetail: options.progressiveDetail } : {}),
+    ...(options.progressivePaintTarget !== undefined ? { progressivePaintTarget: options.progressivePaintTarget } : {}),
   });
 }
 
@@ -1435,11 +1457,20 @@ class LibjxlDecoder implements JxlDecoder {
   private async *eventsProgressive(module: LibjxlWasmModule): AsyncIterable<DecodeEvent> {
     const fmtIndex = this.options.format === "rgbaf32" ? 2 : this.options.format === "rgba16" ? 1 : 0;
     const progressiveDetail = resolveDecoderProgressiveDetail(this.options);
-    const decFlags = this.options.suppressDuplicateProgress ? DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS : 0;
+    const decFlags = (this.options.suppressDuplicateProgress ? DEC_FLAG_SUPPRESS_DUPLICATE_PROGRESS : 0)
+      | (this.options.allowAlphaProgressive ? DEC_FLAG_ALLOW_ALPHA_PROGRESSIVE : 0);
     const dec = module._jxl_wasm_dec_create_x
       ? module._jxl_wasm_dec_create_x(fmtIndex, progressiveDetail, decFlags)
       : module._jxl_wasm_dec_create!(fmtIndex, progressiveDetail);
     if (dec === 0) throw new Error("JXL progressive decoder creation failed");
+    // Paint-cadence control: when set, ask libjxl for ~N evenly spaced AC paints
+    // instead of one per encoded pass (kPasses detail). Requires the rebuilt
+    // bridge; older modules without the symbol silently keep per-pass pausing.
+    const paintTarget = this.options.progressivePaintTarget;
+    if (paintTarget != null && paintTarget > 0 &&
+        typeof module._jxl_wasm_dec_set_paint_target === "function") {
+      module._jxl_wasm_dec_set_paint_target(dec, paintTarget);
+    }
     // Cache bridge fn refs once — avoids repeated property lookup on module per iteration.
     const decPush         = module._jxl_wasm_dec_push!;
     const decWidth        = module._jxl_wasm_dec_width!;
