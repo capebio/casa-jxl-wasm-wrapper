@@ -556,16 +556,22 @@ fn decode_uncompressed(
 
 /// Trim a mosaic so its top-left pixel lands on the RGGB phase.
 ///
-/// Returns `(slice, stride, height)`. NOTE: the second element is the row
-/// **STRIDE** (in pixels) of `slice`, NOT the logical/visible width. When a
-/// column is dropped (Grbg/Bggr) the logical width is one less than the stride,
-/// but the underlying buffer is still laid out with the original stride, so
-/// callers must keep using this stride for row arithmetic and treat
-/// `stride - col_off` as the visible width themselves. The returned slice length
-/// naturally bounds OOB reads.
-pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u16], usize, usize) {
-    // `width` is the row stride of `raw`; it is also the stride of every slice we
-    // return below (we never re-pack rows), hence named `stride` for the result.
+/// Returns `(pixels, width, height)` where `width` is BOTH the row stride and
+/// the logical/visible width of `pixels` — the buffer is always tightly packed
+/// (`pixels.len() == width * height`), so callers can address it unambiguously.
+///
+/// Row-only trims (RGGB identity, Gbrg) are zero-copy (`Cow::Borrowed`). When a
+/// column must be dropped (Grbg/Bggr) the rows are re-packed into a fresh
+/// contiguous buffer (`Cow::Owned`) so there is no column gap — this removes the
+/// earlier stride-as-width footgun where a `+1` start offset left the last row
+/// one pixel short and sheared an unphased consumer's row addressing.
+pub fn align_to_rggb(
+    raw: &[u16],
+    width: usize,
+    height: usize,
+    cfa: Cfa,
+) -> (std::borrow::Cow<'_, [u16]>, usize, usize) {
+    use std::borrow::Cow;
     let stride = width;
     let (row_off, col_off): (usize, usize) = match cfa {
         Cfa::Rggb => (0, 0),
@@ -574,35 +580,32 @@ pub fn align_to_rggb(raw: &[u16], width: usize, height: usize, cfa: Cfa) -> (&[u
         Cfa::Bggr => (1, 1),
     };
     if row_off == 0 && col_off == 0 {
-        return (raw, stride, height);
+        return (Cow::Borrowed(raw), stride, height);
     }
     // Trim columns first (shift start within each row), then trim rows.
     // For Grbg (col_off=1, row_off=0): drop col 0 → width-1, same height.
     // For Bggr (col_off=1, row_off=1): drop col 0 AND row 0.
-    // For Gbrg (col_off=0, row_off=1): drop row 0 only (handled below).
+    // For Gbrg (col_off=0, row_off=1): drop row 0 only.
     let new_w = width.saturating_sub(col_off);
     let new_h = height.saturating_sub(row_off);
     if new_w == 0 || new_h == 0 {
-        return (&raw[..0], 0, 0);
+        return (Cow::Borrowed(&raw[..0]), 0, 0);
     }
-    // Build a contiguous slice only when col_off == 0 (no column gap between rows).
-    // When col_off > 0 the rows are non-contiguous so we cannot return a plain slice;
-    // fall back to returning the full buffer starting from the first pixel of row
-    // row_off with the adjusted width — callers iterate row by row and honour the
-    // returned width, so this is safe and correct.
     if col_off == 0 {
+        // No column dropped: rows stay contiguous → zero-copy. width == stride.
         let start = row_off * stride;
-        // No column dropped: logical width == stride.
-        return (&raw[start..start + new_h * stride], stride, new_h);
+        return (Cow::Borrowed(&raw[start..start + new_h * stride]), stride, new_h);
     }
-    // col_off == 1 (Grbg or Bggr): start at (row_off, col_off) and use new_w.
-    let start = row_off * stride + col_off;
-    // The slice must cover new_h full rows whose logical width is new_w, but the raw
-    // buffer is laid out with the original stride; we return `stride` (not new_w) so
-    // callers that do row-stride arithmetic remain correct. We expose only the tail
-    // of the buffer from `start` onward — the slice length naturally limits OOB reads.
-    let available = raw.len().saturating_sub(start);
-    (&raw[start..start + available.min((new_h - 1) * stride + new_w)], stride, new_h)
+    // col_off >= 1 (Grbg/Bggr): re-pack each row's [col_off .. col_off + new_w]
+    // into a tight new_w-stride buffer. The last row ends exactly at
+    // (height-1)*stride + col_off + new_w == height*stride == raw.len(), so every
+    // read is in bounds.
+    let mut out = Vec::with_capacity(new_w * new_h);
+    for r in 0..new_h {
+        let row_start = (r + row_off) * stride + col_off;
+        out.extend_from_slice(&raw[row_start..row_start + new_w]);
+    }
+    (Cow::Owned(out), new_w, new_h)
 }
 
 fn cfa_phase(cfa: Cfa) -> (u8, u8) {
@@ -1315,7 +1318,8 @@ mod tests {
         let (s, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Rggb);
         assert_eq!(w, 4);
         assert_eq!(h, 2);
-        assert_eq!(s, &raw[..]);
+        assert_eq!(&*s, &raw[..]);
+        assert!(matches!(s, std::borrow::Cow::Borrowed(_)), "identity must be zero-copy");
     }
 
     #[test]
@@ -1329,21 +1333,23 @@ mod tests {
 
     #[test]
     fn align_to_rggb_grbg_drops_col() {
-        // Grbg: row_off=0, col_off=1 → drop col 0, return width=4 (stride) height=2 new_w=3.
+        // Grbg: row_off=0, col_off=1 → drop col 0, re-pack to tight width=3 height=2.
         let raw = [0u16; 8]; // 2 rows × 4 cols
-        let (_, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Grbg);
-        // Stride (w) remains 4 so row addressing is correct; new_w is 3 but stride=4.
-        assert_eq!(w, 4, "stride should remain full width for col-trimmed case");
+        let (s, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Grbg);
+        assert_eq!(w, 3, "col-trimmed case re-packs to tight logical width");
         assert_eq!(h, 2);
+        assert_eq!(s.len(), w * h, "tightly packed");
     }
 
     #[test]
     fn align_to_rggb_bggr_drops_row_and_col() {
-        // Bggr: row_off=1, col_off=1 → drop row 0 and col 0.
-        let raw = [0u16; 8]; // 2 rows × 4 cols
-        let (_, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Bggr);
-        assert_eq!(w, 4, "stride should remain full width");
+        // Bggr: row_off=1, col_off=1 → drop row 0 and col 0; tight width=3 height=1.
+        // Row 1 is [30,40,31,41]; dropping col 0 → [40,31,41].
+        let raw = [10u16, 20, 11, 21, 30, 40, 31, 41]; // 2 rows × 4 cols
+        let (s, w, h) = align_to_rggb(&raw, 4, 2, Cfa::Bggr);
+        assert_eq!(w, 3, "re-packed to tight logical width");
         assert_eq!(h, 1, "Bggr should trim one row");
+        assert_eq!(&*s, &[40u16, 31, 41][..], "drops row 0 and col 0, no shear");
     }
 
     #[test]
