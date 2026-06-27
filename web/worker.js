@@ -20,12 +20,13 @@
 //   { id, type: 'done',          jxl, jxlMs, w, h }
 //   { id, type: 'error',         error }
 
-// COI-gated WASM build selection (single-thread fallback). The threaded build
-// (./pkg/) hard-codes shared memory and needs SharedArrayBuffer + crossOriginIsolated
-// (COOP/COEP). Where those are unavailable — a production host without the headers,
-// file://, or an older browser — that build fails to instantiate, so fall back to the
-// single-thread build (./pkg-st/, no shared memory, no rayon). Selected + bound lazily
-// in ensureWasm(), before any message handler touches these bindings.
+// WASM build selection. Only the threaded build (./pkg/) is shipped; it hard-codes
+// shared memory and needs SharedArrayBuffer + crossOriginIsolated (COOP/COEP) to
+// instantiate. A single-thread fallback (./pkg-st/) is NOT built, so we import ./pkg/
+// unconditionally rather than a nonexistent path (which 404'd on non-isolated hosts).
+// On a non-isolated host pkg/ will fail to instantiate with a clear WASM/SAB error; we
+// warn up front. If a ./pkg-st/ build is ever produced, restore the COI-gated branch.
+// Bound lazily in ensureWasm(), before any message handler touches these bindings.
 import { detectFormat } from './format-detect.js';
 import { WorkerMsg } from './worker-message-types.js';
 
@@ -35,9 +36,13 @@ let process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_wit
 // Multi-format ingest: EXR/TIFF decode to a DecodedImage (mirrors jxl-benchmark.js bindings).
 let decode_exr, decode_tiff;
 async function loadWasm() {
-    const useMt = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated)
+    const isolated = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated)
         && typeof SharedArrayBuffer !== 'undefined';
-    rawWasm = await import(useMt ? './pkg/raw_converter_wasm.js' : './pkg-st/raw_converter_wasm.js');
+    if (!isolated) {
+        console.warn('[worker] not cross-origin-isolated (COOP/COEP); the threaded WASM build ' +
+            'may fail to instantiate and no single-thread (pkg-st) build is shipped.');
+    }
+    rawWasm = await import('./pkg/raw_converter_wasm.js');
     init = rawWasm.default;
     ({ process_orf, process_orf_with_flags, process_cr2_with_flags, process_dng_with_flags, LookRenderer, rotate_rgb8,
        decode_exr, decode_tiff } = rawWasm);
