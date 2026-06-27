@@ -936,12 +936,20 @@ fn read_array_u32(
     let max_elems = data.len() / ts;
     let mut out = Vec::with_capacity((cnt as usize).min(max_elems));
     for k in 0..cnt as usize {
-        let off = p + k * ts;
-        if off + ts > data.len() {
+        // SEC-009/011 class: `p + k*ts` and `off + ts` can wrap on wasm32 (usize=32-bit)
+        // for file-controlled p/cnt, defeating the OOB guard. Derive `off` and the bound
+        // with checked arithmetic, and read the BYTE/SBYTE arm via the bounds-safe get()
+        // (the 3/4 arms already use read_u16/read_u32). Output-identical for valid files
+        // (no wrap, all reads in-bounds); only hostile wasm32 input changes panic→break.
+        let off = match k.checked_mul(ts).and_then(|kt| p.checked_add(kt)) {
+            Some(o) => o,
+            None => break,
+        };
+        if off.checked_add(ts).map_or(true, |e| e > data.len()) {
             break;
         }
         let v = match dtype {
-            1 | 6 => data[off] as u32,
+            1 | 6 => match data.get(off) { Some(&b) => b as u32, None => break },
             3 => read_u16(data, off, le) as u32,
             4 => read_u32(data, off, le),
             _ => break,
