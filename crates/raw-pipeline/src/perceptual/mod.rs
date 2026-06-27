@@ -566,7 +566,7 @@ mod tests {
             let (w, h) = (1, 8);
             let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
             let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 7) % 251) as u8).collect();
-            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let mut cmp = Comparer::new(img, w, h, Opts::default());
             let score = cmp.butteraugli(&test);
             assert!(score.is_finite(), "1×8 butteraugli must be finite, got {score}");
             let m = cmp.all(&test);
@@ -577,7 +577,7 @@ mod tests {
             let (w, h) = (8, 1);
             let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
             let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 7) % 251) as u8).collect();
-            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let mut cmp = Comparer::new(img, w, h, Opts::default());
             let score = cmp.butteraugli(&test);
             assert!(score.is_finite(), "8×1 butteraugli must be finite, got {score}");
             let m = cmp.all(&test);
@@ -588,7 +588,7 @@ mod tests {
             let (w, h) = (1, 1);
             let img = vec![100u8, 150, 200, 255];
             let test = vec![110u8, 140, 190, 255];
-            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let mut cmp = Comparer::new(img, w, h, Opts::default());
             let score = cmp.butteraugli(&test);
             assert!(score.is_finite(), "1×1 butteraugli must be finite, got {score}");
             let m = cmp.all(&test);
@@ -600,7 +600,7 @@ mod tests {
             let (w, h) = (2, 4);
             let img: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
             let test: Vec<u8> = (0..w * h * 4).map(|i| ((i + 5) % 251) as u8).collect();
-            let mut cmp = Comparer::new(&img, w, h, Opts::default());
+            let mut cmp = Comparer::new(img, w, h, Opts::default());
             let score = cmp.butteraugli(&test);
             assert!(score.is_finite(), "2×4 butteraugli must be finite, got {score}");
         }
