@@ -3,11 +3,46 @@
 //! `tiff.rs`, which parses RAW (Bayer) TIFF containers. Output is always RGBA.
 
 use image::DynamicImage;
+use std::io::Cursor;
+
+/// Maximum pixel count accepted from an untrusted developed-image header before
+/// decoding, mirroring fast-jpeg's decompression-bomb guard. 400 MP is well above
+/// any real photographic source while bounding the worst-case ingest allocation
+/// (EXR is 16 B/px RGBA f32 → ~6.4 GB at the cap, so callers on wasm32 should pick
+/// a tighter budget; native hosts decode lazily). The guard rejects a hostile
+/// "small file, gigantic dimensions" header before any large buffer is allocated.
+pub const MAX_INGEST_PIXELS: u64 = 400_000_000;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ImageFormatError {
     #[error("image decode failed: {0}")]
     Decode(String),
+    #[error("image too large: {0}x{1} ({2} px) exceeds the {3} px ingest budget")]
+    TooLarge(u32, u32, u64, u64),
+}
+
+/// True when `width*height` exceeds the ingest pixel budget. Pure so the boundary
+/// is unit-testable without constructing a multi-gigapixel fixture.
+#[inline]
+fn exceeds_pixel_budget(width: u32, height: u32) -> bool {
+    (width as u64).saturating_mul(height as u64) > MAX_INGEST_PIXELS
+}
+
+/// Read just the header to get dimensions, then reject decompression bombs before
+/// the full decode allocates. Cheap: header parse only, no pixel decode.
+fn guard_dimensions(bytes: &[u8], fmt: image::ImageFormat) -> Result<(), ImageFormatError> {
+    let (w, h) = image::ImageReader::with_format(Cursor::new(bytes), fmt)
+        .into_dimensions()
+        .map_err(|e| ImageFormatError::Decode(e.to_string()))?;
+    if exceeds_pixel_budget(w, h) {
+        return Err(ImageFormatError::TooLarge(
+            w,
+            h,
+            (w as u64).saturating_mul(h as u64),
+            MAX_INGEST_PIXELS,
+        ));
+    }
+    Ok(())
 }
 
 /// RGBA pixel buffer at a single bit depth. Exactly one of u8/u16/f32 is set.
@@ -24,6 +59,7 @@ pub struct DecodedRgba {
 /// Decode a general RGB(A) TIFF. 16-bit files keep 16 bits; everything else
 /// collapses to RGBA8.
 pub fn decode_tiff_bytes(bytes: &[u8]) -> Result<DecodedRgba, ImageFormatError> {
+    guard_dimensions(bytes, image::ImageFormat::Tiff)?;
     let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Tiff)
         .map_err(|e| ImageFormatError::Decode(e.to_string()))?;
     Ok(dynamic_to_rgba(img))
@@ -32,6 +68,7 @@ pub fn decode_tiff_bytes(bytes: &[u8]) -> Result<DecodedRgba, ImageFormatError> 
 /// Decode an OpenEXR image to interleaved RGBA f32 (linear, scene-referred).
 /// HDR values above 1.0 are preserved.
 pub fn decode_exr_bytes(bytes: &[u8]) -> Result<DecodedRgba, ImageFormatError> {
+    guard_dimensions(bytes, image::ImageFormat::OpenExr)?;
     let img = image::load_from_memory_with_format(bytes, image::ImageFormat::OpenExr)
         .map_err(|e| ImageFormatError::Decode(e.to_string()))?;
     let (width, height) = (img.width(), img.height());
