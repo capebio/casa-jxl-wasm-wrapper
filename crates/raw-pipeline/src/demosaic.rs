@@ -1135,7 +1135,7 @@ pub fn demosaic_rggb_mhc(raw: &[u16], width: usize, height: usize) -> Result<Vec
                 let sum_b4 = north[col-1] as i32 + north[col+1] as i32 + south[col-1] as i32 + south[col+1] as i32;
                 let b_v = sum_b4 >> 2;
                 out_row[o]     = rc as u16;
-                out_row[o+1]   = g_mhc as u16;
+                out_row[o+1]   = g_mhc.clamp(0,65535) as u16;
                 out_row[o+2]   = b_v as u16;
 
                 // even row, odd col (0,1): GR site

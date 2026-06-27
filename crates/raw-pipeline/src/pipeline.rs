@@ -500,9 +500,11 @@ impl PerceptualGrid {
     fn sample(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         // Trilinear interp in [0,1.5]^3 scaled to grid. Fast path for pc !c-perceptual rust.
         let s = self.size as f32 - 1.0;
-        let rf = (r / 1.5).min(1.0) * s; // clamp(0,1) → min(1) since r>=0 guaranteed
-        let gf = (g / 1.5).min(1.0) * s;
-        let bf = (b / 1.5).min(1.0) * s;
+        // Colour matrix can produce negatives, so clamp to [0,1] before scaling to
+        // the grid — otherwise rf<0 yields a negative trilinear weight (extrapolation).
+        let rf = (r / 1.5).clamp(0.0, 1.0) * s;
+        let gf = (g / 1.5).clamp(0.0, 1.0) * s;
+        let bf = (b / 1.5).clamp(0.0, 1.0) * s;
         let ri = rf.floor() as usize;
         let gi = gf.floor() as usize;
         let bi = bf.floor() as usize;
@@ -2469,6 +2471,9 @@ const TILE: usize = 32;
 
 /// dst[c, h-1-r] = src[r, c].  Output dims: (h, w).
 pub fn rotate_90_cw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    if w == 0 || h == 0 {
+        return vec![0u8; src.len()];
+    }
     let w_dst = h;
     let dst_row_bytes = w_dst * 3;
     let mut dst = vec![0u8; src.len()];
@@ -2502,6 +2507,9 @@ pub fn rotate_90_cw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
 
 /// dst[w-1-c, r] = src[r, c].  Output dims: (h, w).
 pub fn rotate_90_ccw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    if w == 0 || h == 0 {
+        return vec![0u8; src.len()];
+    }
     let w_dst = h;
     let dst_row_bytes = w_dst * 3;
     let mut dst = vec![0u8; src.len()];
@@ -2539,6 +2547,9 @@ pub fn rotate_90_ccw(src: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// dst[h-1-r, w-1-c] = src[r, c].  Output dims: (w, h).  Already row-sequential;
 /// just parallelize over dst rows.
 pub fn rotate_180(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    if w == 0 || h == 0 {
+        return vec![0u8; src.len()];
+    }
     let row_bytes = w * 3;
     let mut dst = vec![0u8; src.len()];
 

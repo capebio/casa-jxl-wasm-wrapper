@@ -38,7 +38,14 @@ pub fn detect_wasm() -> Backend {
 pub fn detect_native(prefer_rsqrt: bool) -> Backend {
     #[cfg(target_arch = "x86_64")]
     {
-        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+        // AVX-512 backends reuse the AVX2/FMA SSIM/PSNR kernels, so require avx2+fma too
+        // (mirrors resolve_forced_backend) — never Auto-select a backend whose kernels need
+        // features the CPU may lack.
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("fma")
+        {
             return Backend::Avx512Strict;
         }
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
