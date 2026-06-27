@@ -1,5 +1,25 @@
 // packages/jxl-progressive/src/progressive-stream.ts
 import { fromRangePrefix, fromResponse } from "@casabio/jxl-stream";
+export class HttpError extends Error {
+    status;
+    statusText;
+    constructor(status, statusText, url) {
+        super(`[progressive-stream] HTTP ${status} ${statusText}: ${url}`);
+        this.status = status;
+        this.statusText = statusText;
+        this.name = "HttpError";
+    }
+}
+export class RangeNotSupportedError extends Error {
+    constructor(url) {
+        super(`[progressive-stream] Range not supported or Content-Range mismatch for ${url}`);
+        this.name = "RangeNotSupportedError";
+    }
+}
+function throwIfAborted(signal) {
+    if (signal?.aborted)
+        throw new DOMException("Aborted", "AbortError");
+}
 /**
  * Fetch bytes 0..tier.byteEnd of `url` via HTTP Range and push into `session`.
  * All tiers are cumulative from byte 0 (per spec §Byte Range Semantics).
@@ -31,7 +51,50 @@ export async function fetchFull(url, session, opts = {}) {
     const mergedHeaders = new Headers(headers);
     const resp = await fetchImpl(url, { headers: mergedHeaders, ...(signal !== undefined && { signal }) });
     if (!resp.ok) {
-        throw new Error(`[progressive-stream] HTTP ${resp.status} ${resp.statusText}: ${url}`);
+        throw new HttpError(resp.status, resp.statusText, url);
+    }
+    await fromResponse(resp, session, signal);
+}
+/**
+ * Fetch the delta for `tier` after a known `prefix` (already pushed into session by caller).
+ * Issues Range: bytes=${prefixLength}-${tier.byteEnd-1}.
+ * Validates 206 + Content-Range start exactly matches prefixLength (defends against
+ * misbehaving proxies/CDNs that normalize/shift ranges). On mismatch or !206, cancel
+ * session + throw RangeNotSupportedError so scheduler can fallback to plain fetchTier
+ * (fresh session from byte 0).
+ *
+ * prefix may be Uint8Array | ArrayBuffer (content ignored, only length used) *or* a bare number
+ * for the known prefix byte length. This allows callers that track length (e.g. from prior tier
+ * persist or accum) to avoid materializing/concatenating the full prefix bytes solely for this call.
+ */
+export async function fetchTierWithPrefix(url, tier, prefix, session, opts = {}) {
+    const { signal, headers, fetchImpl = globalThis.fetch } = opts;
+    const prefixLength = typeof prefix === "number"
+        ? prefix
+        : (prefix instanceof ArrayBuffer ? prefix.byteLength : prefix.byteLength);
+    throwIfAborted(signal);
+    if (prefixLength >= tier.byteEnd) {
+        throwIfAborted(signal);
+        await session.close();
+        return;
+    }
+    const mergedHeaders = new Headers(headers);
+    const rangeEnd = tier.byteEnd - 1;
+    mergedHeaders.set("Range", `bytes=${prefixLength}-${rangeEnd}`);
+    const resp = await fetchImpl(url, {
+        headers: mergedHeaders,
+        ...(signal !== undefined && { signal }),
+    });
+    throwIfAborted(signal);
+    if (resp.status !== 206) {
+        await session.cancel("Content-Range / range request not supported for delta fetch; scheduler will fallback");
+        throw new RangeNotSupportedError(url);
+    }
+    const cr = resp.headers.get("Content-Range");
+    const m = cr === null ? null : /^bytes (\d+)-/.exec(cr);
+    if (m === null || Number(m[1]) !== prefixLength) {
+        await session.cancel("Content-Range mismatch for delta fetch; scheduler will fallback");
+        throw new RangeNotSupportedError(url);
     }
     await fromResponse(resp, session, signal);
 }

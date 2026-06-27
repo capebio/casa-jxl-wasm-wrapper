@@ -18,6 +18,7 @@ function assertField(condition, field, message) {
         throw new ManifestValidationError(message, field);
 }
 const VALID_TIER_NAMES = new Set(["dc", "preview", "full"]);
+const VALID_SCORE_METRICS = new Set(["ssim", "psnr", "butteraugli"]);
 export function validateManifest(json) {
     assertField(typeof json === "object" && json !== null, "root", "Manifest must be an object");
     const obj = json;
@@ -81,6 +82,13 @@ export function validateManifest(json) {
         assertField(t["byteEnd"] <= jxl["bytes"], `${f}.byteEnd`, `${f}.byteEnd (${t["byteEnd"]}) exceeds jxl.bytes (${jxl["bytes"]})`);
         assertField(typeof t["progressionIndex"] === "number" || t["progressionIndex"] === "final", `${f}.progressionIndex`, `${f}.progressionIndex must be number or "final"`);
         assertField(typeof t["intendedUse"] === "string", `${f}.intendedUse`, `${f}.intendedUse must be a string`);
+        if (t["score"] !== undefined) {
+            assertField(typeof t["score"] === "object" && t["score"] !== null, `${f}.score`, `${f}.score must be an object if present`);
+            const sc = t["score"];
+            assertField(VALID_SCORE_METRICS.has(sc["metric"]), `${f}.score.metric`, `${f}.score.metric must be ssim|psnr|butteraugli`);
+            assertField(typeof sc["value"] === "number" && Number.isFinite(sc["value"]), `${f}.score.value`, `${f}.score.value must be a finite number`);
+            assertField(sc["reference"] === "final" || sc["reference"] === "source", `${f}.score.reference`, `${f}.score.reference must be "final" or "source"`);
+        }
     }
     // Cross-tier: each tier name must appear at most once.
     const seenNames = new Set();
@@ -95,6 +103,22 @@ export function validateManifest(json) {
         const prev = tiersArr[i - 1]["byteEnd"];
         const curr = tiersArr[i]["byteEnd"];
         assertField(curr > prev, `tiers[${i}].byteEnd`, `tiers[${i}].byteEnd (${curr}) must be greater than tiers[${i - 1}].byteEnd (${prev})`);
+    }
+    if (obj["scaleFrontier"] !== undefined) {
+        assertField(Array.isArray(obj["scaleFrontier"]), "scaleFrontier", "scaleFrontier must be an array if present");
+        const fr = obj["scaleFrontier"];
+        assertField(fr.length <= 16, "scaleFrontier", "scaleFrontier must have <= 16 entries");
+        for (let i = 0; i < fr.length; i++) {
+            const e = fr[i];
+            const f = `scaleFrontier[${i}]`;
+            assertField(typeof e === "object" && e !== null, f, `${f} must be an object`);
+            assertField(typeof e["maxDisplayPx"] === "number" && e["maxDisplayPx"] > 0, `${f}.maxDisplayPx`, `${f}.maxDisplayPx must be a positive number`);
+            assertField(VALID_TIER_NAMES.has(e["tier"]), `${f}.tier`, `${f}.tier must be dc|preview|full`);
+            assertField(typeof e["byteEnd"] === "number" && e["byteEnd"] > 0 && e["byteEnd"] <= jxl["bytes"], `${f}.byteEnd`, `${f}.byteEnd must be in (0, jxl.bytes]`);
+            if (i > 0) {
+                assertField(e["maxDisplayPx"] > fr[i - 1]["maxDisplayPx"], `${f}.maxDisplayPx`, `${f}.maxDisplayPx must be strictly ascending`);
+            }
+        }
     }
     return json;
 }

@@ -9,7 +9,7 @@ export interface ProgressiveCacheOptions {
  *
  * Key conventions:
  *   Manifests  — "jxl-progressive:manifest:{jxlUrl}"
- *   Byte ranges — "jxl-progressive:bytes:{jxlUrl}#{tierName}"
+ *   Byte ranges — "jxl-progressive:bytes:{jxlUrl}\0{tierName}"
  *
  * Manifests are stored as UTF-8 JSON (ArrayBuffer). Byte ranges are stored raw.
  */
