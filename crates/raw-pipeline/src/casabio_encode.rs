@@ -552,6 +552,24 @@ fn encode_distance_into(
     Ok(bytes)
 }
 
+/// Thread count for a single **serial** encode of a `px`-pixel image.
+///
+/// Returns 1 (→ `Encoder::with_threads` allocates no runner) below ~0.25 MP, where
+/// thread spin-up outweighs the gain; otherwise the machine's parallelism. Bench
+/// (effort=3, `examples/jxl_encode_cpp_bench.rs`): single-image multithreaded encode
+/// = 1.33–1.51× at ≥512×512, output byte-identical.
+///
+/// Use this ONLY for encodes that run serially (e.g. the full-res pass after the
+/// sidecar/variant fan-out's barrier). NEVER inside the rayon fan-out itself — that
+/// already saturates every core, so per-encode threads would oversubscribe and slow
+/// the whole set down.
+fn serial_encode_threads(px: usize) -> usize {
+    if px < 512 * 512 {
+        return 1;
+    }
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
 pub fn encode_rgba8_pyramid(
     rgba: &[u8],
     width: u32,
@@ -668,9 +686,15 @@ pub fn encode_rgba8_pyramid(
     // Sidecar levels were built largest→smallest; reverse to smallest→largest for consumers.
     sides.reverse();
 
-    // Full-resolution encode (always serial — only one full image).
+    // Full-resolution encode (always serial — only one full image). It runs AFTER
+    // the sidecar fan-out's barrier, so every core is free: hand libjxl its own
+    // thread runner to bank the measured single-image win (effort=3: 1.33–1.51× at
+    // ≥512², output byte-identical). This is the largest, slowest encode in the
+    // pyramid. The sidecar fan-out above stays single-threaded per worker — rayon
+    // already saturates cores there, so threading it would oversubscribe.
     let full = {
-        let mut enc = Encoder::new(EncodeOptions::default())?;
+        let threads = serial_encode_threads(width as usize * height as usize);
+        let mut enc = Encoder::with_threads(EncodeOptions::default(), threads)?;
         encode_distance_into(&mut enc, rgba, width, height, full_distance, effort, has_alpha)?
     };
     sides.push(PyramidLevel { data: full, width, height, bits_per_sample: 8 });
