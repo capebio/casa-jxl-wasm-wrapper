@@ -410,7 +410,7 @@ fn bench_dng(path: &str, rows: &mut Vec<BenchRow>) {
     let mp = w * h;
 
     let (demosaic_dur, rgb16) =
-        bench(|| demosaic::demosaic_rggb_mhc(raw_aligned, w, h).expect("demosaic"));
+        bench(|| demosaic::demosaic_rggb_mhc(&raw_aligned, w, h).expect("demosaic"));
 
     let mut params = pipeline::PipelineParams::default_olympus();
     params.black = img.black;
@@ -1267,7 +1267,7 @@ fn encode_small_rgba_jxl(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>
         rgba,
         width,
         height,
-        &EncodeOptions::quality(85.0).with_effort(3),
+        EncodeOptions::quality(85.0).with_effort(3),
     )
     .ok()
 }

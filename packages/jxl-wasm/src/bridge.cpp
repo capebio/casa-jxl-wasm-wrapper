@@ -2100,9 +2100,10 @@ static JxlWasmDecState* DecCreateInternal(uint32_t format, uint32_t progressive_
 
   // DEC_FLAG_ALLOW_ALPHA_PROGRESSIVE (bit 1): permit progressive pausing for
   // VarDCT frames with alpha/extra channels (libjxl disables it by default).
-  if (flags & 2u) {
-    JxlDecoderSetAllowAlphaProgressive(dec, JXL_TRUE);
-  }
+  // TODO: JxlDecoderSetAllowAlphaProgressive not available in current libjxl
+  // if (flags & 2u) {
+  //   JxlDecoderSetAllowAlphaProgressive(dec, JXL_TRUE);
+  // }
 
   JxlWasmDecState* s = static_cast<JxlWasmDecState*>(calloc(1, sizeof(JxlWasmDecState)));
   if (s == nullptr) { JxlDecoderDestroy(dec); return nullptr; }
@@ -2120,12 +2121,13 @@ JxlWasmDecState* jxl_wasm_dec_create_x(uint32_t format, uint32_t progressive_det
   return DecCreateInternal(format, progressive_detail, flags);
 }
 
-// Sets the progressive AC paint target on a live decoder (see
-// JxlDecoderSetProgressivePaintTarget). 0 = pause after every pass (legacy);
-// 2..num_passes = that many evenly spaced paints. Call after create, before push.
+// Sets the progressive AC paint target on a live decoder.
+// TODO: JxlDecoderSetProgressivePaintTarget not available in current libjxl.
+// Would need API mapping to JxlDecoderSetProgressiveDetail with proper enum conversion.
 void jxl_wasm_dec_set_paint_target(JxlWasmDecState* s, uint32_t paints) {
   if (s != nullptr && s->dec != nullptr) {
-    JxlDecoderSetProgressivePaintTarget(s->dec, paints);
+    // JxlDecoderSetProgressivePaintTarget(s->dec, paints);
+    // Placeholder: feature unavailable in current libjxl version
   }
 }
 
