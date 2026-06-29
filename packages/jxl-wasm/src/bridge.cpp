@@ -148,6 +148,16 @@ struct JxlWasmDecState {
   // Animation header info (populated after JXL_DEC_BASIC_INFO when have_animation)
   double   anim_ticks_per_second;
   uint32_t anim_loop_count;
+  // Progressive ROI crop (set via jxl_wasm_dec_set_region). When roi_active, take_flushed/
+  // take_final return a nearest-downsampled crop of s->pixels (byte-exact with the JS
+  // applyRegionAndDownsample fallback) instead of the full frame, so the JS layer skips its
+  // crop loop. roi_x/y/w/h are ORIGINAL full-res coords (pre-downsample, already lower-clamped
+  // to >=0 / >=1 by the caller); upper-clamp happens here against info.xsize/ysize.
+  bool     roi_active;
+  uint32_t roi_x, roi_y, roi_w, roi_h;
+  uint32_t roi_downsample;   // 1/2/4/8
+  uint8_t* roi_buf;          // grow-only owned crop output (borrowed out; freed in dec_free)
+  size_t   roi_cap;
 };
 
 #define JXL_DEC_RESULT_NEED_MORE  0
@@ -2131,6 +2141,20 @@ void jxl_wasm_dec_set_paint_target(JxlWasmDecState* s, uint32_t paints) {
   }
 }
 
+// Enable C++-side ROI crop + nearest downsample on every subsequent take_flushed/take_final.
+// Coords are full-res (pre-downsample); pass the original region (lower-clamped to >=0/>=1 by
+// the caller) plus the resolved downsample factor. For a downsample-only decode (no ROI), pass
+// the full frame as the region. Call once after the header is known, before the first take.
+void jxl_wasm_dec_set_region(JxlWasmDecState* s, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t downsample) {
+  if (s == nullptr) return;
+  s->roi_x = x;
+  s->roi_y = y;
+  s->roi_w = w;
+  s->roi_h = h;
+  s->roi_downsample = (downsample >= 1u) ? downsample : 1u;
+  s->roi_active = true;
+}
+
 int jxl_wasm_dec_push(JxlWasmDecState* s, const uint8_t* data, size_t size) {
   if (s == nullptr || s->error_code != 0) return JXL_DEC_RESULT_ERROR;
   if (data != nullptr && size > 0) {
@@ -2375,19 +2399,72 @@ int jxl_wasm_dec_error(const JxlWasmDecState* s) {
   return s != nullptr ? s->error_code : -1;
 }
 
+// Crop + nearest-downsample the full-frame s->pixels into s->roi_buf, byte-exact with the JS
+// applyRegionAndDownsample fallback (normalizeRegion upper-clamp, ceil output dims, nearest
+// top-left pick — NOT libjxl box downsample, which the streaming progressive decode can't do).
+// Returns a borrowed buffer at cropped dims (JS copies it synchronously), or nullptr on OOM /
+// unusable state (the caller then treats this paint as having no frame).
+static JxlWasmBuffer* TakeRoiCrop(JxlWasmDecState* s) {
+  if (s->pixels == nullptr || !s->info_known) return nullptr;
+  const uint32_t width  = s->info.xsize;
+  const uint32_t height = s->info.ysize;
+  if (width == 0u || height == 0u) return nullptr;
+  const uint32_t bits = (s->pixel_format.data_type == JXL_TYPE_UINT16) ? 16u : (s->pixel_format.data_type == JXL_TYPE_FLOAT) ? 32u : 8u;
+  const uint32_t bps  = (bits == 32u) ? 4u : (bits == 16u) ? 2u : 1u;
+  const uint32_t stride = 4u * bps;
+  const uint32_t ds = (s->roi_downsample >= 1u) ? s->roi_downsample : 1u;
+
+  // normalizeRegion(region, width, height): upper-clamp to image bounds. Lower bounds were
+  // already applied by the caller (x,y >= 0; w,h >= 1).
+  uint32_t rx = (s->roi_x > width  - 1u) ? width  - 1u : s->roi_x;
+  uint32_t ry = (s->roi_y > height - 1u) ? height - 1u : s->roi_y;
+  const uint32_t maxW = width  - rx;
+  const uint32_t maxH = height - ry;
+  uint32_t rw = (s->roi_w < 1u) ? 1u : s->roi_w; if (rw > maxW) rw = maxW;
+  uint32_t rh = (s->roi_h < 1u) ? 1u : s->roi_h; if (rh > maxH) rh = maxH;
+
+  uint32_t outW = (rw + ds - 1u) / ds; if (outW < 1u) outW = 1u;
+  uint32_t outH = (rh + ds - 1u) / ds; if (outH < 1u) outH = 1u;
+  const size_t out_size = static_cast<size_t>(outW) * outH * stride;
+
+  if (s->roi_buf == nullptr || out_size > s->roi_cap) {
+    uint8_t* grown = static_cast<uint8_t*>(realloc(s->roi_buf, out_size));
+    if (grown == nullptr) return nullptr;
+    s->roi_buf = grown;
+    s->roi_cap = out_size;
+  }
+
+  const uint8_t* base       = s->pixels;
+  const size_t   srcRowStep = static_cast<size_t>(width) * stride * ds;
+  const size_t   srcPxStep  = static_cast<size_t>(stride) * ds;
+  const size_t   srcStart   = (static_cast<size_t>(ry) * width + rx) * stride;
+  for (uint32_t oy = 0; oy < outH; ++oy) {
+    const uint8_t* sp = base + srcStart + static_cast<size_t>(oy) * srcRowStep;
+    uint8_t* dp = s->roi_buf + static_cast<size_t>(oy) * outW * stride;
+    for (uint32_t ox = 0; ox < outW; ++ox) {
+      memcpy(dp, sp, stride);
+      sp += srcPxStep;
+      dp += stride;
+    }
+  }
+  return MakeBufferBorrowed(s->roi_buf, out_size, outW, outH, bits, 1);
+}
+
 // Progress returns a borrowed pixels handle; final transfers pixel ownership.
 JxlWasmBuffer* jxl_wasm_dec_take_flushed(JxlWasmDecState* s) {
   if (s == nullptr || !s->flushed_ready || !s->info_known || s->pixels == nullptr) return nullptr;
   s->flushed_ready = false;
-  const uint32_t bits = (s->pixel_format.data_type == JXL_TYPE_UINT16) ? 16u : (s->pixel_format.data_type == JXL_TYPE_FLOAT) ? 32u : 8u;
-  JxlWasmBuffer* buf = MakeBufferBorrowed(s->pixels, s->flushed_size, s->info.xsize, s->info.ysize, bits, 1);
   s->flushed_size = 0;
-  return buf;
+  if (s->roi_active) return TakeRoiCrop(s);
+  const uint32_t bits = (s->pixel_format.data_type == JXL_TYPE_UINT16) ? 16u : (s->pixel_format.data_type == JXL_TYPE_FLOAT) ? 32u : 8u;
+  return MakeBufferBorrowed(s->pixels, s->pixels_size, s->info.xsize, s->info.ysize, bits, 1);
 }
 
 JxlWasmBuffer* jxl_wasm_dec_take_final(JxlWasmDecState* s) {
   if (s == nullptr || !s->final_ready || s->pixels == nullptr || !s->info_known) return nullptr;
   s->final_ready = false;
+  // ROI path: return a borrowed crop; s->pixels stays owned by the state (freed in dec_free).
+  if (s->roi_active) return TakeRoiCrop(s);
   const uint32_t bits = (s->pixel_format.data_type == JXL_TYPE_UINT16) ? 16u : (s->pixel_format.data_type == JXL_TYPE_FLOAT) ? 32u : 8u;
   JxlWasmBuffer* buf = MakeBufferFromOwned(s->pixels, s->pixels_size, s->info.xsize, s->info.ysize, bits, 1);
   s->pixels = nullptr;
@@ -2400,6 +2477,7 @@ void jxl_wasm_dec_free(JxlWasmDecState* s) {
   if (s->dec != nullptr) JxlDecoderDestroy(s->dec);
   free(s->pixels);       // no-op if ownership was transferred via dec_take_final
   free(s->flushed);      // no-op if ownership was transferred via dec_take_flushed
+  free(s->roi_buf);      // grow-only ROI crop scratch (always state-owned, borrowed out)
   free(s->input_buf);
   free(s->gm_buf);       // no-op if box was fully consumed or never started
   free(s->gain_map_jxl); // no-op if ownership was transferred via dec_take_gain_map

@@ -432,6 +432,9 @@ interface LibjxlWasmModule {
   _jxl_wasm_dec_create?(format: number, progressiveDetail: number): number;
   _jxl_wasm_dec_create_x?(format: number, progressiveDetail: number, flags: number): number;
   _jxl_wasm_dec_set_paint_target?(state: number, paints: number): void;
+  // Progressive ROI crop + nearest downsample in C++ (byte-exact with applyRegionAndDownsample).
+  // Present after a WASM rebuild with the ROI bridge; absent => JS full-frame-then-crop fallback.
+  _jxl_wasm_dec_set_region?(state: number, x: number, y: number, w: number, h: number, downsample: number): void;
   _jxl_wasm_dec_push?(state: number, dataPtr: number, size: number): number;
   _jxl_wasm_dec_close_input?(state: number): void;
   _jxl_wasm_dec_width?(state: number): number;
@@ -1537,6 +1540,9 @@ class LibjxlDecoder implements JxlDecoder {
       const pixelStride = 4 * bpc;
       const fmt = this.options.format;
       let resolvedDownsample: 1 | 2 | 4 | 8 = this.options.downsample ?? 1;
+      // Set once the header is known: true when the rebuilt bridge will crop+downsample this
+      // decode in C++ (dec_set_region called), so takeAndWrap must NOT re-crop in JS.
+      let cppRoi = false;
       let resizePlan: ResizePlan | null = null;
       let progressiveSequence = 0;
       let progFramePrepMs = 0;
@@ -1572,18 +1578,27 @@ class LibjxlDecoder implements JxlDecoder {
         if (handle === 0) return null;
         const buf = retainBufferView(module, handle, "decode");
         try {
-          const tCrop0 = performance.now();
-          let pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region ?? null, resolvedDownsample, bpc);
-          regionCropMs += performance.now() - tCrop0;
-          if (pixels.data === buf.data) {
-            pixels = { ...pixels, data: new Uint8Array(buf.data) };
+          let pixels: { data: Uint8Array; width: number; height: number; region?: Region };
+          if (cppRoi) {
+            // C++ already cropped + nearest-downsampled to output dims (byte-exact with the JS
+            // path). Copy out of the borrowed WASM view — roi_buf is reused across paints.
+            pixels = { data: new Uint8Array(buf.data), width: buf.width, height: buf.height };
+            if (this.options.region != null) pixels.region = { x: 0, y: 0, w: buf.width, h: buf.height };
+          } else {
+            const tCrop0 = performance.now();
+            pixels = applyRegionAndDownsample(buf.data, buf.width, buf.height, this.options.region ?? null, resolvedDownsample, bpc);
+            regionCropMs += performance.now() - tCrop0;
+            if (pixels.data === buf.data) {
+              pixels = { ...pixels, data: new Uint8Array(buf.data) };
+            }
           }
-          // When ROI/downsample crops the frame, pixels.width/height differ from full image dims.
-          // buildInfo memoizes on first call (full dims from header), so we must not pass it
-          // cropped dims — it would return the already-memoized full-dim object regardless.
-          // Instead, derive evInfo from the base info with actual pixel dimensions.
+          // evInfo: full image dims live in the memoized `info` (set at header). buildInfo
+          // memoizes on first call, so it always returns the full-dim object; when the output
+          // is cropped/downsampled, override width/height with the actual pixel dims.
           const baseInfo = buildInfo(buf.width, buf.height, buf.bitsPerSample, buf.hasAlpha);
-          const evInfo: ImageInfo = (pixels.width !== buf.width || pixels.height !== buf.height)
+          const fullW = info ? info.width : buf.width;
+          const fullH = info ? info.height : buf.height;
+          const evInfo: ImageInfo = (pixels.width !== fullW || pixels.height !== fullH)
             ? { ...baseInfo, width: pixels.width, height: pixels.height }
             : baseInfo;
           return { pixels, evInfo };
@@ -1671,6 +1686,20 @@ class LibjxlDecoder implements JxlDecoder {
               const scaledW = Math.max(1, Math.ceil(w / resolvedDownsample));
               const scaledH = Math.max(1, Math.ceil(h / resolvedDownsample));
               resizePlan = buildResizePlan(scaledW, scaledH, targetW, targetH, fitMode, bpc as 1 | 2 | 4);
+            }
+            // C++-side progressive ROI crop: when the rebuilt bridge exposes dec_set_region and
+            // there is real crop/downsample work, do it in C++ (byte-exact with the JS
+            // applyRegionAndDownsample fallback) so the per-paint JS crop loop is skipped and
+            // only the cropped pixels cross to JS. Absent symbol => JS fallback unchanged.
+            const needsCrop = this.options.region != null || resolvedDownsample > 1;
+            if (needsCrop && typeof module._jxl_wasm_dec_set_region === "function") {
+              const r = this.options.region;
+              const rx = r ? Math.max(0, Math.trunc(r.x)) : 0;
+              const ry = r ? Math.max(0, Math.trunc(r.y)) : 0;
+              const rw = r ? Math.max(1, Math.trunc(r.w)) : w;
+              const rh = r ? Math.max(1, Math.trunc(r.h)) : h;
+              module._jxl_wasm_dec_set_region(dec, rx, ry, rw, rh, resolvedDownsample);
+              cppRoi = true;
             }
             yield { type: "header", info: buildInfo(w, h) };
             if (this.options.progressionTarget === "header") return;
