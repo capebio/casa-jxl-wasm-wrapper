@@ -65,7 +65,10 @@ test('Sneyers progressive settings emit multiple visible non-final passes', asyn
   expect(finalSeen).toBe(true);
   expect(progressEvents).toBeGreaterThan(1);
   expect(progressHashes.size).toBeGreaterThan(1);
-}, 30000);
+  // Real WASM encode(effort)+multi-pass progressive decode runs ~26-32s in node's
+  // single-thread simd tier; the old 30s wall sat inside that variance band and went
+  // flaky. 60s gives headroom without masking a genuine hang.
+}, 60000);
 
 function makeStructuredNoisePixels(width: number, height: number): Uint8Array {
   const out = new Uint8Array(width * height * 4);
