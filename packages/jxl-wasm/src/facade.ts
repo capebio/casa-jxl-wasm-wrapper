@@ -385,6 +385,15 @@ interface RetainedBufferView extends LibjxlBuffer {
   release(): void;
 }
 
+interface ResizeAxis {
+  i0: Int32Array;
+  i1: Int32Array;
+  t: Float32Array;
+  // Lazily-cached 8.8 fixed-point weights for the rgba8 resize kernel. Computed
+  // once per axis (a ResizePlan axis is reused across every progressive paint).
+  fixed256?: Int16Array;
+}
+
 interface ResizePlan {
   srcW: number;
   srcH: number;
@@ -392,8 +401,8 @@ interface ResizePlan {
   dstH: number;
   fitMode: "contain" | "cover" | "stretch";
   bpc: 1 | 2 | 4;
-  xAxis?: { i0: Int32Array; i1: Int32Array; t: Float32Array };
-  yAxis?: { i0: Int32Array; i1: Int32Array; t: Float32Array };
+  xAxis?: ResizeAxis;
+  yAxis?: ResizeAxis;
 }
 
 interface LibjxlWasmModule {
@@ -775,6 +784,8 @@ export async function computeButteraugli(
 export class ButteraugliComparator {
   private refPtr = 0;       // raw pixels in WASM heap (legacy single-shot path)
   private refStatePtr = 0;  // JxlWasmButterRef* (ref-cached path — only test Image3F built per compare)
+  private candidatePtr = 0; // reused candidate staging buffer (grow-only across compares)
+  private candidateCap = 0; // capacity in bytes of candidatePtr
 
   private constructor(
     private readonly module: LibjxlWasmModule,
@@ -821,21 +832,26 @@ export class ButteraugliComparator {
       throw new Error("ButteraugliComparator has been disposed");
     }
     const pixelSize = butteraugliPixelSize(candidate, this.width, this.height, "ButteraugliComparator.compare");
-    const ptr = mallocOrThrow(this.module, pixelSize, "Butteraugli candidate");
-    try {
-      const view = copyOrBorrowInput(candidate, false);
-      this.module.HEAPU8.set(view.subarray(0, pixelSize), ptr);
-      if (this.refStatePtr !== 0) {
-        const bits = (this.module as any)._jxl_wasm_butteraugli_ref_compare(this.refStatePtr, ptr);
-        if (bits < 0) throw new Error("Butteraugli WASM compare failed");
-        return floatFromI32Bits(bits);
-      } else {
-        const bits = this.module._jxl_wasm_butteraugli_compare!(this.refPtr, ptr, this.width, this.height);
-        if (bits < 0) throw new Error("Butteraugli WASM compare failed");
-        return floatFromI32Bits(bits);
-      }
-    } finally {
-      this.module._free(ptr);
+    // Reuse one candidate staging buffer across compares (width×height are fixed at
+    // construction, so pixelSize is constant; grow-only handles oversized inputs).
+    // Removes a malloc/free pair per compare — meaningful for progressive paints and
+    // parameter sweeps that compare many candidates against one reference.
+    if (this.candidatePtr === 0 || pixelSize > this.candidateCap) {
+      if (this.candidatePtr !== 0) this.module._free(this.candidatePtr);
+      this.candidatePtr = mallocOrThrow(this.module, pixelSize, "Butteraugli candidate");
+      this.candidateCap = pixelSize;
+    }
+    const ptr = this.candidatePtr;
+    const view = copyOrBorrowInput(candidate, false);
+    this.module.HEAPU8.set(view.subarray(0, pixelSize), ptr);
+    if (this.refStatePtr !== 0) {
+      const bits = (this.module as any)._jxl_wasm_butteraugli_ref_compare(this.refStatePtr, ptr);
+      if (bits < 0) throw new Error("Butteraugli WASM compare failed");
+      return floatFromI32Bits(bits);
+    } else {
+      const bits = this.module._jxl_wasm_butteraugli_compare!(this.refPtr, ptr, this.width, this.height);
+      if (bits < 0) throw new Error("Butteraugli WASM compare failed");
+      return floatFromI32Bits(bits);
     }
   }
 
@@ -847,6 +863,11 @@ export class ButteraugliComparator {
     if (this.refPtr !== 0) {
       this.module._free(this.refPtr);
       this.refPtr = 0;
+    }
+    if (this.candidatePtr !== 0) {
+      this.module._free(this.candidatePtr);
+      this.candidatePtr = 0;
+      this.candidateCap = 0;
     }
   }
 }
@@ -2909,7 +2930,7 @@ function isValidJpegHeaderMarker(marker: number): boolean {
   );
 }
 
-function applyRegionAndDownsample(
+export function applyRegionAndDownsample(
   data: Uint8Array,
   width: number,
   height: number,
@@ -2940,29 +2961,65 @@ function applyRegionAndDownsample(
       const srcStart = ((sourceRegion.y + y) * width + sourceRegion.x) * stride;
       out.set(data.subarray(srcStart, srcStart + outWidth * stride), y * outWidth * stride);
     }
-  } else if (stride === 4) {
-    // rgba8 downsample — direct element assignment; sy hoisted out of inner loop.
-    for (let y = 0; y < outHeight; y++) {
-      const srcRowBase = (sourceRegion.y + Math.min(sourceRegion.h - 1, y * downsample)) * width * 4;
-      const dstRowBase = y * outWidth * 4;
-      for (let x = 0; x < outWidth; x++) {
-        const src = srcRowBase + (sourceRegion.x + Math.min(sourceRegion.w - 1, x * downsample)) * 4;
-        const dst = dstRowBase + x * 4;
-        out[dst]     = data[src]!;
-        out[dst + 1] = data[src + 1]!;
-        out[dst + 2] = data[src + 2]!;
-        out[dst + 3] = data[src + 3]!;
-      }
-    }
   } else {
-    // General path (rgba16 / rgbaf32 downsample) — sy hoisted out of inner loop.
-    for (let y = 0; y < outHeight; y++) {
-      const srcRowBase = (sourceRegion.y + Math.min(sourceRegion.h - 1, y * downsample)) * width * stride;
-      const dstRowBase = y * outWidth * stride;
-      for (let x = 0; x < outWidth; x++) {
-        const src = srcRowBase + (sourceRegion.x + Math.min(sourceRegion.w - 1, x * downsample)) * stride;
-        const dst = dstRowBase + x * stride;
-        out.set(data.subarray(src, src + stride), dst);
+    // Downsample (nearest): walk source by a fixed pixel/row step with linear pointer
+    // advancement. The per-pixel Math.min clamps the old path carried are mathematically
+    // unreachable — outWidth = ceil(w/ds) ⇒ (outWidth-1)*ds ≤ w-1 (same for height) — so
+    // x*ds / y*ds never exceed the region, and the bounds checks are dropped.
+    const sourceOffset = (sourceRegion.y * width + sourceRegion.x) * stride;
+    const rowStepBytes = width * stride * downsample;
+    const pixelStepBytes = stride * downsample;
+
+    if ((data.byteOffset & 3) === 0) {
+      // Aligned fast path: copy whole RGBA pixels as 32-bit words (1/2/4 words per pixel
+      // for rgba8/rgba16/rgbaf32). Little-endian word copy is byte-identical to the
+      // element-by-element copy it replaces, and removes the per-pixel subarray() alloc.
+      const wordsPerPixel = stride >>> 2;
+      const sourceWords = new Uint32Array(data.buffer, data.byteOffset, data.byteLength >>> 2);
+      const outputWords = new Uint32Array(out.buffer);
+      const rowStep = rowStepBytes >>> 2;
+      const pixelStep = pixelStepBytes >>> 2;
+      let sourceRow = sourceOffset >>> 2;
+      let outputRow = 0;
+      if (wordsPerPixel === 1) {
+        for (let y = 0; y < outHeight; y++, sourceRow += rowStep, outputRow += outWidth) {
+          let src = sourceRow;
+          let dst = outputRow;
+          for (let x = 0; x < outWidth; x++, src += pixelStep, dst++) {
+            outputWords[dst] = sourceWords[src]!;
+          }
+        }
+      } else if (wordsPerPixel === 2) {
+        for (let y = 0; y < outHeight; y++, sourceRow += rowStep, outputRow += outWidth * 2) {
+          let src = sourceRow;
+          let dst = outputRow;
+          for (let x = 0; x < outWidth; x++, src += pixelStep, dst += 2) {
+            outputWords[dst] = sourceWords[src]!;
+            outputWords[dst + 1] = sourceWords[src + 1]!;
+          }
+        }
+      } else {
+        for (let y = 0; y < outHeight; y++, sourceRow += rowStep, outputRow += outWidth * 4) {
+          let src = sourceRow;
+          let dst = outputRow;
+          for (let x = 0; x < outWidth; x++, src += pixelStep, dst += 4) {
+            outputWords[dst] = sourceWords[src]!;
+            outputWords[dst + 1] = sourceWords[src + 1]!;
+            outputWords[dst + 2] = sourceWords[src + 2]!;
+            outputWords[dst + 3] = sourceWords[src + 3]!;
+          }
+        }
+      }
+    } else {
+      // Unaligned fallback (source not 4-byte aligned): per-byte copy with linear advance.
+      let sourceRow = sourceOffset;
+      let outputRow = 0;
+      for (let y = 0; y < outHeight; y++, sourceRow += rowStepBytes, outputRow += outWidth * stride) {
+        let src = sourceRow;
+        let dst = outputRow;
+        for (let x = 0; x < outWidth; x++, src += pixelStepBytes, dst += stride) {
+          for (let b = 0; b < stride; b++) out[dst + b] = data[src + b]!;
+        }
       }
     }
   }
@@ -2978,7 +3035,7 @@ function applyRegionAndDownsample(
   return result;
 }
 
-function buildResizeAxis(srcSize: number, dstSize: number, srcStart = 0, srcSpan = srcSize): { i0: Int32Array; i1: Int32Array; t: Float32Array } {
+export function buildResizeAxis(srcSize: number, dstSize: number, srcStart = 0, srcSpan = srcSize): ResizeAxis {
   const i0 = new Int32Array(dstSize);
   const i1 = new Int32Array(dstSize);
   const t = new Float32Array(dstSize);
@@ -2993,15 +3050,28 @@ function buildResizeAxis(srcSize: number, dstSize: number, srcStart = 0, srcSpan
   return { i0, i1, t };
 }
 
-function bilinearResize(
+// 8.8 fixed-point interpolation weights ((t*256)|0), cached on the axis so a plan
+// reused across every progressive paint truncates the float weights only once.
+// Identical values to the per-call computation it replaces, hence byte-exact.
+function fixedResizeWeights256(axis: ResizeAxis): Int16Array {
+  let fixed = axis.fixed256;
+  if (fixed !== undefined) return fixed;
+  const t = axis.t;
+  fixed = new Int16Array(t.length);
+  for (let i = 0; i < fixed.length; i++) fixed[i] = (t[i]! * 256) | 0;
+  axis.fixed256 = fixed;
+  return fixed;
+}
+
+export function bilinearResize(
   src: Uint8Array,
   srcW: number,
   srcH: number,
   dstW: number,
   dstH: number,
   stride: number, // 4=rgba8, 8=rgba16, 16=rgbaf32
-  xAxisIn?: { i0: Int32Array; i1: Int32Array; t: Float32Array },
-  yAxisIn?: { i0: Int32Array; i1: Int32Array; t: Float32Array },
+  xAxisIn?: ResizeAxis,
+  yAxisIn?: ResizeAxis,
 ): Uint8Array {
   if (srcW === dstW && srcH === dstH) return src;
   const dst = new Uint8Array(dstW * dstH * stride);
@@ -3010,19 +3080,23 @@ function bilinearResize(
   if (stride === 4) {
     // 8.8 fixed-point weights: eliminates float↔int traffic per channel.
     // Weights sum to exactly 256; +128 before >>8 gives unbiased rounding.
-    // The x-axis fixed-point weight is column-invariant — precompute it once
-    // (dstW truncations) instead of per pixel (dstW×dstH truncations).
-    const xtIs = new Int32Array(dstW);
-    for (let dx = 0; dx < dstW; dx++) xtIs[dx] = (xAxis.t[dx]! * 256) | 0;
+    // Both axes' fixed-point weights are now cached on the axis (column-/row-invariant),
+    // so repeated paints over one plan never re-truncate. The 4-channel inner loop is
+    // unrolled — same arithmetic per channel, fewer loop-overhead instructions.
+    const xtIs = fixedResizeWeights256(xAxis);
+    const ytIs = fixedResizeWeights256(yAxis);
+    const i0x = xAxis.i0;
+    const i1x = xAxis.i1;
     for (let dy = 0; dy < dstH; dy++) {
       const y0 = yAxis.i0[dy]!;
       const y1 = yAxis.i1[dy]!;
-      const ytI = (yAxis.t[dy]! * 256) | 0;
+      const ytI = ytIs[dy]!;
       const row00 = y0 * srcW * 4;
       const row10 = y1 * srcW * 4;
+      const dstRow = dy * dstW * 4;
       for (let dx = 0; dx < dstW; dx++) {
-        const x0 = xAxis.i0[dx]!;
-        const x1 = xAxis.i1[dx]!;
+        const x0 = i0x[dx]!;
+        const x1 = i1x[dx]!;
         const xtI = xtIs[dx]!;
         const w11 = (xtI * ytI) >> 8;
         const w10 = ytI - w11;
@@ -3032,72 +3106,79 @@ function bilinearResize(
         const topRight   = row00 + x1 * 4;
         const bottomLeft = row10 + x0 * 4;
         const bottomRight = row10 + x1 * 4;
-        const dstOff = (dy * dstW + dx) * 4;
-        for (let c = 0; c < 4; c++) {
-          dst[dstOff + c] = (src[topLeft + c]! * w00 + src[topRight + c]! * w01 + src[bottomLeft + c]! * w10 + src[bottomRight + c]! * w11 + 128) >> 8;
-        }
+        const dstOff = dstRow + dx * 4;
+        dst[dstOff]     = (src[topLeft]!     * w00 + src[topRight]!     * w01 + src[bottomLeft]!     * w10 + src[bottomRight]!     * w11 + 128) >> 8;
+        dst[dstOff + 1] = (src[topLeft + 1]! * w00 + src[topRight + 1]! * w01 + src[bottomLeft + 1]! * w10 + src[bottomRight + 1]! * w11 + 128) >> 8;
+        dst[dstOff + 2] = (src[topLeft + 2]! * w00 + src[topRight + 2]! * w01 + src[bottomLeft + 2]! * w10 + src[bottomRight + 2]! * w11 + 128) >> 8;
+        dst[dstOff + 3] = (src[topLeft + 3]! * w00 + src[topRight + 3]! * w01 + src[bottomLeft + 3]! * w10 + src[bottomRight + 3]! * w11 + 128) >> 8;
       }
     }
   } else if (stride === 8) {
     const srcView = new Uint16Array(src.buffer, src.byteOffset, src.byteLength >> 1);
     const dstView = new Uint16Array(dst.buffer);
+    const i0x = xAxis.i0;
+    const i1x = xAxis.i1;
+    const tx = xAxis.t;
     for (let dy = 0; dy < dstH; dy++) {
       const y0 = yAxis.i0[dy]!;
       const y1 = yAxis.i1[dy]!;
       const yt = yAxis.t[dy]!;
+      const invYt = 1 - yt;
       const row00 = y0 * srcW * 4;
       const row10 = y1 * srcW * 4;
+      const dstRow = dy * dstW * 4;
       for (let dx = 0; dx < dstW; dx++) {
-        const x0 = xAxis.i0[dx]!;
-        const x1 = xAxis.i1[dx]!;
-        const xt = xAxis.t[dx]!;
-        const w00 = (1 - xt) * (1 - yt);
-        const w01 = xt * (1 - yt);
-        const w10 = (1 - xt) * yt;
+        const x0 = i0x[dx]!;
+        const x1 = i1x[dx]!;
+        const xt = tx[dx]!;
+        const invXt = 1 - xt;
+        const w00 = invXt * invYt;
+        const w01 = xt * invYt;
+        const w10 = invXt * yt;
         const w11 = xt * yt;
         const topLeft    = row00 + x0 * 4;
         const topRight   = row00 + x1 * 4;
         const bottomLeft = row10 + x0 * 4;
         const bottomRight = row10 + x1 * 4;
-        const dstOff = (dy * dstW + dx) * 4;
-        for (let c = 0; c < 4; c++) {
-          const tl = srcView[topLeft + c]!;
-          const tr = srcView[topRight + c]!;
-          const bl = srcView[bottomLeft + c]!;
-          const br = srcView[bottomRight + c]!;
-          dstView[dstOff + c] = Math.max(0, Math.min(65535, Math.round(tl * w00 + tr * w01 + bl * w10 + br * w11)));
-        }
+        const dstOff = dstRow + dx * 4;
+        dstView[dstOff]     = Math.max(0, Math.min(65535, Math.round(srcView[topLeft]!     * w00 + srcView[topRight]!     * w01 + srcView[bottomLeft]!     * w10 + srcView[bottomRight]!     * w11)));
+        dstView[dstOff + 1] = Math.max(0, Math.min(65535, Math.round(srcView[topLeft + 1]! * w00 + srcView[topRight + 1]! * w01 + srcView[bottomLeft + 1]! * w10 + srcView[bottomRight + 1]! * w11)));
+        dstView[dstOff + 2] = Math.max(0, Math.min(65535, Math.round(srcView[topLeft + 2]! * w00 + srcView[topRight + 2]! * w01 + srcView[bottomLeft + 2]! * w10 + srcView[bottomRight + 2]! * w11)));
+        dstView[dstOff + 3] = Math.max(0, Math.min(65535, Math.round(srcView[topLeft + 3]! * w00 + srcView[topRight + 3]! * w01 + srcView[bottomLeft + 3]! * w10 + srcView[bottomRight + 3]! * w11)));
       }
     }
   } else {
     const srcView = new Float32Array(src.buffer, src.byteOffset, src.byteLength >> 2);
     const dstView = new Float32Array(dst.buffer);
+    const i0x = xAxis.i0;
+    const i1x = xAxis.i1;
+    const tx = xAxis.t;
     for (let dy = 0; dy < dstH; dy++) {
       const y0 = yAxis.i0[dy]!;
       const y1 = yAxis.i1[dy]!;
       const yt = yAxis.t[dy]!;
+      const invYt = 1 - yt;
       const row00 = y0 * srcW * 4;
       const row10 = y1 * srcW * 4;
+      const dstRow = dy * dstW * 4;
       for (let dx = 0; dx < dstW; dx++) {
-        const x0 = xAxis.i0[dx]!;
-        const x1 = xAxis.i1[dx]!;
-        const xt = xAxis.t[dx]!;
-        const w00 = (1 - xt) * (1 - yt);
-        const w01 = xt * (1 - yt);
-        const w10 = (1 - xt) * yt;
+        const x0 = i0x[dx]!;
+        const x1 = i1x[dx]!;
+        const xt = tx[dx]!;
+        const invXt = 1 - xt;
+        const w00 = invXt * invYt;
+        const w01 = xt * invYt;
+        const w10 = invXt * yt;
         const w11 = xt * yt;
         const topLeft    = row00 + x0 * 4;
         const topRight   = row00 + x1 * 4;
         const bottomLeft = row10 + x0 * 4;
         const bottomRight = row10 + x1 * 4;
-        const dstOff = (dy * dstW + dx) * 4;
-        for (let c = 0; c < 4; c++) {
-          const tl = srcView[topLeft + c]!;
-          const tr = srcView[topRight + c]!;
-          const bl = srcView[bottomLeft + c]!;
-          const br = srcView[bottomRight + c]!;
-          dstView[dstOff + c] = tl * w00 + tr * w01 + bl * w10 + br * w11;
-        }
+        const dstOff = dstRow + dx * 4;
+        dstView[dstOff]     = srcView[topLeft]!     * w00 + srcView[topRight]!     * w01 + srcView[bottomLeft]!     * w10 + srcView[bottomRight]!     * w11;
+        dstView[dstOff + 1] = srcView[topLeft + 1]! * w00 + srcView[topRight + 1]! * w01 + srcView[bottomLeft + 1]! * w10 + srcView[bottomRight + 1]! * w11;
+        dstView[dstOff + 2] = srcView[topLeft + 2]! * w00 + srcView[topRight + 2]! * w01 + srcView[bottomLeft + 2]! * w10 + srcView[bottomRight + 2]! * w11;
+        dstView[dstOff + 3] = srcView[topLeft + 3]! * w00 + srcView[topRight + 3]! * w01 + srcView[bottomLeft + 3]! * w10 + srcView[bottomRight + 3]! * w11;
       }
     }
   }
