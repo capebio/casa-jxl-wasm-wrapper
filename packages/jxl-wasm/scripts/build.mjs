@@ -11,7 +11,11 @@ import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, "..");
 const distDir = join(packageRoot, "dist");
-const workDir = join(os.tmpdir(), "jxl-wasm-work");
+// Honor JXL_WASM_WORKDIR so concurrent builds (multiple worktrees/agents) don't share one
+// scratch tree and corrupt each other's libjxl clone. Defaults to the shared temp dir.
+const workDir = process.env.JXL_WASM_WORKDIR
+  ? resolve(process.env.JXL_WASM_WORKDIR)
+  : join(os.tmpdir(), "jxl-wasm-work");
 const dockerBinary = resolveDockerBinary();
 const emcmakeBinary = resolveEmscriptenBinary("emcmake");
 const emppBinary = resolveEmscriptenBinary("em++");

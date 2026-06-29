@@ -15,6 +15,7 @@ _jxl_wasm_buffer_free
 _jxl_wasm_dec_create
 _jxl_wasm_dec_create_x
 _jxl_wasm_dec_set_paint_target
+_jxl_wasm_dec_set_region
 _jxl_wasm_dec_push
 _jxl_wasm_dec_close_input
 _jxl_wasm_dec_width
