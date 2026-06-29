@@ -733,3 +733,21 @@ Machine: i7-10850H, **6 physical cores / 12 logical (HT)**. Probe `examples/dng_
 **C — predictor-chain ILP restructuring: REJECTED (neutral).** Built `decode_c2_ilp` (capture both predictors, decode both residuals, then two independent reconstruct adds back-to-back — vs the shipped interleaved `decode0→recon0→decode1→recon1`). Parity EXACT, run parallel (real path). **Measured -0.5% / -1.0% vs `decode_c2` — neutral.** The out-of-order core already overlaps the two independent predictor chains (`left0`/`left1` were already separate accumulators); the serial, latency-bound bitstream decode is the bottleneck and reordering the cheap reconstruct adds cannot shorten it. Reverted.
 
 **Conclusion:** every LJPEG *decode-kernel* lever is now exhausted (fast12, DHT cache, bit fusion ×2, predictor ILP, row parallelism all dead; cps=2 monomorphization is the one win). Decode is at its floor: per-core latency-bound, cores saturated. The only remaining headroom is *outside* the kernel — `dng::decode_bytes` spends ~36% (≈14 ms) in per-tile buffer alloc + blit-into-frame + IFD parse (the decoder→output seam), and downstream demosaic re-reads the u16 frame. That is the next investigation (decoder→pipeline fusion), not the decoder itself.
+
+---
+
+## 2026-06-29 — A-5 in-place `Vec<u16> → Vec<u8>` transmute (full-res 16-bit pack) — REJECTED (UB)
+
+CrawlBot2000's A-5 note proposed reclaiming the second full-res buffer by transmuting the `rgb16`
+`Vec<u16>` to a packed `Vec<u8>` in place ("move-transmute after a tone reorder"). **Rejected: formally
+undefined behaviour.** `Vec::<u8>::from_raw_parts(ptr, len*2, cap*2)` deallocates with
+`Layout::array::<u8>(cap*2)` (align **1**), but the buffer was allocated as `Vec<u16>` (align **2**).
+The global-allocator contract requires the dealloc `Layout` to match the alloc `Layout` (size **and**
+align); the alignment mismatch is UB — the same `unsafe`/WASM-audit rejected class as D6 (uninit
+`set_len`). It "works" only because dlmalloc ignores align on free; not shippable under this repo's
+unsafe policy.
+
+**Shipped instead (sound):** deferred-move + lazy pack — hold the 16-bit master as `Vec<u16>` moved
+out of the tone path, pack to LE bytes in `take_rgb16_full`. Zero `unsafe`, byte-exact, **−32%
+process-compute peak** (−56.7 MB @9.9 MP; verified wasm A/B). Details: `CrawlBot2000Findings.md` →
+"A-5 follow-up (2026-06-29)"; branch `crawlbot/a5-pack-rgb16-deferred-jun29-x7q3`.

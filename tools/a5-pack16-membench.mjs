@@ -50,20 +50,29 @@ const mod = await import(pathToFileURL(mainJs).href);
 
 const data = new Uint8Array(dng);
 
+// Authoritative wasm linear-memory size (monotonic — never shrinks, so reading
+// it after a synchronous call gives the high-water reached during that call).
+// wasm-bindgen --target nodejs re-exports the instance exports as __wasm.
+const wasmBytes = () => mod.__wasm?.memory?.buffer?.byteLength ?? 0;
+
 // Signature: (data, output_flags, exposure_ev, contrast, highlights, shadows,
 //   whites, blacks, saturation, vibrance, temp, tint, wb_r_override,
 //   wb_b_override, texture, clarity). Neutral look; wb overrides NaN = use camera.
+const wasmBaseline = wasmBytes();
 const before = process.memoryUsage();
 const res = mod.process_dng_with_flags(
   data, flags,
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
   NaN, NaN, texture, 0,
 );
-// Peak wasm linear memory at the moment process() returns (pre-take).
+// Peak wasm linear memory at the moment process() returns (pre-take) — this is
+// where A-5 bites: OLD has packed a 2nd full-res buffer here, NEW has not.
+const wasmAfterProcess = wasmBytes();
 const afterProcess = process.memoryUsage();
 
 const rgb = res.take_rgb();
 const full16 = res.take_rgb16_full();
+const wasmAfterTakes = wasmBytes();
 const afterTakes = process.memoryUsage();
 
 const out = {
@@ -73,12 +82,17 @@ const out = {
   dims: { w: res.width, h: res.height, full16_w: res.full16_w, full16_h: res.full16_h },
   bytes: { rgb: rgb.length, full16: full16.length },
   hash: { rgb: fnv1a(rgb), full16: fnv1a(full16) },
-  mem_MB: {
+  wasm_linear_MB: {
+    baseline: MB(wasmBaseline),
+    after_process: MB(wasmAfterProcess),
+    after_takes: MB(wasmAfterTakes),
+  },
+  node_mem_MB: {
     arrayBuffers_after_process: MB(afterProcess.arrayBuffers),
-    arrayBuffers_after_takes: MB(afterTakes.arrayBuffers),
     external_after_process: MB(afterProcess.external),
     rss_after_process: MB(afterProcess.rss),
-    arrayBuffers_baseline: MB(before.arrayBuffers),
+    arrayBuffers_after_takes: MB(afterTakes.arrayBuffers),
+    rss_baseline: MB(before.rss),
   },
 };
-console.log(JSON.stringify(out));
+console.log(JSON.stringify(out, null, 2));
