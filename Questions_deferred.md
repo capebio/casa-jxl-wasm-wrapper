@@ -255,3 +255,26 @@ Deferred items grouped by file/package scope + dependency + effort.
 - **Questions_progressive-encode.md** — Encode architecture scope
 - **Questions_implemented.md** — 3 deployed quick wins (b5249622)
 - **Questions_falsified.md** — 3 rejected items
+
+---
+
+## 2026-06-29 — enc_convolve_separable5 edge-coverage (branch perf/enc-conv5-edge-coverage-z3k)
+
+Landed on the branch: scalar-tail Mirror elision, RunOnPool status propagation,
+border horiz-dedup, dedicated tiny-height (ysize<=4) kernel, SIMD N/N+1
+width-cliff. Deferred (out of this file's scope):
+
+- **Parallelize butteraugli `Blur`** — it calls `Separable5(..., pool=nullptr)`
+  (serial), and Blur is the encode bottleneck. A pooled call would help, but the
+  pool isn't plumbed into `Blur`; it's a `butteraugli.cc` change, behavioral,
+  separate from conv5. Gate: thread the comparator's pool into Blur.
+- **In-place `Separable5` variant** — butteraugli guards `&in != out` and uses a
+  temp. A delayed-write in-place variant could drop the temp image. New API +
+  aliasing contract; not byte-exact-trivial.
+- **Weight-family dispatch** (identity / 3-tap / 1-D / separable-3x3) — would skip
+  work for degenerate kernels, but needs coefficient telemetry first (NaN /
+  signed-zero policy + codesize across Highway targets). No evidence any caller
+  passes such kernels.
+- **x-tiling for short/wide geometry** — not pursued: the two callers are
+  full-image; butteraugli is serial (no pool) and detect_dots has ample
+  y-parallelism on full images. Would be dead scheduling complexity here.
