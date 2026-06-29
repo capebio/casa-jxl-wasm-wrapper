@@ -919,3 +919,21 @@ The following from the same analysis are REJECTED for this pass:
   `frac` once at the end, so the constant non-colour channels' fractional contribution
   is nonlinear under the floor and can flip a near-tie RCT selection. Confirmed this
   pass; only viable as an explicit ratio experiment, never a "byte-exact" land.
+
+---
+
+## 2026-06-29 — A-5 in-place `Vec<u16> → Vec<u8>` transmute (full-res 16-bit pack) — REJECTED (UB)
+
+CrawlBot2000's A-5 note proposed reclaiming the second full-res buffer by transmuting the `rgb16`
+`Vec<u16>` to a packed `Vec<u8>` in place ("move-transmute after a tone reorder"). **Rejected: formally
+undefined behaviour.** `Vec::<u8>::from_raw_parts(ptr, len*2, cap*2)` deallocates with
+`Layout::array::<u8>(cap*2)` (align **1**), but the buffer was allocated as `Vec<u16>` (align **2**).
+The global-allocator contract requires the dealloc `Layout` to match the alloc `Layout` (size **and**
+align); the alignment mismatch is UB — the same `unsafe`/WASM-audit rejected class as D6 (uninit
+`set_len`). It "works" only because dlmalloc ignores align on free; not shippable under this repo's
+unsafe policy.
+
+**Shipped instead (sound):** deferred-move + lazy pack — hold the 16-bit master as `Vec<u16>` moved
+out of the tone path, pack to LE bytes in `take_rgb16_full`. Zero `unsafe`, byte-exact, **−32%
+process-compute peak** (−56.7 MB @9.9 MP; verified wasm A/B). Details: `CrawlBot2000Findings.md` →
+"A-5 follow-up (2026-06-29)"; branch `crawlbot/a5-pack-rgb16-deferred-jun29-x7q3`.

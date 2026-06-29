@@ -30,7 +30,7 @@
 | F1 | casabio_encode.rs | discarded full-res RGB strip in alpha detect | memory-alloc | alpha_strip builds 68.7 MB strip, drops it; 55.2 ms | has_meaningful_alpha; **0 MB, 13.5 ms (4.1×)**, ×2 sites | ✅ shipped |
 | C-3 | perceptual/mod.rs | serial 3-way X/Y/B plane downsample | memory-mt | 3 sequential calls; 124 ms @4096² butteraugli | rayon::join over SoA planes; **116 ms (−6.6%) / −12.6% @2048²** (native) | ✅ shipped |
 | A-4 | pipeline.rs | parallel tone per-block scratch zeroing | memory-mt | re-zeros 24 KB/block in parallel path | for_each_init hoist | ❌ **measured non-win** (L1-absorbed; reverted) |
-| A-5 | src/lib.rs | pack_rgb16_full doubles full-res buffer | memory-copy | rgb16 + packed coexist (~120 MB) | transmute after tone reorder | ⏸ deferred (needs output reorder; WASM-batch session) |
+| A-5 | src/lib.rs | pack_rgb16_full doubles full-res buffer | memory-copy | rgb16 + packed coexist (~120 MB) | **sound deferred-move + lazy pack** (NOT the UB transmute) | ✅ landed `crawlbot/a5-pack-rgb16-deferred-jun29-x7q3` — **−32% process-compute peak** (−56.7 MB @9.9 MP), byte-exact, global-with-takes neutral |
 | A-3 | pipeline.rs | RGBA8/16-bit-scalar tone not SIMD | math/speed | per-pixel apply_tone_fused | SoA apply_tone_bulk (3.6×) | ⏸ deferred (secondary path) |
 | F3 | jxl_casadecoder.rs | extra-plane zero-fill on normal path | memory-alloc | unconditional write_bytes(0) | gate on allow_partial (mirror of line 579) | ⏸ deferred (jxl-codec build) |
 | E2/B2/B6 | cr2/demosaic | zero-fill before full overwrite | memory-alloc | vec![0;..]/resize(0) then fully written | uninit set_len | ⏸ deferred (rejected uninit class, D6) |
@@ -381,3 +381,55 @@ is nesting-safe. It leverages the existing SoA layout rather than adding memory 
 of "memory improving to MT." Shipped. Contrast with A-4 (parallel tone scratch), a *measured non-win*
 on the same bandwidth-bound reality — the difference is that downsample carries enough per-element
 compute to reward parallelism, whereas a 24 KB stack memset does not.
+
+---
+
+# A-5 follow-up (2026-06-29) — `src/lib.rs` full-res 16-bit pack
+
+**Branch:** `crawlbot/a5-pack-rgb16-deferred-jun29-x7q3` (superproject, off main `b4a55047`) · pushed, NOT merged.
+
+## What landed
+
+The full-res 16-bit master (`OUT_FULL_16`) is now held in `ProcessResult` as `Vec<u16>`
+(moved out of the tone path) and packed to LE bytes **lazily in `take_rgb16_full`**, instead of
+eagerly building a second full-res `Vec<u8>` in `process_*_impl` while `rgb16` is still live.
+Applied to both production impls (`process_orf_impl`, `process_dng_impl` — the latter also backs CR2).
+
+The 16-bit master is the **pre-unsharp** image, so the common no-unsharp path **moves** `rgb16` out
+for free; the rare `texture/clarity != 0` path **snapshots** `rgb16` before `apply_unsharp_masks`
+mutates it.
+
+## The originally-proposed transmute is unsound — do not use it
+
+CrawlBot's note proposed an in-place `Vec<u16> → Vec<u8>` move-transmute. That is **formally UB**:
+`Vec::<u8>::from_raw_parts(..)` deallocates with `Layout` align **1**, but the buffer was allocated
+as `Vec<u16>` (align **2**) — a dealloc-layout mismatch, the same rejected unsafe class as D6. The
+landed version is the **sound** equivalent (deferred move + lazy pack, zero `unsafe`).
+
+## Measured (wasm-pack `--dev --target nodejs`, real 13.5 MB DNG = 3628×2732 = 9.9 MP, flags `OUT_FULL_RGB8|OUT_FULL_16`)
+
+Harness: `tools/a5-pack16-membench.mjs` (reads `__wasm.memory.buffer.byteLength` — wasm linear
+memory is monotonic, so the post-call size is the high-water reached during the call).
+
+| checkpoint | OLD (eager) | NEW (deferred) | Δ |
+|---|---|---|---|
+| wasm linear **after `process_*` returns** | 175.9 MB | **119.2 MB** | **−56.7 MB (−32%)** |
+| wasm linear after `take_rgb` + `take_rgb16_full` | 175.9 MB | 175.9 MB | 0 |
+
+`−56.7 MB` = exactly one full-res 16-bit buffer (the eliminated packed `Vec<u8>`); scales to
+**~138 MB @24 MP**.
+
+**Byte-exact:** OLD and NEW produce identical `take_rgb` and `take_rgb16_full` FNV hashes on **both**
+the move path (`texture=0`) and the snapshot path (`texture=0.5`). The `full16` hash is identical
+across both texture settings, confirming the export stays the pre-unsharp image.
+
+## Honest scope of the win
+
+This reduces the **process-compute peak** (the sustained heavy demosaic+tone phase), not the global
+high-water when the 16-bit *is* taken: producing the packed bytes soundly still requires reading
+`rgb16`, so `rgb16 + packed` must briefly coexist at pack time, and wasm linear memory never shrinks
+→ after-takes is **equal** to OLD (never worse). The benefit is real for the heavy compute window and
+for callers that defer/skip `take_rgb16_full`; it is **not** the headline "−120 MB global peak" the
+original note implied. Kept under rule 10 (byte-exact, measured non-regression, lower peak where it
+matters). Integrator's call whether the process-peak reduction warrants the +2 small clones of
+control flow in the rare unsharp path.
