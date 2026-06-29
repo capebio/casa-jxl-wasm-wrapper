@@ -28,6 +28,18 @@ const { listen } = IS_TAURI ? window.__TAURI__.event : {};
 
 const POOL_SIZE = Math.min(navigator.hardwareConcurrency || 4, 12);
 
+// Assessment switch (default OFF = blob/O1 behaviour unchanged). Add
+// `?alphaProgressive=1` to the page URL to let alpha/extra-channel VarDCT
+// images emit intermediate progressive paints, so the win (or lack of it) can
+// be measured on real images. Requires the fork (0.12) decode WASM; the stock
+// 0.11.2 module ignores it. See web/jxl-decode-worker.js plumbing.
+const ALPHA_PROGRESSIVE = (() => {
+    try {
+        return new URLSearchParams(globalThis.location?.search ?? '')
+            .get('alphaProgressive') === '1';
+    } catch (_) { return false; }
+})();
+
 // Build tag the page reports — lets you tell at a glance whether the
 // browser is on the latest version after a refresh.
 const BUILD_TAG = '2026-05-13j / live-lightbox + toggle fixes';
@@ -589,6 +601,7 @@ class WorkerPool {
             cachePolicy: next.options?.cachePolicy,
             progressiveDetail: next.options?.progressiveDetail,
             previewFirst: next.options?.previewFirst === true,
+            allowAlphaProgressive: next.options?.allowAlphaProgressive ?? ALPHA_PROGRESSIVE,
             region: next.options?.region ?? null,
             downsample: next.options?.downsample ?? null,
             frameIndex: next.options?.frameIndex ?? null,

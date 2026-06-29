@@ -81,7 +81,8 @@ async function decodeWithJsquashFallback(decodeId, buf) {
 }
 
 async function decodeProgressive(decodeId, buf, data) {
-    const { progressiveDetail, region, downsample, frameIndex, previewFirst } = data;
+    const { progressiveDetail, region, downsample, frameIndex, previewFirst,
+            allowAlphaProgressive } = data;
 
     // JXTC extraction: scan for embedded JPEG before any WASM decode work.
     // Only container JXLs (jpegReconstructionAvailable) carry these; pure JXLs skip silently.
@@ -159,6 +160,11 @@ async function decodeProgressive(decodeId, buf, data) {
         emitEveryPass: true,
         progressiveDetail: progressiveDetail ?? 'lastPasses',
         frameIndex: frameIndex ?? 0,
+        // Opt-in: lift libjxl's guard that suppresses progressive paints on
+        // images with extra channels (alpha). Default false keeps the blob/O1
+        // behaviour (no intermediate paints on alpha). Requires the fork (0.12)
+        // WASM engine; ignored by the stock 0.11.2 module.
+        allowAlphaProgressive: allowAlphaProgressive ?? false,
         preserveIcc: true,
         preserveMetadata: true,
     });
