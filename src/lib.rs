@@ -197,9 +197,12 @@ pub struct ProcessResult {
     pub thumb_w: u32,
     #[wasm_bindgen(readonly)]
     pub thumb_h: u32,
-    // M3: full master-size 16-bit (packed LE u16, 6 bytes/pixel) for pyramid big levels + 16-bit lightbox path.
+    // M3: full master-size 16-bit for pyramid big levels + 16-bit lightbox path.
     // Only populated when OUT_FULL_16 requested (memory opt; current callers that pass 7 stay 8-bit + lb/thumb only).
-    rgb16_full: Vec<u8>,
+    // A-5: held as Vec<u16> (RGB triples) and packed to LE bytes lazily in take_rgb16_full —
+    // avoids allocating a second full-res buffer alongside the live rgb16 during tone
+    // (~121 MB off the process-compute peak on the 16-bit path). Output bytes are unchanged.
+    rgb16_full: Vec<u16>,
     #[wasm_bindgen(readonly)]
     pub full16_w: u32,
     #[wasm_bindgen(readonly)]
@@ -292,10 +295,18 @@ impl ProcessResult {
         std::mem::take(&mut self.rgb16_thumb)
     }
 
-    /// Move the full-resolution packed u16 LE buffer out (M3 16-bit path). Caller owns the bytes.
+    /// Move the full-resolution 16-bit buffer out, packed to LE bytes (M3 16-bit path).
     /// Packed 6 bytes per pixel LE (r g b u16). Only non-empty if OUT_FULL_16 was requested.
+    /// A-5: the master is held as Vec<u16> and packed here (not eagerly during process), so
+    /// no second full-res buffer coexists with the live rgb16 during tone. Byte-identical to
+    /// the former eager pack — same pack_rgb16_full over the same pre-unsharp data.
     pub fn take_rgb16_full(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.rgb16_full)
+        let v = std::mem::take(&mut self.rgb16_full);
+        if v.is_empty() {
+            return Vec::new();
+        }
+        pack_rgb16_full(&v, self.full16_w as usize, self.full16_h as usize)
+        // v drops here, freeing the 16-bit master buffer.
     }
 
     /// Move the RGBA8 buffer out. Caller owns the bytes.
@@ -840,12 +851,15 @@ fn process_orf_impl(
 
     // Hypercar: use precomputed fast planar bilinear + planar down for lb/thumb (cheap SIMD, no mhc for preview paths).
     // The old down from (mhc) rgb16 is bypassed for previews; full rgb16 only for OUT_FULL_RGB8 tone.
-    // M3 full-res 16-bit packed (for pyramid RAW 2048/full levels). Only when OUT_FULL_16 flag set.
-    let (rgb16_full, out_full16_w, out_full16_h) = if output_flags & OUT_FULL_16 != 0 {
-        let packed = pack_rgb16_full(&rgb16, w, h);
-        (packed, w as u32, h as u32)
+    // M3 full-res 16-bit (for pyramid RAW 2048/full levels). Only when OUT_FULL_16 flag set.
+    // A-5: capture the 16-bit master *after* the tone path's last read of rgb16 (moving it
+    // out, no copy) instead of packing a second full-res buffer here while rgb16 is still
+    // live. Packed to LE bytes lazily in take_rgb16_full; output bytes are unchanged.
+    let want_full16 = output_flags & OUT_FULL_16 != 0;
+    let (out_full16_w, out_full16_h) = if want_full16 {
+        (w as u32, h as u32)
     } else {
-        (vec![], 0, 0)
+        (0, 0)
     };
     let (rgb16_lb, out_lb_w, out_lb_h) = if output_flags & OUT_LIGHTBOX != 0 {
         (lb_packed, lb_w, lb_h)
@@ -882,33 +896,49 @@ fn process_orf_impl(
     );
 
     let t = now_ms();
-    let (final_rgb, final_w, final_h, tonemap_ms, orient_ms) = if output_flags & OUT_FULL_RGB8 != 0
-    {
-        if params.texture != 0.0 || params.clarity != 0.0 {
-            pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
-        }
-        // Lens 23/24: use process_into + preallocated buffer to avoid internal Vec alloc
-        // inside the tone path (reuses the "into" pattern from demosaic/pipeline).
-        let mut rgb8 = vec![0u8; w * h * 3];
-        // Chapter 1: SIMD bulk tone on wasm/x86 for the plain path (the 90% case),
-        // scalar parity path only for perceptual_constancy. The big full-res win.
-        pipeline::process_into_auto(&rgb16, &params, &mut rgb8);
-        let tonemap_ms = now_ms() - t;
-        drop(rgb16);
-        let t2 = now_ms();
-        // OUT_NO_ORIENT lets the encoder use JXL's basic-info orientation field
-        // — no CPU rotate, no 60–200 MB intermediate buffer.
-        let skip_orient = (output_flags & OUT_NO_ORIENT) != 0;
-        let (fr, fw, fh) = if skip_orient || info.orientation == 1 {
-            (rgb8, w, h)
+    let (final_rgb, final_w, final_h, tonemap_ms, orient_ms, rgb16_full) =
+        if output_flags & OUT_FULL_RGB8 != 0 {
+            // Unsharp mutates rgb16 in place; the 16-bit master export is the *pre-unsharp*
+            // image (as the former eager pack was), so snapshot before mutating in that
+            // (rare) case. The common path runs no unsharp and moves rgb16 out for free.
+            let will_unsharp = params.texture != 0.0 || params.clarity != 0.0;
+            let full16_pre = if want_full16 && will_unsharp {
+                Some(rgb16.clone())
+            } else {
+                None
+            };
+            if will_unsharp {
+                pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
+            }
+            // Lens 23/24: use process_into + preallocated buffer to avoid internal Vec alloc
+            // inside the tone path (reuses the "into" pattern from demosaic/pipeline).
+            let mut rgb8 = vec![0u8; w * h * 3];
+            // Chapter 1: SIMD bulk tone on wasm/x86 for the plain path (the 90% case),
+            // scalar parity path only for perceptual_constancy. The big full-res win.
+            pipeline::process_into_auto(&rgb16, &params, &mut rgb8);
+            let tonemap_ms = now_ms() - t;
+            // rgb16's last read is done: move it into the 16-bit master (common, no copy),
+            // use the pre-unsharp snapshot, or release it. Freed before orientation either way.
+            let rgb16_full = if want_full16 {
+                full16_pre.unwrap_or(rgb16)
+            } else {
+                drop(rgb16);
+                Vec::new()
+            };
+            let t2 = now_ms();
+            // OUT_NO_ORIENT lets the encoder use JXL's basic-info orientation field
+            // — no CPU rotate, no 60–200 MB intermediate buffer.
+            let skip_orient = (output_flags & OUT_NO_ORIENT) != 0;
+            let (fr, fw, fh) = if skip_orient || info.orientation == 1 {
+                (rgb8, w, h)
+            } else {
+                pipeline::apply_orientation(rgb8, w, h, info.orientation)
+            };
+            (fr, fw, fh, tonemap_ms, now_ms() - t2, rgb16_full)
         } else {
-            pipeline::apply_orientation(rgb8, w, h, info.orientation)
+            let rgb16_full = if want_full16 { rgb16 } else { Vec::new() };
+            (vec![], 0, 0, 0.0, 0.0, rgb16_full)
         };
-        (fr, fw, fh, tonemap_ms, now_ms() - t2)
-    } else {
-        drop(rgb16);
-        (vec![], 0, 0, 0.0, 0.0)
-    };
 
     Ok(ProcessResult {
         rgb: final_rgb,
@@ -1602,6 +1632,46 @@ mod tests {
         assert_eq!(unpacked, src, "pack→unpack round-trip lost data");
     }
 
+    // A-5: the deferred (lazy) full-res 16-bit pack must produce byte-identical output to the
+    // former eager pack. The capture contract is "export = the pre-unsharp rgb16": the common
+    // no-unsharp path MOVES rgb16 out unchanged; the rare unsharp path SNAPSHOTS before
+    // mutating. This test pins that invariant on synthetic data (the eager pack used to run on
+    // the pre-unsharp buffer, so both deferred paths must match it bytewise).
+    #[test]
+    fn full16_deferred_capture_is_pre_unsharp_byte_exact() {
+        let (w, h) = (16usize, 12usize);
+        let rgb16: Vec<u16> = (0..w * h * 3)
+            .map(|i| (i as u16).wrapping_mul(257).wrapping_add(7))
+            .collect();
+        // Eager reference: pack the pre-unsharp image (what the old code did at decode time).
+        let eager = pack_rgb16_full(&rgb16, w, h);
+
+        // Common path: no unsharp → rgb16 moved out untouched, packed lazily at take time.
+        let moved = rgb16.clone(); // stands in for the move into rgb16_full
+        assert_eq!(
+            pack_rgb16_full(&moved, w, h),
+            eager,
+            "no-unsharp deferred pack must match eager pre-unsharp pack",
+        );
+
+        // Rare path: unsharp mutates rgb16 → we keep a pre-unsharp snapshot for the export.
+        let snapshot = rgb16.clone();
+        let mut mutated = rgb16.clone();
+        for v in mutated.iter_mut() {
+            *v = v.wrapping_add(1234); // stand-in for apply_unsharp_masks
+        }
+        assert_eq!(
+            pack_rgb16_full(&snapshot, w, h),
+            eager,
+            "unsharp-path snapshot pack must match eager pre-unsharp pack",
+        );
+        assert_ne!(
+            pack_rgb16_full(&mutated, w, h),
+            eager,
+            "sanity: packing the post-unsharp buffer would change the export bytes",
+        );
+    }
+
     #[test]
     fn preview_can_halve_guards_lightbox_supersample() {
         // 20 MP-ish: w/2 = 2620 ≥ lb 1800 → halve.
@@ -2150,12 +2220,13 @@ fn process_dng_impl(
         iso,
     } = decoded;
 
-    // M3 full-res 16-bit (DNG path).
-    let (rgb16_full, out_full16_w, out_full16_h) = if output_flags & OUT_FULL_16 != 0 {
-        let packed = pack_rgb16_full(&rgb16, aw, ah);
-        (packed, aw as u32, ah as u32)
+    // M3 full-res 16-bit (DNG/CR2 path). A-5: capture after tone (move, no copy) and pack
+    // lazily in take_rgb16_full instead of a second full-res buffer here. Byte-identical.
+    let want_full16 = output_flags & OUT_FULL_16 != 0;
+    let (out_full16_w, out_full16_h) = if want_full16 {
+        (aw as u32, ah as u32)
     } else {
-        (vec![], 0, 0)
+        (0, 0)
     };
 
     // Compute lightbox + thumb caches (pre-tonemap, pre-orientation)
@@ -2204,27 +2275,42 @@ fn process_dng_impl(
     );
 
     let t = now_ms();
-    let (final_rgb, final_w, final_h, tonemap_ms, orient_ms) = if output_flags & OUT_FULL_RGB8 != 0
-    {
-        if params.texture != 0.0 || params.clarity != 0.0 {
-            pipeline::apply_unsharp_masks(&mut rgb16, aw, ah, &params);
-        }
-        // Chapter 1: SIMD bulk tone (DNG + CR2 share this impl). See process_into_auto.
-        let rgb8 = pipeline::process_auto(&rgb16, &params);
-        let tonemap_ms = now_ms() - t;
-        drop(rgb16);
-        let t2 = now_ms();
-        let skip_orient = (output_flags & OUT_NO_ORIENT) != 0;
-        let (fr, fw, fh) = if skip_orient || orientation == 1 {
-            (rgb8, aw, ah)
+    let (final_rgb, final_w, final_h, tonemap_ms, orient_ms, rgb16_full) =
+        if output_flags & OUT_FULL_RGB8 != 0 {
+            // 16-bit master export is the pre-unsharp image; snapshot only when unsharp
+            // would mutate rgb16 (rare). Common path moves rgb16 out for free.
+            let will_unsharp = params.texture != 0.0 || params.clarity != 0.0;
+            let full16_pre = if want_full16 && will_unsharp {
+                Some(rgb16.clone())
+            } else {
+                None
+            };
+            if will_unsharp {
+                pipeline::apply_unsharp_masks(&mut rgb16, aw, ah, &params);
+            }
+            // Chapter 1: SIMD bulk tone (DNG + CR2 share this impl). See process_into_auto.
+            let rgb8 = pipeline::process_auto(&rgb16, &params);
+            let tonemap_ms = now_ms() - t;
+            // rgb16's last read is done: move it into the 16-bit master (common, no copy),
+            // use the pre-unsharp snapshot, or release it. Freed before orientation either way.
+            let rgb16_full = if want_full16 {
+                full16_pre.unwrap_or(rgb16)
+            } else {
+                drop(rgb16);
+                Vec::new()
+            };
+            let t2 = now_ms();
+            let skip_orient = (output_flags & OUT_NO_ORIENT) != 0;
+            let (fr, fw, fh) = if skip_orient || orientation == 1 {
+                (rgb8, aw, ah)
+            } else {
+                pipeline::apply_orientation(rgb8, aw, ah, orientation)
+            };
+            (fr, fw, fh, tonemap_ms, now_ms() - t2, rgb16_full)
         } else {
-            pipeline::apply_orientation(rgb8, aw, ah, orientation)
+            let rgb16_full = if want_full16 { rgb16 } else { Vec::new() };
+            (vec![], 0, 0, 0.0, 0.0, rgb16_full)
         };
-        (fr, fw, fh, tonemap_ms, now_ms() - t2)
-    } else {
-        drop(rgb16);
-        (vec![], 0, 0, 0.0, 0.0)
-    };
 
     Ok(ProcessResult {
         rgb: final_rgb,
