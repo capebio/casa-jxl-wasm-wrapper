@@ -255,3 +255,292 @@ Deferred items grouped by file/package scope + dependency + effort.
 - **Questions_progressive-encode.md** — Encode architecture scope
 - **Questions_implemented.md** — 3 deployed quick wins (b5249622)
 - **Questions_falsified.md** — 3 rejected items
+
+---
+
+## ac_strategy / ac_context deferred items (2026-06-29)
+
+From the ChatGPT "holographic" pass on the 3rd-hottest file. Landed wins are on branch `capebio/perf/ac-strategy-coefforder-zdc1-jun29-x7q2` (C1 order-traversal + Set split; C2 ZeroDensityContext1). Items below are deferred — each is either a broad cross-file refactor, profile-led, or needs a measured WASM A/B before it can be judged. None are byte-exact-trivial.
+
+1. **Unified `StrategyGeometry` descriptor** (replace the 3 per-strategy LUTs `covered_blocks_x/y` + `log2_covered_blocks` in ac_strategy.h with one struct, + raw-byte `AcStrategyRow` accessors). Marginal (the 3 LUTs are tiny constexpr, likely register-resident when inlined); wide blast radius (enc_group/dec_group/enc_ac_strategy/etc. all derive geometry). CLAUDE.md "no opportunistic refactors". Needs an end-to-end measurement showing the repeated derivation is actually visible before touching every caller.
+
+2. **Paired order+LUT generation + canonical (cx,cy) order cache.** The 27 raw strategies collapse to 12 canonical coeff geometries; where both forward order AND inverse LUT are needed (enc_coeff_order.cc), one traversal could emit both, and orders could be cached by normalized geometry rather than raw strategy. Setup-cost only; only a win where both are consumed together (doubles write bandwidth otherwise). Measure before landing.
+
+3. **QF-bucket precompute** for threshold-rich frames (split `BlockCtxMap::Context` qf-threshold scan into a precomputed per-block bucket plane). Keep the direct scan when `qf_thresholds.size() <= 1` (the common case). Profile-led — only helps multi-threshold frames; the default ctx map has 0 thresholds.
+
+4. **Default `BlockCtxMap` alloc avoidance** (use `kDefaultCtxMap` static directly until a custom map is parsed; num_ctxs=15/num_dc_ctxs=1 are invariant). Cold-start latency only, not hot-loop. Needs move-ctor rebind of the data pointer. Marginal.
+
+5. **Header zero-density table dedup** (`extern` decl + single .cc definition for `kCoeffFreqContext`/`kCoeffNumNonzeroContext`). WASM .data size only; measure object/.wasm sections for actual duplication first. Do NOT convert to arithmetic.
+
+6. **`CountBlocksByType` bulk single-pass count.** Only worth it if a call-site audit finds repeated `CountBlocks` scans over the same image; otherwise sequential scan is fine.
+
+7. **Packed 1-byte `AcStrategy`** (store raw byte, derive type/is_first). Profile-led; inlined call sites likely scalar-replace the current object already, so probably no gain and adds mask/extend ops.
+
+8. **Forensic audit: `kZeroDensityContextCount` (458) vs `kZeroDensityContextLimit` (474).** Not an optimization — verify entropy-context allocation reserves the right bound and no malformed-stream path can index 458..473. Belongs once-per-block / in allocation policy, never as a per-coefficient clamp.
+
+9. **nzero rect-fill / strategy-map rect-fill via std::fill_n/memset with a size threshold** (dec_group nzero propagation + the new SetUnchecked). Minor; bulk fill helps only large footprints, scalar stores win for 1x1/2x2. Optional micro-tune.
+
+---
+
+## 2026-06-29 — enc_entropy_coder.cc: deferred cross-file / architectural levers (ChatGPT pass)
+
+Context: round-2 micro-opt pass on `lib/jxl/enc_entropy_coder.cc` (5th-hottest file).
+Implemented byte-exact in-file (branch `perf/enc-entropy-count-decomp-jun29-z4x`,
+submodule capebio): count-decomposition for both nzero counters. The following
+larger ideas were surfaced but DEFERRED — each crosses file boundaries and/or
+needs ratio/timing evidence before landing:
+
+- **D1 — quantizer-produced exact nonzero counts.** Have the final quantization
+  stage emit one exact AC-nonzero count per (channel, transform) into a compact
+  side stream; tokenization then skips its leading SIMD count pass entirely.
+  Biggest potential win (deletes a whole coefficient read for large transforms)
+  but cross-file (enc_quant / enc_group plumbing) and must count only *after*
+  the last stage that can alter coefficients. Needs an A/B build to size it.
+- **D2 — entropy-scan-order coefficient staging.** Producer writes coefficients
+  already in scan order so the token loop reads `block[k]` contiguously instead
+  of `block[order[k]]` (permutation gather). Removes the order-table load and
+  scattered loads, best for large transforms / WASM. Large upstream disturbance
+  (may regress the quantizer's contiguous writes) — measure before committing.
+- **D3 — persistent token-buffer high-water reserve.** Current per-group
+  `output->reserve(worst_case)` over-commits for sparse groups and pins a large
+  per-worker capacity. Replace with a `TokenizeScratch` carrying a rolling
+  high-water hint (EncCache-level, cross-file). NOT byte-exact-affecting; needs
+  telemetry (requested vs final size, realloc count, peak RSS, first-group ms)
+  before tuning. Do NOT swap to `resize()+data()` raw writes — that value-inits
+  the whole pessimistic buffer (worse for sparse).
+
+## enc_convolve_separable5.cc (2026-06-29, after border-dedup landed on perf/conv5-border-dedup-jun29-bd7)
+
+The big win (vertical-band rolling ring, +31-49%) is already in trunk. Border-row
+horizontal dedup is now done (byte-exact, helps small/short planes; neutral on
+full frames). Remaining ideas, all DEFERRED with reasons:
+
+- **N / N+1 SIMD-width cliff.** Widths exactly `Lanes` or `Lanes+1` fall to the
+  scalar `SlowSeparable5` (the fast path needs `xsize >= Lanes + kRadius`). A
+  dedicated one-vector kernel (load center, mirror both sides via Neighbors +
+  MirrorLanes, scalar-finish the +1 column) would cover them on SIMD. DEFERRED:
+  niche (only two exact widths per target); needs its own HWY_SCALAR guard and a
+  correctness pass against SlowSeparable5. Real-benefit unknown without width
+  telemetry from butteraugli/detect_dots.
+- **x-tiling for short-wide geometry.** The pool splits work by y-band only; a
+  few-rows-tall, very-wide plane yields too few band-tasks to fill cores. Add x
+  tiles ONLY for short/wide (keep y-band default). Constraints: internal tile
+  boundaries use ordinary HorzConvolve, only the global left/right edges mirror,
+  never call Separable5 on sub-Rects (horizontal borders are rect-bound).
+  DEFERRED: profiling-gated; needs evidence such planes dominate any caller.
+- **Status propagation from RunInteriorRows.** `RunOnPool`'s Status is asserted
+  in debug then discarded; `Run()` always returns true. Latent reliability gap
+  (a runner failure reports success), not perf. DEFERRED: out of optimization
+  scope; thread to Run() in a separate correctness change.
+- **Weight-family dispatch (identity / 3-tap / horizontal-only / vertical-only).**
+  Classify `WeightsSeparable5` once at construction and skip zero taps. DEFERRED:
+  data-led only — needs coefficient telemetry that those families actually reach
+  this function; also changes NaN/signed-zero propagation, so not byte-exact.
+- **Scalar-tail abs/Mirror hygiene.** The remainder loop recomputes `std::abs(dy/dx)`
+  weight indexing and calls `Mirror` for every column incl. interior ones. Could
+  hoist weights and skip Mirror until the final two columns. DEFERRED: micro
+  (< Lanes columns/row), and must preserve the exact 25-term accumulation order
+  to stay byte-exact — low value, easy to get subtly wrong.
+
+---
+
+## enc_convolve_separable5 — ChatGPT 3-pass analysis leftovers (2026-06-29)
+
+Context: y-reuse ring + remainder-collapse already landed on submodule main
+@10783f7e; border-row dedup landed on `perf/enc-conv5-border-dedup-jun29-r3x`.
+Remaining ChatGPT suggestions, deferred:
+
+1. **SIMD width-cliff (xsize == N or N+1).** These widths fall to `SlowSeparable5`
+   though one custom vector could cover them. NOT byte-exact vs the current slow
+   path (different numerical reduction tree for those widths) → needs an explicit
+   tolerance/identity decision before landing. Low value (narrow rects only).
+2. **x-tiling for short/wide geometry.** When `num_bands` is tiny (few-row, very
+   wide rect) the y-band scheduler under-fills cores. Add x-slicing (internal
+   tiles only; global edges keep mirroring; never recurse `Separable5` on sub-
+   rects — horizontal borders are rect-bound). Scheduler change; butteraugli's
+   roughly-square pyramids rarely hit this. Needs its own benchmark.
+3. **SIMD output-rect / in-place API.** Fast path requires `SameSize(rect,*out)`
+   and origin-zero output; callers needing a sub-rect must materialize+copy. A
+   `Separable5ToRect` (StoreU when unaligned) or delayed-write in-place variant
+   could remove a full-plane round-trip. Audit `butteraugli.cc` Blur and
+   `enc_detect_dots.cc` for such temporaries first — potentially bigger than any
+   inner-loop change, but a caller-contract refactor.
+4. **Weight-family classification** (identity / 3-tap / h-only / v-only). Classify
+   once in `WeightsSeparable5` ctor, dispatch specialized kernels. Needs
+   coefficient telemetry to justify; risks NaN/signed-zero policy changes and
+   per-Highway-target code bloat. Data-led only.
+5. **Status propagation.** `RunInteriorRows` does `JXL_DASSERT(status); (void)`
+   — a pool failure is reported as success. Thread through `Run()`. Reliability,
+   not perf; tiny.
+
+---
+
+## enc_adaptive_quantization — ChatGPT 4-pass analysis leftovers (2026-06-29)
+
+Context: This is the hottest remaining enc file. Big batch already landed on
+submodule main @10783f7e (6c8dd38a): TileDistMap margin==0 fast path, FuzzyErosion
+2×2 fusion, MaskingSqrt kSqrtMul precompute, AdjustQuantField 1x1-skip + mean-only-
+when-covered≥4, quantizer-const hoist, MaxError any_change exit + per-block clip,
+terminal-iteration Butteraugli skip. THREE more byte-exact opts landed on branch
+`perf/enc-aq-fixedpoint-hfblue-jun29-q8x` (capebio, off 10783f7e): cur_pow==0
+fixed-point early-exit (+13% e9 on real RAW), HF-dominates-blue short-circuit,
+HfModulation dy==7 vertical no-op. Remaining ChatGPT suggestions, deferred:
+
+### Output-changing (need ratio + Butteraugli regression, NOT byte-exact)
+1. **pow(x, 1/16) → 4× std::sqrt** in TileDistMap tile_dist. Mathematically equal,
+   much cheaper (esp. WASM), but NOT bit-identical → changes AQ decisions → output
+   bytes. Gate behind size/Butteraugli corpus regression.
+2. **std::pow(diff, cur_pow) → FastPow2f(FastLog2f·k)** in the quant-update loop.
+   cur_pow is only ever 0.2 (i<2) or 0 in practice. Fast path promising on WASM;
+   crosses quant-bin boundaries → corpus-validate.
+3. **SIMD fast-log for mask1x1** (replace scalar std::log1p per pixel with vector
+   FastLog2f). Large scalar-libm cost on the full-res 1x1 Laplacian pass. Changes
+   the masking heuristic → validate on HDR/low-light/edge-heavy images.
+4. **Merge the two gamma-Laplacian walks** (scalar mask1x1 + SIMD 4×4 pre-erosion
+   both compute gammac·(in−neighbour_avg)). One signed-Laplacian producer feeding
+   both. Scalar-vs-SIMD association differs → not byte-exact; experiment only.
+
+### Architectural (large surface / correctness risk)
+5. **Persistent AQ round-trip context (E/F — ChatGPT's "most strategic").** Reuse
+   PassesDecoderState / ModularFrameEncoder / render pipeline / GroupDecCache /
+   decoded ImageBundle across the 2–5 FindBestQuantization iterations instead of
+   rebuilding each round; plus an AQ-narrow InitializePassesEncoder that skips
+   special-frame/entropy-token/bitstream-only work (note the existing
+   `special_frames.resize(num_special_frames)` rollback — generic init does work
+   AQ discards). Biggest potential multi-ms win but touches decoder reset
+   contracts → must prove byte-exact across corpus (stale group caches are the
+   hazard). Compounds with the landed render-pipeline descriptor reuse.
+6. **Strategy-cell native representation.** After AdjustQuantField every member of
+   a variable AC strategy is uniform and TileDistMap broadcasts one residual back
+   over the same footprint; the iterative state is really one (q, residual,
+   initial) per AC-strategy root. Represent it that way (no expand→update→collapse
+   per block; direct strategy residual accumulation in the comparator). Removes
+   duplicated div/pow/lround/clamp. Large refactor touching the Quantizer API
+   (SetQuantFieldFromStrategyCells); byte-exactness needs care.
+7. **Incremental sparse round-trips.** After the first refinement only some raw
+   quant cells change; re-encode/re-render only affected groups + AC/EPF/render/
+   Butteraugli halo. Very high complexity (invalidation-radius correctness);
+   highest payoff at Tortoise. Research-grade.
+8. **Staged Gamma+HF fusion** (G, conservative form). Combine the Gamma and HF
+   per-block scans (both consume X/Y) — NOT the full 3-way fuse (register
+   pressure / WASM regression risk per ChatGPT's own walk-back). Keep independent
+   accumulators/order for byte-exactness; benchmark native + WASM separately.
+
+### Minor byte-exact, deferred (low value or small risk)
+9. **tile_distmap buffer reuse** across iterations (refactor TileDistMap to fill an
+   existing ImageF). Saves a small blocks-sized alloc per iteration (only 2–5×);
+   marginal now that #1 cuts iterations.
+10. **score / ScaleImage(-1) debug-gating.** Release-dead: TileDistMap raises diff
+    to the 16th (even) power so the sign flip can't matter; `score` only feeds a
+    debug printf. Pass nullptr + #if-guard. Tiny.
+11. **High butteraugli_target (≥14) modulation bypass.** dampen==0 → result is a
+    constant base_level; skip Gamma/HF/Blue entirely. Rare target; low value.
+12. **ComputeTile SIMD-tail off-by-one** (`x + 1 + Lanes < x_end` → `x + Lanes <
+    x_end`). Recovers one vector/row but is a bounds-sensitive change near the
+    right-neighbour load — needs careful padding audit; skipped as too risky for
+    one vector.
+13. **mask1x1 tile-local fused blur** (fuse raw mask1x1 production with Symmetric5
+    over each tile's core + 2px halo, removing the full-res intermediate + barrier).
+    Seam risk at internal tile boundaries (current halos only cover the outer rect
+    edge); benchmark vs the optimized full-image Symmetric5 before adopting.
+14. **Max-error: accumulate max during group decode** instead of writing then
+    re-reading the full decoded image. Complication: strategy regions crossing
+    group boundaries (need root-index map + reduction). Max-error mode only.
+
+### enc_convolve_separable5 — secondary items (2026-06-29)
+
+The register rolling ring is the shipped interior optimum (x-tile scratch ring
+tested and rejected, see rejected-opts CONV5-2). Remaining ChatGPT secondaries,
+deferred as low-EV for the WASM 4-lane butteraugli/dots callers:
+
+15. **Equal-axis 3-weight load** (byte-exact). `butteraugli.cc` Blur calls
+    Separable5 with `horz == vert`. Detect equality once and load 3 broadcast
+    weight vectors instead of 6, passing each to both stages → frees 3 vector
+    registers in the hot `RingColumn`. Same Add/MulAdd order → byte-exact.
+    Uncertain micro-win; the ring is not spill-bound on AVX2/WASM today (it
+    already hits the +39–49% ceiling), so register relief may not show. Measure
+    before adopting.
+16. **Narrow capped-SIMD fallback** — AVX-512-only concern (widths 6–17 fall to
+    SlowSeparable5). Irrelevant to the WASM ship target (already 4-lane; only
+    sub-6px images affected). Skip unless a native AVX-512 path matters.
+17. **Direct 2-D / isotropic kernel** — saves a few arithmetic ops but keeps the
+    25-source-load pattern and **reorders accumulation → NOT byte-exact**. Would
+    change butteraugli scores → encode bitstream; needs decode-SHA + Butteraugli
+    quality gating, not the encode-SHA gate. Out of scope as a default path.
+
+---
+
+## dec_ans.{h,cc} TTFP pass — deferred (2026-06-29)
+
+Branch `perf/dec-ans-ttfp-inline-jun29-z4k1` (capebio submodule, off main
+@10783f7e) landed 3 byte-exact wins (W1 hot-path no-LZ77 inline via
+`ReadHybridUintClusteredMaybeInlined`; W2 `std::move(counts)` into by-value
+`InitAliasTable`; W3 ReadHistogram heap vecs → 258-stack arrays). 14/14 testable
+files decode byte-exact (native static djxl OLD@10783f7e vs NEW), native ST
++2.5% median on _cap (noisy, no regression). Deferred from the same analysis:
+
+1. **Definitive WASM/browser TTFP bench of W1.** Native ST is +2.5% but noisy and
+   a weak proxy — inlining wins are WASM-codegen-dependent (cf. the "SSSE3 proxy
+   lied for transpose" lesson). Real gate before merge: rebuild the dec WASM tiers
+   from this branch and A/B first-paint via the browser harness (flipflopdom) on
+   real RAW→JXL O1 blobs. ~34min WASM build.
+2. **Split LZ77 state out of `ANSSymbolReader` (or at least drop the
+   `special_distances_[120]{}` zero-init).** No-LZ77 readers currently zero-init
+   ~480B + carry LZ fields. Cold-start/first-group win, but needs a profile to
+   confirm reader construction shows up, and MSan/fuzz after removing the init.
+3. **Bounded LZ window.** 4 MiB (`kWindowSize`) allocated per LZ reader regardless
+   of how many values it can emit. Pass a proven max-emit bound from the caller →
+   allocate `min(kWindowSize, max_emit)`. Needs caller plumbing; LZ-streams/cold
+   start only.
+4. **Virtual zero-run instead of the initial `distance==0` memset.** Up to 4 MiB
+   memset before useful decode. Model as a `zero_run_` flag (incl. Save/Restore).
+   Needs real-corpus frequency of first-run zero copies to justify.
+5. **`IsSingleValueAndAdvance` degenerate fast-path.** Use precomputed
+   `degenerate_symbols[ctx]` (add a `const int*` reader member) to skip the alias
+   lookup. Byte-exact-plausible but needs careful verification that value + state
+   advancement match exactly; marginal (only when that optimization path is hit).
+6. **`uint16_t alphabet_sizes` overflow hardening (dec_ans.cc:204-208).** Real
+   latent bug: `DecodeVarLenUint16()+1` can be 65536 → wraps to 0 in uint16_t
+   BEFORE the `> max_alphabet_size` check (valid streams never reach it, so
+   byte-exact). Malformed-input robustness only; deserves its own fix + fuzz, not
+   a perf-pass rider.
+7. **Defensive `max_num_bits = 0` reset + `degenerate_symbols.assign(n,-1)`.**
+   No-op in the current flow (ANSCode is freshly constructed per DecodeHistograms,
+   not reused) — only matters if ANSCode reuse is ever introduced. Harmless; skip
+   until reuse exists.
+8. **Per-target A/B of (a) alias-table prefetch on/off and (b) ANS normalization
+   branchful vs branchless.** Both are target-sensitive (the source comment only
+   claims parity "on SKX"); choose at compile time per target, never a per-symbol
+   runtime heuristic. Needs WASM + native A/B.
+9. **Setup micro-ops:** single `Refill()` batching in DecodeVarLenUint8/16 +
+   DecodeUintConfig; table-lookup (CTZ) for the unary shift prefix (the file's own
+   `TODO(veluca)`); packed-RLE rewrite of the histogram scratch (W3 already moved
+   it to the stack — the further RLE-into-logcounts packing is byte-exact-risky and
+   low value).
+
+---
+
+## enc_modular R1–R4 + D2 pass (2026-06-29, branch capebio/perf/enc-modular-r1to4-d2-jun29-q4z)
+
+Landed (byte-exact, see branch): R1 two-phase single-group prepare + pool for the
+Global RCT/WP search; R2 AddACMetadata zero-channel construction; R3 reserves; R4
+uint32 extra-channel guard + gi_channel_ reuse-clear; D2 EstimateCost workspace
+reuse across the RCT search.
+
+Deferred from THIS pass:
+1. **Subsampled `AddVarDCTDC` exact allocation (4:2:0 / 4:2:2).** The shared
+   `Image::Create(...,8,3)` makes three full-res planes; the subsampled branch then
+   `shrink()`s the two chroma planes (full-res backing already allocated). Allocating
+   each channel at final dims needs splitting the shared create across the four
+   branches. Rare path — the RAW pipeline is 4:4:4, so never exercised here. Byte-exact
+   memory-only win; do it if a subsampled-input workload appears.
+2. **R1 pool speedup is multi-thread-only and single-group-only.** The two-phase split
+   is byte-exact and removes a real data race, but its FwdRct/do_transform parallelism
+   only helps when (a) encode uses a thread pool and (b) the frame is one group (small
+   images / TTFP preview blobs). The 1-thread A/B harness cannot measure it; verified
+   byte-exact instead. Multi-thread single-group bench is the open measurement.
+3. **D1 palette `cost_before` carry-forward and D3 bounded EstimateCost scoring**
+   remain deferred (see external/libjxl-012/HANDOFF_enc_modular.md). D1 changes the
+   bitstream (needs a size bench); D3 is NOT byte-exact (fractional-entropy floor is
+   nonlinear, so dropping the constant non-colour channels can flip a near-tie RCT
+   choice) — confirmed this pass, do not land as "byte-exact".

@@ -733,3 +733,189 @@ Machine: i7-10850H, **6 physical cores / 12 logical (HT)**. Probe `examples/dng_
 **C — predictor-chain ILP restructuring: REJECTED (neutral).** Built `decode_c2_ilp` (capture both predictors, decode both residuals, then two independent reconstruct adds back-to-back — vs the shipped interleaved `decode0→recon0→decode1→recon1`). Parity EXACT, run parallel (real path). **Measured -0.5% / -1.0% vs `decode_c2` — neutral.** The out-of-order core already overlaps the two independent predictor chains (`left0`/`left1` were already separate accumulators); the serial, latency-bound bitstream decode is the bottleneck and reordering the cheap reconstruct adds cannot shorten it. Reverted.
 
 **Conclusion:** every LJPEG *decode-kernel* lever is now exhausted (fast12, DHT cache, bit fusion ×2, predictor ILP, row parallelism all dead; cps=2 monomorphization is the one win). Decode is at its floor: per-core latency-bound, cores saturated. The only remaining headroom is *outside* the kernel — `dng::decode_bytes` spends ~36% (≈14 ms) in per-tile buffer alloc + blit-into-frame + IFD parse (the decoder→output seam), and downstream demosaic re-reads the u16 frame. That is the next investigation (decoder→pipeline fusion), not the decoder itself.
+
+---
+
+## ac_strategy / ac_context hot-file pass (2026-06-29, branch capebio/perf/ac-strategy-coefforder-zdc1-jun29-x7q2)
+
+ChatGPT proposed several items over a multi-round "holographic" analysis of `ac_strategy.cc/.h` + `ac_context.h`. Landed: exact rectangular CoeffOrderAndLut traversal, unchecked Set writer split, ZeroDensityContext1 cb==1 fast path (all byte-exact, see branch). REJECTED below.
+
+**uint16_t natural-order table (narrow `coeff_order_t` for natural orders): REJECTED — contradicts a documented libjxl tradeoff.** ChatGPT suggested storing natural coeff-order / LUT entries as `uint16_t` to halve `order[k]` load bandwidth. But `coeff_order_fwd.h:18-20` documents the OPPOSITE deliberate choice: "Needs at least 16 bits. A 32-bit type speeds up DecodeAC by 2% at the cost of more memory." So narrowing to 16-bit would *regress* DecodeAC ~2% (the wider type keeps `block[order[k]]` indexing cheaper on the hot decode path). The 32-bit width is intentional. Not attempted.
+
+**64×64 combined ZeroDensityContext lookup table: REJECTED (ChatGPT self-rejected, confirmed).** Replacing the two tiny L1-resident tables (`kCoeffFreqContext[64]` + `kCoeffNumNonzeroContext[64]`, both used by `ZeroDensityContext`) with one 64x64 (8KiB) table replaces two cheap local loads with one larger, less-cache-local load and displaces hotter data. Not robust across CPUs/WASM. Keep the arithmetic + two small tables.
+
+**log2_covered_blocks==0 branch *inside* ZeroDensityContext: REJECTED in favor of the loop-level split.** Branching per-coefficient inside the function does not remove the shifts on the multiblock path and adds a per-coeff branch. The landed form lifts the cb==1 decision OUT of the loop (see ZeroDensityContext1), which is strictly better.
+
+## enc_convolve_separable5.cc — ChatGPT deep-pass items (2026-06-29)
+
+Context: ChatGPT did an 8-lens pass on this file. Its headline recommendation (a
+two-row pair → vertical-band y-reuse ring) was ALREADY LANDED in trunk (RingColumn /
+kRowsPerBand=8, +31-49%), as was the remainder collapse to 0/1/>=2 and the exact
+25-term scalar tail. The genuinely-new item (border-row horizontal dedup) was
+implemented byte-exact on branch perf/conv5-border-dedup-jun29-bd7. The following
+ChatGPT suggestions were REJECTED for this file:
+
+**Full 4-/8-row register y-ring as the first move: REJECTED (moot + worse than the landed design).** ChatGPT proposed escalating to a large register ring. The file already has an 8-row band ring (kRowsPerBand=8) tuned to balance horizontal-conv reuse against parallel-task count and register pressure; ChatGPT itself warned a naive large register ring spills and loses the saved arithmetic to store-buffer pressure. Nothing to do — the existing band ring IS this idea, already tuned.
+
+**Shuffle-based horizontal-neighbour reuse (replace the 5 overlapping LoadU with lane shuffles): REJECTED.** The in-file comment at HorzConvolve ("Loading anew is faster than combining vectors") records the deliberate choice, and prior project work (memory: conv5 y-ring, dec-xyb) confirmed shuffle-heavy ports REGRESS on WASM SIMD128 (4-lane) which scalarizes wide shuffles. The win the ring delivered came from cutting WORK (fewer horizontal convs), not from cheaper lane plumbing. Do not re-attempt without real WASM measurement.
+
+**External-halo / destination-Rect / in-place fast-path API: REJECTED for this change (scope + layer).** ChatGPT suggested a SIMD `Separable5ToRect` or in-place variant to avoid caller temporaries. This is a caller-contract change spanning convolve.h + every caller (butteraugli, detect_dots), not a kernel optimization, and the fast path's horizontal borders are rect-bound while vertical borders are image-bound — adding a distinct out-Rect risks mirroring at artificial edges. Out of scope; if a caller is shown to allocate a temporary purely to crop, raise it as a caller-side change, not here.
+
+**Right-aligned SIMD overwrite of the scalar tail (strict-exact mode): REJECTED.** The SIMD path is separable (horizontal-then-vertical FMA); the scalar tail is a direct 25-term accumulation — mathematically equal but NOT bit-identical reductions. A right-aligned SIMD overwrite of the tail would change which pixels use which reduction tree and break the existing byte-exact contract. Keep the scalar tail's accumulation order.
+
+---
+
+## 2026-06-29 — enc_entropy_coder.cc round-2 (ChatGPT holographic/UV/3-D passes): evaluated & REJECTED
+
+Branch with the ACCEPTED byte-exact work: `perf/enc-entropy-count-decomp-jun29-z4x`
+(submodule capebio) — count-all−DC (8x8) + count-all−LLF (generic), replacing the
+mask machinery. The remaining ChatGPT proposals were evaluated and rejected:
+
+- **Maintained-bucket / incremental ZeroDensityContext state machine.** REJECT.
+  8x8 (covered_blocks==1) path: the `>>log2_covered_blocks` are `>>0` no-ops the
+  compiler already elides (already rejected round-1). Generic path (covered_blocks>1):
+  the ceil/floor recurrence is fragile to keep byte-exact and large transforms are a
+  tiny fraction of blocks — risk > reward.
+- **4:4:4 vs subsampled-DCT8 traversal split.** REJECT. Normal VarDCT is already
+  4:4:4 (HShift/VShift==0 → the per-channel alignment branches are perfectly
+  predictable and ~free); duplicating TokenizeCoefficients doubles maintenance for
+  no measured win. (Round-1 already flagged subsampling-dispatch out of scope.)
+- **Dedicated 8x8 token emitter.** REJECT. The generic ZeroDensityContext already
+  degenerates correctly for covered_blocks==1; a specialized copy saves only the
+  elided shifts. Marginal, adds a second code path.
+- **Perimeter-only (right-col + bottom-row) density writes.** REJECT (low value).
+  Current fill is a per-row `memset` of <=cbx (<=32) bytes over <=covered_blocks_y
+  rows — already trivial. Perimeter-only adds indexing complexity + a chroma-coord
+  caveat for a sub-microsecond saving.
+- **Zero-AC early-exit branch.** REJECT (trivial). Saves one
+  ZeroDensityContextsOffset() call on all-zero AC blocks; the token loop already
+  no-ops via its `nzeros != 0` guard. Not worth the extra branch / churn.
+- **Density ring buffer (replace Image3B scratch).** REJECT. ChatGPT itself
+  withdrew it; the scratch is already group-local + byte-sized (round-1) — a ring
+  adds state/edge complexity for no real footprint win.
+- **resize()+data() raw token writes; narrow coeff_order_t to 16-bit.** REJECT.
+  resize() value-inits the whole pessimistic buffer (worse for sparse); 16-bit
+  order entries regress decoder speed (ChatGPT flagged both as avoid).
+- **"LLF-mask domain bug" (cx>4 mis-count).** NON-BUG (confirmed round-1: AC-residual
+  LLF slots are already zero so the unmasked lanes count as zero anyway). The
+  accepted count-all−LLF rewrite removes the mask entirely, so the concern is moot —
+  but note this was a perf/robustness rewrite, NOT a correctness fix.
+
+---
+
+## CONV5-1: scalar-tail FP reassociation cleanup (2026-06-29)
+
+**Target:** `enc_convolve_separable5.cc` scalar remainder (the `kSizeModN != 0`
+25-term direct accumulation, ≤ N-1 pixels per row).
+**Proposed (ChatGPT):** precompute `wx*wy`, merge symmetric terms / switch the
+tail to horizontal-then-vertical form, and/or a right-aligned SIMD overwrite of
+the tail.
+**Rejected:** The SIMD body is separable (5 horizontal reductions → 3 vertical
+FMAs); the scalar tail is a direct 25-term accumulation in a fixed order. They
+are mathematically equal but NOT bit-identical, and the codebase's contract here
+is byte-exactness. Reassociating the tail (merged weights, regrouping, SIMD
+overwrite) changes the floating-point accumulation order → breaks byte-exact
+output for at most N-1 pixels per row of gain. Removing `std::abs`/redundant
+`Mirror` on interior tail pixels is the only safe slice and is negligible.
+Not worth the byte-exactness risk. (Border-row dedup — the byte-exact part of
+the same analysis — WAS done: branch `perf/enc-conv5-border-dedup-jun29-r3x`.)
+
+---
+
+## CONV5-2: x-tile scratch ring (tall band + narrow x-tile) (2026-06-29)
+
+**Target:** `enc_convolve_separable5.cc` interior path. The shipped optimum is
+the **register rolling ring** in vertical bands (`kRowsPerBand=8`), which reuses
+4-of-5 horizontal convolutions per row but recomputes a 4-row halo per band
+(`(B+4)/B = 1.5×` horizontal work at B=8).
+**Proposed (ChatGPT's deepest "final" idea):** make the band the full interior
+height and process it in **narrow x-tiles**, holding a 5-row scratch ring of
+horizontal convolutions in L1 and sliding it down. Halo recompute → ~1.0×, and
+the resident set becomes `5×tileW` (L1) instead of `(H+4)×xsize`, so a tall band
+no longer thrashes. Theory: ~15–20% on top of the ring.
+**Rejected — MEASURED REGRESSION on BOTH targets** (byte-exact PASS, so this is a
+pure speed verdict). Implemented as a 3rd variant in the A/B harness and swept
+tile width. RING(band=8) vs XTILE, interleaved median:
+
+| size  | AVX2 saved | WASM saved |
+|-------|-----------:|-----------:|
+| 512²  | −7%        | −11%       |
+| 1024² | −97%       | −67%       |
+| 2048² | −84%       | −85%       |
+
+XTILE only beats the ring at tiny 512² with huge tiles (`tv=64`, +15–26%) — i.e.
+when the whole image fits cache; at the real ≥1024² sizes it is **2–3× slower at
+every tile width**. **Mechanism:** the scratch ring trades the register ring's
+zero-traffic reuse for **1 store + 5 loads per output vector**. The halo it
+saves is cheap (registers/L1); the scratch round-trips it adds are not.
+ChatGPT's own caveat held: *"the register ring is the ceiling; scratch is the
+fallback only if registers spill."* On AVX2 and WASM the ring does **not** spill
+(it already delivers +39–49%), so the ceiling wins outright. The band-size scan
+re-confirms `band=8` as the robust optimum (band=16/32 regress at ≥1024²).
+**Conclusion: no production change — the shipped register ring is optimal.**
+Negative-result harness + numbers: branch `perf/enc-conv5-xtile-jun29-v7k`,
+`external/libjxl-012/perf-bench/conv5_ab.cc` (+ `FINDINGS.md` §x-tile).
+
+---
+
+## DEC_ANS-1..8: dec_ans.{h,cc} TTFP pass — rejected items (2026-06-29)
+
+Context: ChatGPT 4-round "holographic" analysis of `dec_ans.cc`/`dec_ans.h`
+(5th-hottest decode file, AC inner loop / TTFP). Branch
+`perf/dec-ans-ttfp-inline-jun29-z4k1` (capebio submodule) landed the 3
+byte-exact wins (W1 hot-path inline, W2 move-counts, W3 stack-scratch).
+The following from the same analysis are REJECTED for this pass:
+
+- **"Validated no-mask hybrid decoder" (drop `nbits &= 31u` for valid streams).**
+  The mask is the malformed-stream containment guard in the single hottest
+  function (`ReadHybridUintConfig`). A second "validated" code path doubles the
+  hottest function and needs a proven all-histograms-safe invariant
+  (incl. extension-table Huffman leaves) — large surface, tiny arithmetic saving.
+- **Per-symbol degenerate-histogram check in the coefficient loop.** ChatGPT
+  itself flagged this as a likely regression: adds a branch to the true inner
+  loop for a case that rarely repeats per-coefficient.
+- **Compile-time `log_alpha_size` template specialization (5/6/7/8).** Trades a
+  couple of dynamic shifts for 4× code size in the AC decode path; WASM i-cache
+  bloat. ChatGPT self-walked-back ("not an automatic win").
+- **Per-token descriptor table / precomputed derived fields on HybridUintConfig.**
+  Replaces cheap arithmetic with a dependent memory load and enlarges a struct
+  read through a context-dependent lookup → worse cache behavior. Self-rejected.
+- **Fused ANS/no-LZ "lazy-refill" primitive.** Splitting the single `br->Refill()`
+  contract (one refill covers symbol + hybrid payload) into per-event refills
+  changes BitReader reserve semantics and malformed-input timing; risky rewrite
+  of the hottest path for an unproven gain. ChatGPT's final round also withdrew it.
+- **Expand `context_map` (1 byte/ctx) into table pointers.** Turns a compact byte
+  map into pointer-sized data through the hot lookup → cache regression.
+- **Always-inline the LZ77 path.** Increases code size / i-cache pressure on the
+  common no-LZ77 path; the whole point of `ReadHybridUintClusteredMaybeInlined`
+  (which W1 now uses) is to keep the bulky LZ path OUT of line.
+
+---
+
+## enc_modular R1–R4+D2 pass (2026-06-29) — considered and dropped
+
+- **`y_to_c = y_factor * cfl_factor` manual hoist in AddVarDCTDC.** The expression is
+  a product of two loop-invariants; `-O2`/`-Ob2` already hoists it out of the x-loop.
+  Manual hoist is byte-exact but zero measured benefit — skipped to keep the diff
+  surgical.
+- **QuantizeChannel power-of-two add-and-mask special case.** Byte-exact for power-of-two
+  `q`, but the integer divide is not hot (the function is row-parallel and dominated by
+  the per-pixel branch + memory), and the extra branch/path costs more than it saves.
+  Not worth the complexity.
+- **DC X/B parallelism after Y in AddVarDCTDC.** ChatGPT's "X and B independent once Y
+  is ready" is true, but the encoder already parallelises across DC groups; adding inner
+  2-way parallelism risks pool oversubscription for no clear win. Needs an explicit
+  inner-parallelism policy + bench; not pursued.
+- **Reorder group preparation/tokenisation by estimated work (heaviest first).** Only
+  helps if RunOnPool doesn't already work-steal; byte-exact but speculative, adds a
+  sort + work estimator. No evidence it beats the current dynamic scheduling.
+- **ComputeTokens active-stream filtering (skip empty streams before scheduling).** The
+  prior pass deliberately keeps calling ModularCompress on empty streams (it returns
+  immediately) to guarantee byte-identical tokens_/headers_/widths_. Filtering saves
+  negligible work and adds a divergence risk. Left as-is.
+- **D3 EstimateCost bounded / restricted-channel scoring — NOT byte-exact.** Scoring
+  only the 3 transformed colour channels during RCT trials changes the result: cost
+  accumulates `histo_cost += (size_t)f; frac += f - (size_t)f` per channel and floors
+  `frac` once at the end, so the constant non-colour channels' fractional contribution
+  is nonlinear under the floor and can flip a near-tie RCT selection. Confirmed this
+  pass; only viable as an explicit ratio experiment, never a "byte-exact" land.

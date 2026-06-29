@@ -47,8 +47,8 @@ const FILES   = userArgs.slice(2).length > 0
       join(REPO, "packages/jxl-test-corpus/fixtures/adobe-rgb-16bit.jxl"),
     ];
 
-const REPS    = parseInt(process.argv.find(a => a.startsWith("--reps="))?.slice(7) ?? "30");
-const WARMUP  = 5;
+const REPS_OVERRIDE = process.argv.find(a => a.startsWith("--reps="))?.slice(7);
+const WARMUP  = 3;
 
 // ─── stats helpers ─────────────────────────────────────────────────────────
 const min    = a => Math.min(...a);
@@ -129,6 +129,15 @@ for (const file of FILES) {
     decodeRgba8(oldMod, jxl);
     decodeRgba8(newMod, jxl);
   }
+
+  // Auto-scale reps: ~10s total wall time per file; calibrate from first warmup.
+  const t_cal_start = performance.now();
+  decodeRgba8(newMod, jxl);
+  const singleMs = performance.now() - t_cal_start;
+  const REPS = REPS_OVERRIDE
+    ? parseInt(REPS_OVERRIDE)
+    : Math.max(6, Math.min(30, Math.ceil(10000 / (singleMs * 2))));
+  console.log(`  reps: ${REPS}  (single decode ~${singleMs.toFixed(0)}ms)`);
 
   // ── TRUE alternation A/B timing ────────────────────────────────────────
   const oldTimes = [], newTimes = [];
