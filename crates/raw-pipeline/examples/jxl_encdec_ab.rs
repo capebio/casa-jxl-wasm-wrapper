@@ -35,13 +35,32 @@ fn median(v: &mut [f64]) -> f64 {
     v[v.len() / 2]
 }
 
+/// FNV-1a 64-bit content hash of the encoded JXL — for OLD-vs-NEW byte-exact
+/// comparison (single-thread encode is deterministic).
+fn fnv1a64(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &x in b {
+        h ^= x as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| r"C:\Tmp\rcw-rgb".into());
     let effort: u8 = std::env::var("EFFORT").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
     let rounds: usize = std::env::var("ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
     let tag = std::env::var("TAG").unwrap_or_else(|_| "lib".into());
+    // MODE=lossless exercises the modular encoder hot paths (EstimateWPCost,
+    // EstimateCost RCT search, channel palettes); default lossy is VarDCT.
+    let mode = std::env::var("MODE").unwrap_or_else(|_| "lossy".into());
+    let base = if mode == "lossless" {
+        EncodeOptions::lossless()
+    } else {
+        EncodeOptions::distance(1.0)
+    };
 
-    let opts = EncodeOptions { use_container: true, ..EncodeOptions::distance(1.0).with_effort(effort) };
+    let opts = EncodeOptions { use_container: true, ..base.with_effort(effort) };
 
     let mut files: Vec<_> = std::fs::read_dir(&dir).expect("readdir").flatten()
         .map(|e| e.path())
@@ -86,8 +105,9 @@ fn main() {
         }
         let e_med = median(&mut enc_ms);
         let d_med = median(&mut dec_ms);
+        let hash = fnv1a64(&jxl);
         println!(
-            "{{\"tag\":\"{tag}\",\"file\":\"{name}\",\"w\":{w},\"h\":{h},\"mp\":{:.2},\"effort\":{effort},\"enc_ms\":{:.2},\"dec_ms\":{:.2},\"bytes\":{bytes},\"butter\":{:.4}}}",
+            "{{\"tag\":\"{tag}\",\"file\":\"{name}\",\"w\":{w},\"h\":{h},\"mp\":{:.2},\"effort\":{effort},\"enc_ms\":{:.2},\"dec_ms\":{:.2},\"bytes\":{bytes},\"hash\":\"{hash:016x}\",\"butter\":{:.4}}}",
             (w as f64 * h as f64) / 1e6, e_med, d_med, butter
         );
     }
