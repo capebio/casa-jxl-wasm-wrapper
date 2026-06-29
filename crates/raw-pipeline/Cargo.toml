@@ -29,5 +29,10 @@ anyhow = "1"
 jxl-ffi = { path = "../jxl-ffi", optional = true }
 half = { version = "2", optional = true }
 
+[[bin]]
+name = "djxl"
+path = "src/bin/djxl.rs"
+required-features = ["jxl-codec"]
+
 [dev-dependencies]
 jxl-oxide = "0.11"
