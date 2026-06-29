@@ -19,6 +19,7 @@ $cc = "clang-cl /std:c++17 /O2 /EHsc /MD /DNDEBUG /nologo /wd4716 " +
   "/link /LIBPATH:$b\lib /LIBPATH:$b\third_party\highway jxl-internal.lib hwy.lib"
 
 $build = "ninja -C `"$b`" jxl-internal && $cc"
-cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$root`" && $build"
-if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
+# Build chatter -> log file so stdout carries only harness output (clean for redirection).
+cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$root`" && $build" > "$tools\conv5_build.log" 2>&1
+if ($LASTEXITCODE -ne 0) { Get-Content "$tools\conv5_build.log" -Tail 30; throw "build failed ($LASTEXITCODE)" }
 & "$tools\conv5_ab.exe" $Mode
