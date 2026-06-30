@@ -125,36 +125,6 @@ const LUMA_R: f32 = 0.2126;
 const LUMA_G: f32 = 0.7152;
 const LUMA_B: f32 = 0.0722;
 
-/// Precomputed ln/exp LUTs for perceptual constancy (Lens17 non-Riemannian grid).
-/// Reduces transcendental calls during grid initialization (4913 evaluations).
-/// Built lazily on first use.
-static LN_LINEAR_LUT: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-static EXP_LINEAR_LUT: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-
-fn build_ln_linear_lut() -> Vec<f32> {
-    let mut lut = vec![0.0f32; 256];
-    let eps = 1e-6f32;
-    for i in 0..256 {
-        let norm = i as f32 / 255.0;
-        let linear = if norm <= 0.04045 {
-            norm / 12.92
-        } else {
-            ((norm + 0.055) / 1.055).powf(2.4)
-        };
-        lut[i] = (linear.max(eps)).ln();
-    }
-    lut
-}
-
-fn build_exp_linear_lut() -> Vec<f32> {
-    let mut lut = vec![0.0f32; 256];
-    for i in 0..256 {
-        let log_val = -6.0 + (i as f32 / 255.0) * 12.0;
-        lut[i] = log_val.exp().min(1.5);
-    }
-    lut
-}
-
 #[derive(Clone)]
 pub struct PipelineParams {
     pub black: u16,
@@ -662,9 +632,19 @@ thread_local! {
         const { std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
     static BLUR_ROW_F32: std::cell::RefCell<Vec<f32>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    static PERCEPTUAL_GRID: std::cell::RefCell<Option<PerceptualGrid>> =
-        const { std::cell::RefCell::new(None) };
 }
+
+/// Perceptual-constancy grid for the `#[cfg(not(feature = "c-perceptual"))]` path.
+///
+/// PIPE-013: process-wide `OnceLock` rather than a per-thread `RefCell<Option<_>>`.
+/// The grid is immutable after construction (`new()` fully populates a 17³ lattice; `sample()`
+/// is read-only), so a single shared instance is correct and lets every Rayon worker reuse one
+/// build instead of each thread re-running the ~4913-eval `new()` on its first perceptual pixel.
+/// In the hot loop this also drops the two per-pixel thread-local lookups + `RefCell` borrows
+/// (`is_none` check + `borrow().as_ref().unwrap()`) to one `&'static` deref. Byte-identical
+/// output — same lattice, same trilinear `sample()`.
+#[cfg(not(feature = "c-perceptual"))]
+static PERCEPTUAL_GRID: std::sync::OnceLock<PerceptualGrid> = std::sync::OnceLock::new();
 
 fn build_post_lut(t: &TonePost) -> Vec<u8> {
     // MEASURED (2026-06-19): this rebuild is only ~2% of a slider-drag frame (item-0). The handoff's
@@ -1259,16 +1239,12 @@ pub fn apply_tone_math(
             // Inputs (r2/g2/b2) are post-matrix values in [0, 65535]; normalize to [0, 1.5] before sampling.
             // norm = 1.5/65535 maps [0, 65535] → [0, 1.5] to match the grid's build domain.
             let norm = 1.5 / 65535.0;
-            // Ensure the grid is initialised (borrow_mut only on first call per thread).
-            PERCEPTUAL_GRID.with(|g| {
-                if g.borrow().is_none() {
-                    *g.borrow_mut() = Some(PerceptualGrid::new());
-                }
-            });
-            // Read-only borrow for the hot pixel loop — avoids borrow_mut on every pixel.
-            let (rr, gg, bb) = PERCEPTUAL_GRID.with(|g| {
-                g.borrow().as_ref().unwrap().sample(r2 * norm, g2 * norm, b2 * norm)
-            });
+            // PIPE-013: one shared, lazily-built grid (process-wide OnceLock). The hot loop is a
+            // single `&'static` deref + read-only `sample()` — no per-pixel thread-local lookup,
+            // no RefCell borrow, and no per-thread rebuild of the 17³ lattice.
+            let (rr, gg, bb) = PERCEPTUAL_GRID
+                .get_or_init(PerceptualGrid::new)
+                .sample(r2 * norm, g2 * norm, b2 * norm);
             // Grid output is in [0, 1.5]; scale back to [0, 65535] for the post-LUT.
             r2 = rr * 65535.0;
             g2 = gg * 65535.0;
@@ -1728,6 +1704,9 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
 
     // Parallel path: Rayon dispatches blocks to worker threads; each closure allocates
     // its own r/g/b scratch on that thread's stack (unavoidable without thread_local overhead).
+    // PIPE-014 (rejected, 2026-06-30): reusing one scratch triple per worker via `for_each_init`
+    // REGRESSED 4–24 MP by 7–12% — the per-block `[0f32; BLK]` stack zero lands in L1 (near-free)
+    // and codegens better than Vec-through-`&mut` indirection. See examples/tone_simd_scratch_flip.rs.
     #[cfg(feature = "parallel")]
     {
         PARALLEL_PATH_CALLS.with(|c| c.set(c.get() + 1));
@@ -2161,6 +2140,7 @@ pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
 
     const BLK: usize = 2048;
 
+    // PIPE-014 rejected here too (see process_into_simd): per-block stack scratch is fastest.
     #[cfg(feature = "parallel")]
     {
         PARALLEL_PATH_CALLS.with(|c| c.set(c.get() + 1));
@@ -2212,6 +2192,15 @@ pub fn downscale_rgb16_into(src: &[u16], sw: usize, sh: usize, dw: usize, dh: us
         .expect("downscale_rgb16_into: source buffer bounds");
     validate_pixel_buffer_u16(out, dw, dh, 3)
         .expect("downscale_rgb16_into: output buffer bounds");
+
+    // PIPE-015: identity (no resize) → exact copy. Also a correctness guard for the exact-factor
+    // path below: when sw==dw && sh==dh, n_px == 1 and `((1u128<<64)/1) as u64` wraps to 0, so
+    // `(sum * 0) >> 64 == 0` would blacken the whole frame. copy_from_slice is also faster than
+    // the per-pixel sum/reciprocal loop. (Lengths are validated equal above.)
+    if sw == dw && sh == dh {
+        out.copy_from_slice(src);
+        return;
+    }
 
     // Integer fast path for exact factors (very common: 1800px lb → 360px thumb = 5x).
     // Flipflop bench (2026-06-18): serial 8ms, parallel 3.4ms → 2.37× speedup on 12MP.
@@ -2303,6 +2292,13 @@ pub fn downscale_rgb8_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usiz
         .expect("downscale_rgb8_into: source buffer bounds");
     validate_pixel_buffer(out, dw, dh, 3)
         .expect("downscale_rgb8_into: output buffer bounds");
+
+    // PIPE-015: identity (no resize) → exact copy. Also guards the exact-factor reciprocal below
+    // (n == 1 → `((1u128<<64)/1) as u64` wraps to 0 → black frame). See downscale_rgb16_into.
+    if sw == dw && sh == dh {
+        out.copy_from_slice(src);
+        return;
+    }
 
     // Integer fast path for exact factors (symmetric to the rgb16 version).
     // Optimization (C7, 2026-06-19): replace 3 divides/pixel with reciprocal multiply (8–13% faster).
@@ -3508,6 +3504,28 @@ mod downscale_recip_parity_tests {
         assert_eq!(out.len(), 1280 * 960 * 3);
         // Sanity: values in range
         assert!(out.iter().all(|&v| v <= 0x3fff), "output out of 14-bit source range");
+    }
+
+    #[test]
+    fn identity_resize_is_exact_copy_rgb16() {
+        // PIPE-015 regression: sw==dw && sh==dh hits the exact-factor path with n_px == 1.
+        // `((1u128<<64)/1) as u64` wraps to 0, so the reciprocal multiply blackened the frame.
+        // The identity guard must instead reproduce the source byte-for-byte.
+        let src = synth_rgb16(257, 131); // non-round dims, no special-casing
+        let out = downscale_rgb16(&src, 257, 131, 257, 131);
+        assert_eq!(out, src, "identity downscale must equal the source (not a black frame)");
+    }
+
+    #[test]
+    fn identity_resize_is_exact_copy_rgb8() {
+        let mut src = vec![0u8; 200 * 150 * 3];
+        let mut lcg: u32 = 0x9e37_79b9;
+        for px in src.iter_mut() {
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *px = (lcg >> 24) as u8;
+        }
+        let out = downscale_rgb8(&src, 200, 150, 200, 150);
+        assert_eq!(out, src, "identity downscale (rgb8) must equal the source");
     }
 
     #[test]
