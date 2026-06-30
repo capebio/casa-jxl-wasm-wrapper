@@ -291,6 +291,13 @@ pub unsafe fn ssim_moments_avx2(
 /// AVX2 RGBA(u8) → planar X/Y/B using i32-gather over the sqrt-linear LUT.
 /// `lut` is a 256-entry static f32 table reference. Processes 8 px/iter + scalar tail.
 ///
+/// NOTE: superseded for dispatch by `pixels_to_xyb_avx2_scalar_lut`, which the
+/// gather flip (examples/xyb_gather_flip.rs) measured ~2.6× faster at 1/6/24 MP
+/// with bit-identical output. This gather kernel is retained as that flip's
+/// baseline arm and as the bit-exact reference the scalar-LUT path is checked
+/// against (xyb_gather_candidates_bit_identical). Do not re-wire it into dispatch
+/// without a fresh flip showing gather wins on the target fleet.
+///
 /// Declares `fma` because the Y row uses `_mm256_fmadd_ps`; the dispatcher only
 /// reaches this path when `detect_native` confirmed avx2+fma. The explicit
 /// mul/sub/add intrinsics are not auto-contracted, so the byte output is the
@@ -373,12 +380,16 @@ unsafe fn lut8_scalar_insert(p: *const u8, channel: usize, lut: *const f32) -> _
     _mm256_insertf128_ps(_mm256_castps128_ps256(lo), hi, 1)
 }
 
-/// Candidate B (gather flip): RGBA(u8) → planar X/Y/B via scalar LUT loads
-/// assembled into 8-wide vectors — trades three `vgatherdps` per 8 px for 24 L1
-/// loads + two `vinsertf128`. Bit-identical to `pixels_to_xyb_avx2` by
-/// construction: same LUT, same per-lane values, same X/Y/B arithmetic in the
-/// same order. Selected over the gather kernel only if the flip
-/// (examples/xyb_gather_flip.rs) shows a non-regression; retire the loser.
+/// RGBA(u8) → planar X/Y/B via scalar LUT loads assembled into 8-wide vectors —
+/// trades three `vgatherdps` per 8 px for 24 L1-resident loads + two
+/// `vinsertf128`. Bit-identical to `pixels_to_xyb_avx2` by construction: same
+/// LUT, same per-lane values, same X/Y/B arithmetic in the same association.
+///
+/// This is the WIRED AVX2 xyb path (fill_test_xyb). The gather flip
+/// (examples/xyb_gather_flip.rs) measured it ~2.6× faster than the gather kernel
+/// at 1/6/24 MP on a Comet Lake core; the win holds at 24 MP, so the three
+/// streamed planar writes do not erode it. `vgatherdps` over a 1 KiB (L1-hot)
+/// LUT is throughput-bound on the gather port, not on cache — scalar loads win.
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn pixels_to_xyb_avx2_scalar_lut(
     px: &[u8],
@@ -406,71 +417,6 @@ pub unsafe fn pixels_to_xyb_avx2_scalar_lut(
             y.as_mut_ptr().add(i),
             _mm256_fmadd_ps(_mm256_add_ps(r, bb), half, g),
         );
-        _mm256_storeu_ps(b.as_mut_ptr().add(i), bb);
-        i += 8;
-    }
-    xyb_tail(px, lut, n, i, x, y, b);
-}
-
-/// Candidate C (gather flip control): the gather kernel manually unrolled to
-/// 16 px/iter, running two independent 8-lane gather chains to expose
-/// gather-level ILP. Bit-identical to `pixels_to_xyb_avx2`. Exists only as the
-/// flip's gather control; not wired into dispatch.
-#[target_feature(enable = "avx2,fma")]
-pub unsafe fn pixels_to_xyb_avx2_gather16(
-    px: &[u8],
-    n: usize,
-    lut: &[f32; 256],
-    x: &mut [f32],
-    y: &mut [f32],
-    b: &mut [f32],
-) {
-    assert!(
-        px.len() >= n * 4 && x.len() >= n && y.len() >= n && b.len() >= n,
-        "pixels_to_xyb_avx2_gather16: px.len() must be >= n*4 and x/y/b len >= n"
-    );
-    let half = _mm256_set1_ps(0.5);
-    let mask_r = _mm256_set1_epi32(0x0000_00FF);
-    let mask_g = _mm256_set1_epi32(0x0000_FF00);
-    let mask_b = _mm256_set1_epi32(0x00FF_0000);
-    let lp = lut.as_ptr();
-    let lanes16 = n / 16 * 16;
-    let mut i = 0;
-    while i < lanes16 {
-        let pv0 = _mm256_loadu_si256(px.as_ptr().add(i * 4) as *const __m256i);
-        let pv1 = _mm256_loadu_si256(px.as_ptr().add(i * 4 + 32) as *const __m256i);
-        let ri0 = _mm256_and_si256(pv0, mask_r);
-        let gi0 = _mm256_srli_epi32::<8>(_mm256_and_si256(pv0, mask_g));
-        let bi0 = _mm256_srli_epi32::<16>(_mm256_and_si256(pv0, mask_b));
-        let ri1 = _mm256_and_si256(pv1, mask_r);
-        let gi1 = _mm256_srli_epi32::<8>(_mm256_and_si256(pv1, mask_g));
-        let bi1 = _mm256_srli_epi32::<16>(_mm256_and_si256(pv1, mask_b));
-        // Two independent gather groups: the scheduler overlaps their latencies.
-        let r0 = _mm256_i32gather_ps(lp, ri0, 4);
-        let r1 = _mm256_i32gather_ps(lp, ri1, 4);
-        let g0 = _mm256_i32gather_ps(lp, gi0, 4);
-        let g1 = _mm256_i32gather_ps(lp, gi1, 4);
-        let b0 = _mm256_i32gather_ps(lp, bi0, 4);
-        let b1 = _mm256_i32gather_ps(lp, bi1, 4);
-        _mm256_storeu_ps(x.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_sub_ps(r0, b0), half));
-        _mm256_storeu_ps(x.as_mut_ptr().add(i + 8), _mm256_mul_ps(_mm256_sub_ps(r1, b1), half));
-        _mm256_storeu_ps(y.as_mut_ptr().add(i), _mm256_fmadd_ps(_mm256_add_ps(r0, b0), half, g0));
-        _mm256_storeu_ps(y.as_mut_ptr().add(i + 8), _mm256_fmadd_ps(_mm256_add_ps(r1, b1), half, g1));
-        _mm256_storeu_ps(b.as_mut_ptr().add(i), b0);
-        _mm256_storeu_ps(b.as_mut_ptr().add(i + 8), b1);
-        i += 16;
-    }
-    // At most one full 8-block remains before the scalar tail (n % 16 < 16).
-    if i + 8 <= n {
-        let pv = _mm256_loadu_si256(px.as_ptr().add(i * 4) as *const __m256i);
-        let ri = _mm256_and_si256(pv, mask_r);
-        let gi = _mm256_srli_epi32::<8>(_mm256_and_si256(pv, mask_g));
-        let bi = _mm256_srli_epi32::<16>(_mm256_and_si256(pv, mask_b));
-        let r = _mm256_i32gather_ps(lp, ri, 4);
-        let g = _mm256_i32gather_ps(lp, gi, 4);
-        let bb = _mm256_i32gather_ps(lp, bi, 4);
-        _mm256_storeu_ps(x.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_sub_ps(r, bb), half));
-        _mm256_storeu_ps(y.as_mut_ptr().add(i), _mm256_fmadd_ps(_mm256_add_ps(r, bb), half, g));
         _mm256_storeu_ps(b.as_mut_ptr().add(i), bb);
         i += 8;
     }
@@ -596,16 +542,16 @@ mod xyb_tests {
         }
     }
 
-    /// The gather kernel and the two flip candidates must agree bit-for-bit: they
-    /// read the same LUT entries into the same lane order and apply the same
-    /// X/Y/B intrinsics in the same association. `n` crosses the 16-wide unroll
-    /// boundary and leaves a residual 8-block + a scalar tail.
+    /// The wired scalar-LUT kernel must agree bit-for-bit with the retained gather
+    /// kernel: both read the same LUT entries into the same lane order and apply
+    /// the same X/Y/B intrinsics in the same association. `n` leaves a 5-px scalar
+    /// tail to exercise the shared `xyb_tail`.
     #[test]
     fn xyb_gather_candidates_bit_identical() {
         if !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")) {
             return;
         }
-        let n = 8 * 4096 + 13; // 16-unroll body + one 8-block + 5-px scalar tail
+        let n = 8 * 4096 + 13; // many 8-blocks + a 5-px scalar tail
         let mut px = vec![0u8; n * 4];
         let mut s = 0xA5A5_1234u32;
         for v in &mut px {
@@ -618,19 +564,14 @@ mod xyb_tests {
         let mk = || (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
         let (mut gx, mut gy, mut gb) = mk();
         let (mut sx, mut sy, mut sb) = mk();
-        let (mut ux, mut uy, mut ub) = mk();
         unsafe {
             pixels_to_xyb_avx2(&px, n, lut, &mut gx, &mut gy, &mut gb);
             pixels_to_xyb_avx2_scalar_lut(&px, n, lut, &mut sx, &mut sy, &mut sb);
-            pixels_to_xyb_avx2_gather16(&px, n, lut, &mut ux, &mut uy, &mut ub);
         }
         for i in 0..n {
             assert_eq!(gx[i].to_bits(), sx[i].to_bits(), "scalar_lut x[{i}]");
             assert_eq!(gy[i].to_bits(), sy[i].to_bits(), "scalar_lut y[{i}]");
             assert_eq!(gb[i].to_bits(), sb[i].to_bits(), "scalar_lut b[{i}]");
-            assert_eq!(gx[i].to_bits(), ux[i].to_bits(), "gather16 x[{i}]");
-            assert_eq!(gy[i].to_bits(), uy[i].to_bits(), "gather16 y[{i}]");
-            assert_eq!(gb[i].to_bits(), ub[i].to_bits(), "gather16 b[{i}]");
         }
     }
 }

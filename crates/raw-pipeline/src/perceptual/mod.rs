@@ -182,7 +182,9 @@ impl Comparer {
         match self.backend {
             #[cfg(target_arch = "x86_64")]
             Backend::Avx2Strict | Backend::Avx2Rsqrt => unsafe {
-                simd::avx2::pixels_to_xyb_avx2(
+                // scalar-LUT assembly: flip-measured ~2.6× over the i32-gather kernel
+                // at 1/6/24 MP (examples/xyb_gather_flip.rs), bit-identical output.
+                simd::avx2::pixels_to_xyb_avx2_scalar_lut(
                     test, self.n, xyb::sqrt_lin_lut_ptr(),
                     &mut self.tx, &mut self.ty, &mut self.tb,
                 );

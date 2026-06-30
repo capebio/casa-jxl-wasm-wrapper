@@ -966,3 +966,29 @@ the WASM `frame_stats` export, which emits `frameHashInt` AND luma stats; the on
 callers are two bench examples that discard the result. A hash-free native entry point would
 have zero callers = unreachable abstraction. Revisit only when a concrete caller wants
 metrics without the change-id.
+
+---
+
+## avx2.rs perceptual SIMD — seams deferred from the XYB-gather pass (2026-06-30)
+
+Branch `perf/xyb-gather-scalarlut-jun30-g3w7` landed only the XYB gather→scalar-LUT
+swap (the user's scoped ask). These adjacent candidates in the same file were left
+untouched and want their own flip/parity before any change:
+
+- **`downsample_avx2` deinterleave network.** The interior fast path uses 8×
+  `permutevar8x32` + 4× `permute2f128` per 8 output px. Candidate: `vhaddps(p00,p01)`
+  + a fixed `vpermq 0xD8` reorder forms the same adjacent-pair sums with far fewer
+  shuffle-port ops, preserving the horizontal-then-vertical association (so bit-exact
+  by construction). Deferred: needs its own A/B flip + the existing `dn2` parity test
+  extended to odd/one-vector widths. Separate seam from the XYB work; not blocking.
+
+- **`scale_err_avx2` accumulator topology / `inv²` factoring.** Multiple accumulators
+  or factoring `inv²` out of the per-lane error would cut a multiply, but both change
+  the reduction/rounding order against the scalar `scale_err` oracle (tol 1e-4, not
+  bit-exact). Deferred: only with a flip *and* a tolerance-parity check showing the new
+  order stays within the oracle band. Do not reassociate silently.
+
+- **Assert hardening (`n*4` overflow).** The length asserts use `px.len() >= n*4`,
+  which can overflow on adversarial `n`. A division form (`n <= px.len()/4`) avoids it.
+  Cosmetic robustness only (callers are always sized); fold into the next avx2.rs edit
+  rather than a standalone change.
