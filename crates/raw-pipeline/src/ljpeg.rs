@@ -199,15 +199,18 @@ impl<'a, const COLLECT_STATS: bool> BitReader<'a, COLLECT_STATS> {
             // Guard: nbits + 32 ≤ 64 when nbits ≤ 32 — no u64 overflow.
             // FF is rare in typical RAW entropy data (1/256 per byte).
             if remaining >= 4 && self.nbits <= 32 {
-                let b0 = self.src[self.pos];
-                let b1 = self.src[self.pos + 1];
-                let b2 = self.src[self.pos + 2];
-                let b3 = self.src[self.pos + 3];
-                if b0 != 0xFF && b1 != 0xFF && b2 != 0xFF && b3 != 0xFF {
-                    let word = ((b0 as u64) << 24)
-                        | ((b1 as u64) << 16)
-                        | ((b2 as u64) << 8)
-                        | (b3 as u64);
+                // SAFETY: remaining >= 4 ⇒ [pos, pos+4) is in bounds.
+                let raw = unsafe {
+                    std::ptr::read_unaligned(self.src.as_ptr().add(self.pos) as *const u32)
+                };
+                // Detect any 0xFF byte branchlessly: a 0xFF byte in `raw` is a 0x00
+                // byte in `!raw`, found by the SWAR zero-byte trick.
+                let x = !raw;
+                let has_ff = (x.wrapping_sub(0x0101_0101) & !x & 0x8080_8080) != 0;
+                if !has_ff {
+                    // from_be: bytes are big-endian on the wire; build the same word
+                    // the per-byte path did ((b0<<24)|(b1<<16)|(b2<<8)|b3).
+                    let word = u32::from_be(raw) as u64;
                     self.bits = (self.bits << 32) | word;
                     self.nbits += 32;
                     self.pos += 4;
