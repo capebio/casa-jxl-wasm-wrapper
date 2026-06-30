@@ -992,3 +992,14 @@ untouched and want their own flip/parity before any change:
   which can overflow on adversarial `n`. A division form (`n <= px.len()/4`) avoids it.
   Cosmetic robustness only (callers are always sized); fold into the next avx2.rs edit
   rather than a standalone change.
+
+- **`Comparer::new` is dominated by `blur::box_blur` (mask) + `ssim::ref_moments`,
+  NOT XYB.** Wiring the reference pyramid through the SIMD kernels (landed on
+  `perf/xyb-gather-scalarlut-jun30-g3w7`) only moved construction +4–10% (1/6/24 MP,
+  parallel) — measured via `examples/ref_build_effect.rs`. The XYB conversion + pyramid
+  downsample are a minor slice; the bulk is the scalar `box_blur` over the full-res Y
+  plane (×1 per level) and the integer `ref_moments` pass. **Bigger ref-build win lives
+  there**: a SIMD `box_blur` and/or folding the 3-level mask blur into the pyramid walk.
+  Out of avx2.rs's seam scope (separate kernels), but the higher-ROI target if ref-build
+  latency matters. Output shift from the SIMD-ref change measured 0.00e0 (f32 metric
+  resolution), so it is purely a latency question.
