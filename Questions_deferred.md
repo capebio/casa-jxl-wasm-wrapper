@@ -966,3 +966,60 @@ the WASM `frame_stats` export, which emits `frameHashInt` AND luma stats; the on
 callers are two bench examples that discard the result. A hash-free native entry point would
 have zero callers = unreachable abstraction. Revisit only when a concrete caller wants
 metrics without the change-id.
+
+---
+
+## CASA-ENC-D1..D4: casabio_encode.rs structural opportunities (2026-06-30)
+
+Surfaced during the casabio_encode.rs "warp & weft" sweep (branch
+`perf/casabio-encode-sweep-jun30-c7x4`). Three byte-exact/safety wins landed in that
+branch (general-branch count-hoist, pyramid input-length FFI guard, long-edge cascade
+sort). The four below are real but out of scope for a byte-exact pass — each changes a
+data shape, a schedule, or a public contract and needs its own parity + ratio/throughput
+benchmark. Logged largest-lever first.
+
+**D1 — RGB-native downscale + encode for opaque (RAW/RGB16) inputs.** *Biggest lever.*
+The dominant RAW path is `has_alpha == false`, yet the whole pipeline carries 4 channels:
+`box_downscale_rgba8` averages and stores the alpha plane at every cascade level, then
+`strip_rgba_to_rgb` discards it immediately before each `Frame::rgb` encode. For a 24 MP
+frame that is ~25% wasted downscale bandwidth + a full-frame n*3 strip alloc/copy per
+level. A parallel `box_downscale_rgb8` (3-channel) feeding `Frame::rgb` directly removes
+both the alpha averaging/store and the separate strip pass on the hot path.
+**Needs:** a second 3-ch downscale kernel (code duplication, not a generic — keep the hot
+loops monomorphic), a `Raster` enum at the entry boundary to pick the route once, and
+visual/byte parity vs the current RGBA→strip output (averaging then truncating α=255 is
+*not* guaranteed bit-identical to never-averaging when rounding differs — must verify).
+Est. −20..33% on the downscale+strip fraction of the opaque pyramid/variant path.
+
+**D2 — Adaptive encode scheduling (treat `parallel` as capability, not policy).** In the
+variant fan-out, thumb/preview/full run as three rayon branches each holding a
+single-thread `Encoder`. The full-res encode dominates; thumb+preview finish early and
+leave cores idle while full grinds single-threaded. `encode_rgba8_pyramid` already solved
+the symmetric case (serial full-res encode after the sidecar barrier gets
+`serial_encode_threads(px)`). The variant path could do the same: run thumb+preview in
+parallel, then give the full-res encode libjxl-internal threads once the barrier clears.
+**Needs:** restructure the `rayon::join` tree so the full encode runs *after* the small
+two, plus a benchmark — resize and JXL both saturate memory bandwidth, so overlap is not
+a guaranteed win. Heuristic/topology change ⇒ bench-gated per CLAUDE.md.
+
+**D3 — Leaf coalescing: preview == full when preview isn't downscaled.** When
+`max_dim <= 1080` the preview is the *original* full raster, and for
+non-RAW + `progressive_dc == 0` the preview and full encodes share pixels, dims, effort,
+group-order, and centre — i.e. the same encode performed twice. Predicate:
+`pw == width && ph == height && !hq_override && source != Raw && opts.progressive_dc == 0
+&& preview_opts == opts` → encode once, clone the compressed bytes into both outputs.
+**Needs:** careful predicate (quality differs — preview is fixed 85, full is 85/90/95; so
+this only coalesces when `full_quality == 85`, i.e. non-RAW non-HQ), and a byte-stream
+regression test. High value for small/medium uploads where a second full-quality encode
+is pure overhead. (Note: shared storage via `Arc<[u8]>` would be the stronger form but is
+an API change to `VariantSet`.)
+
+**D4 — Owned RGB16 entry points + serial-pyramid sidecar streaming.** Two memory wins for
+the WASM/low-RAM target. (a) `encode_variants_from_rgb16_with_progressive` clones the
+whole rgb16 buffer when texture/clarity ≠ 0 (`rgb16.to_vec()` before `apply_unsharp_masks`);
+an `_owned(rgb16: Vec<u16>)` variant could mutate in place and drop it before encoding.
+(b) The serial (`not(parallel)`) pyramid builds *all* sidecar buffers into `scaled_bufs`
+before encoding any; it could stream — derive level N, encode N−1, retain only the
+immediate previous scale. Both are real but bounded: the full-res `rgba` (≈91 MB @ 24 MP)
+stays resident for the final encode regardless, so streaming sidecars saves only a few MB
+relative to that floor. Land only if a WASM peak-RSS measurement shows it matters.

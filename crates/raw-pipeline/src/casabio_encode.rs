@@ -498,11 +498,17 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
         let y1 = (((dy as u64 + 1) * sh as u64 + dh as u64 - 1) / dh as u64).min(sh as u64) as u32;
         for dx in 0..dw {
             let (x0, x1) = x_ranges[dx as usize];
+            // The coverage rectangle [x0,x1)×[y0,y1) is fully known before any pixel
+            // is read, so its cardinality is a single multiply — mirroring the exact
+            // branch's hoisted `count`. This drops one increment per source sample
+            // from the hottest inner loop (byte-exact: the old per-px accumulation
+            // reached exactly this value). Products fit u32: (x1-x0)≤sw, (y1-y0)≤sh,
+            // sw*sh ≤ 24M ≪ u32::MAX on any real image.
+            let count = (x1 - x0) * (y1 - y0);
             let mut r = 0u32;
             let mut g = 0u32;
             let mut b = 0u32;
             let mut a = 0u32;
-            let mut count = 0u32;
             for sy in y0..y1 {
                 let row = &src[(sy as usize * sw as usize * 4)..];
                 for sx in x0..x1 {
@@ -511,11 +517,11 @@ fn box_downscale_rgba8(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh
                     g += px[1] as u32;
                     b += px[2] as u32;
                     a += px[3] as u32;
-                    count += 1;
                 }
             }
-            // Defensive guard: count==0 can only occur if caller constraints are violated,
-            // but guard here to prevent div-by-zero from future callers.
+            // Defensive guard: count==0 (degenerate/upscale column producing an empty
+            // coverage interval) leaves the destination pixel at its zero-init value,
+            // identical to the previous per-px-count behaviour. Prevents div-by-zero.
             if count == 0 {
                 continue;
             }
@@ -582,6 +588,21 @@ pub fn encode_rgba8_pyramid(
     if rgba.is_empty() || width == 0 || height == 0 {
         return Err(EncodeError::Jxl("empty or zero-dim input".into()));
     }
+    // Exact-shape contract for the FFI boundary. The cascade is guarded by
+    // box_downscale's own length check, but when `sidecar_sizes` is empty (or every
+    // entry is skipped) the cascade never runs and the original `rgba` is handed
+    // straight to `encode_distance_into` → `Frame::rgba8`/`strip_rgba_to_rgb`. A
+    // truncated buffer there is an out-of-bounds read inside libjxl. Validate once,
+    // up front, with the same checked_mul used by the variant entry points.
+    let expected_rgba = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|wh| wh.checked_mul(4));
+    if expected_rgba != Some(rgba.len()) {
+        return Err(EncodeError::Input {
+            expected: expected_rgba.unwrap_or(usize::MAX),
+            got: rgba.len(),
+        });
+    }
     if sidecar_sizes.len() != sidecar_distances.len() {
         return Err(EncodeError::Jxl("sidecar_sizes and sidecar_distances length mismatch".into()));
     }
@@ -611,11 +632,25 @@ pub fn encode_rgba8_pyramid(
         scs.push(Sc { tw, th, dist: sidecar_distances[i] });
     }
 
-    // Sort scs descending by width so that the cascade (largest → smallest)
+    // Sort descending by the actual LONG edge so the cascade (largest → smallest)
     // always downscales, regardless of the order sidecar_sizes was passed in.
     // Without this, an unsorted input reverses the cascade direction and produces
     // blurry/tiled artefacts from upscaling smaller intermediate buffers.
-    scs.sort_unstable_by(|a, b| b.tw.cmp(&a.tw));
+    //
+    // Keying on `tw` alone is correct for landscape and for typical portrait inputs
+    // (there tw is monotone in max_dim), but it breaks for ultra-narrow portraits:
+    // when width≪height, tw saturates to 1 across several levels while th still
+    // distinguishes them. Width-only ordering then leaves an ascending th run, so the
+    // cascade upscales a 1×128 buffer up to 1×512. Ordering by max(tw,th) — the long
+    // edge, i.e. the original max_dim — is byte-identical for the monotone cases and
+    // restores a strict downscale for the degenerate ones. Tie-break tw then th for a
+    // total, deterministic order.
+    scs.sort_unstable_by(|a, b| {
+        b.tw.max(b.th)
+            .cmp(&a.tw.max(a.th))
+            .then_with(|| b.tw.cmp(&a.tw))
+            .then_with(|| b.th.cmp(&a.th))
+    });
 
     // CRAWL F1: only has_alpha is needed here (the strip was discarded); use the
     // zero-allocation scan instead of alpha_strip's full-frame n*3 strip build.
@@ -880,5 +915,32 @@ mod tests {
             low_alpha,
             expected
         );
+    }
+
+    /// FFI safety: with no usable sidecars the cascade never runs, so a truncated
+    /// `rgba` must be rejected up front (else it reaches `Frame::rgba8` and reads OOB
+    /// inside libjxl). Pre-guard this path: empty sidecar list + short buffer → Input.
+    #[test]
+    fn pyramid_rejects_truncated_rgba_before_ffi() {
+        let rgba = vec![0u8; 4 * 4 * 4 - 1]; // 4×4 RGBA minus one byte
+        let err = encode_rgba8_pyramid(&rgba, 4, 4, 0.55, &[], &[], 3).unwrap_err();
+        assert!(
+            matches!(err, EncodeError::Input { expected: 64, got: 63 }),
+            "expected Input{{64,63}}, got {err:?}"
+        );
+    }
+
+    /// The largest-→-smallest cascade must hold for ultra-narrow portraits where the
+    /// short edge saturates to 1 across levels. Width-only ordering left an ascending
+    /// height run (1×128 then 1×512 = an upscale); long-edge ordering fixes it.
+    #[test]
+    fn pyramid_ultra_narrow_portrait_orders_by_long_edge() {
+        let rgba = solid(1, 1000);
+        let levels =
+            encode_rgba8_pyramid(&rgba, 1, 1000, 0.55, &[128, 512, 256], &[1.45, 1.45, 1.45], 3)
+                .unwrap();
+        // smallest→largest for consumers; final entry is the full image.
+        let dims: Vec<(u32, u32)> = levels.iter().map(|l| (l.width, l.height)).collect();
+        assert_eq!(dims, vec![(1, 128), (1, 256), (1, 512), (1, 1000)], "cascade not strictly ascending by long edge");
     }
 }

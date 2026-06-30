@@ -1241,3 +1241,26 @@ Note FS-R1 (deferred u64 accumulator) was the opposite outcome: it shipped as FS
 (branch `perf/frame-stats-u64accum-jun30-m4k2`, scalar −35%, byte-identical on corpus)
 once the audit showed native has no cross-target/exact-equality consumer and the WASM
 kernel is a separate f64-tracks-JS contract.
+
+---
+
+## CASA-ENC-R1: serial-variant `serial_encode_threads` (2026-06-30)
+
+**Target:** `casabio_encode.rs`, the `#[cfg(not(feature = "parallel"))]` branch of
+`encode_variants_cancellable` — `Encoder::new(EncodeOptions::default())`.
+**Proposed (ChatGPT pass #2):** build it as `Encoder::with_threads(.., serial_encode_threads(rgba.len()/4))`
+so the serial full-res encode uses libjxl-internal threads, mirroring the pyramid path.
+
+**Rejected — cfg-dead on the only target that hits it, and not "never worse" elsewhere.**
+`parallel` is a *default* feature (`default = ["parallel", "jxl-encode"]`), so this branch
+is compiled out of every native build — the only consumer is the WASM
+(`wasm32-unknown-unknown`, no rayon) build, where `available_parallelism()` returns `Err`
+→ `serial_encode_threads` → 1 → `with_threads(.., 1)` is exactly `Encoder::new`. Zero
+effect where it actually runs. On a hypothetical native-without-rayon build it would also
+be *worse* for two of the three encodes: the single held `Encoder` is constructed once and
+sized by the **full** pixel count, so the tiny thumb (≤300 px) and preview (≤1080 px)
+encodes would run multithreaded too and pay runner overhead on images far below the
+512×512 break-even — and you can't resize the runner per-encode without dropping the
+encoder reuse that this branch exists to provide. Fails rule-10's "provably never worse".
+The pyramid path already banks this win correctly because its full-res encode is a
+*separate, post-barrier* `Encoder` distinct from the per-level fan-out.
