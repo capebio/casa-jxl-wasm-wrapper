@@ -1097,3 +1097,33 @@ decode) + `flatten()` collapse, C `decode_region` whole-image fast path, D
   per the "not-a-regression + theoretically better" rule, but its saving only materialises
   for JXTC tiles that carry planar extras — not present in the test corpus. Quantify with
   an extra-channel JXTC fixture + flipflop before claiming a number.
+
+### UPDATE 2026-07-01 — JxtcRegionDecoder LANDED (same branch, max-effort follow-up)
+
+The "JxtcRegionDecoder persistent session + byte-bounded tile cache" item above is
+now **implemented** in `jxl_casadecoder.rs` (user explicitly requested the build).
+Shipped: `JxtcRegionDecoder<'a>` (borrows one container, parses header/index once),
+`TileCache` (byte-bounded LRU), `JxtcRegionOptions`/`JxtcRegion`/`JxtcRegionMetrics`/
+`JxtcRegionError`, strict-vs-preview failure policy, option inheritance into tile
+decoders (cancel/limits/keep_orientation), cross-call serial-decoder reuse for the
+1-tile pan + rayon fan-out for multi-miss. The free fn `decode_jxtc_region` now
+delegates here (cache off, Preview) so its 5 tests cover the session path; 8 new
+session tests added. Demonstrated: a 4-tile→pan→4-tile viewport sequence sharing one
+tile column decodes **2 tiles instead of 4** (metrics `hits=2 decoded=2`), with a
+cache-disabled control proving the reuse comes from the cache. 216/216 crate tests
+green (MSVC). So these previously-deferred items are now DONE: option inheritance,
+strict/preview split + missing-tile reporting.
+
+Still deferred (now refinements on the landed session, not the session itself):
+- **Strip-staged compositing** for the whole-image anti-pattern: decode one tile-row,
+  composite, release, to cap peak transient memory below dest+all-misses. Current
+  impl decodes all misses in one batch (better parallelism + simpler; peak ≈ dest for
+  a normal viewport). Only matters when a viewport approaches the whole image — the
+  case JXTC exists to avoid. Needs a peak-RSS bench to justify the added complexity.
+- **Alpha-free native RGB tiles** (`has_alpha=false` → 3/6 bpp): the session still
+  requests RGBA like the free fn. ~25% output saving for alpha-free containers; new
+  result layout, all current fixtures set has_alpha.
+- **Extra-channel completeness contract** on the monolithic `decode` path (unchanged).
+- **Animation / multi-frame** explicit policy (decoder still returns first frame only).
+- **Interactive wall-clock bench**: decode-COUNT reduction is proven by metrics; a
+  real pan-loop timing (native Tauri or a bench harness) would quantify ms saved.
