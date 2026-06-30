@@ -774,33 +774,35 @@ Harness to reproduce timing: `clang++ -O3 -std=c++17 tools/enc_bit_writer_append
 
 ---
 
-## FS-D1: frame_stats u64 exact-integer luma accumulator (native + WASM, coordinated) (2026-06-30)
+## FS-D1: frame_stats u64 exact-integer luma accumulator — ✅ DONE 2026-06-30
 
-Branch context: `perf/frame-stats-weave-jun30-h7x3` (shipped only byte-exact micro-ops).
+**Shipped** on `perf/frame-stats-u64accum-jun30-m4k2` (native-only). Replaced f64+Kahan
+luma_sum/luma_sq in both scalar and AVX2 with exact u64 sums (luma²≤4.23e9 ⇒ u64 exact to
+~4.3 Gpx). Result: scalar **−34%..−36%** (interleaved Kahan-vs-u64 A/B), AVX2 neutral-to-
+faster, scalar==avx2 bit-identical **for every input** (prior Kahan parity was incidental).
+On the 5-size dump corpus (incl 24MP) the u64 output is bit-identical to the prior Kahan
+output — observed drift zero; ≤1 ULP only on adversarial inputs.
 
-**Opportunity.** `luma = 54r+183g+18b ≤ 65025`; `luma² ≤ 4.23e9`. A plain `u64`
-accumulator for `luma_sum` and `luma_sq` stays exact to ~4.3 gigapixels (luma_sq) /
-~2.8e14 px (luma_sum) — beyond any addressable RGBA buffer. That would: (a) delete all
-Kahan machinery from both hot loops (scalar + AVX2), a real speed/clarity win; (b) make
-scalar and AVX2 bit-identical **by construction** at all sizes; (c) yield the
-correctly-rounded f64 (≥ Kahan accuracy).
+**The original "deferred" premise was WRONG and is corrected here:** native and WASM were
+NOT one coordinated telemetry contract. The WASM kernel (`src/lib.rs` `fs_core_scalar`)
+accumulates **plain f64, no Kahan**, *by design*, to byte-match the JS
+`analyzeProgressiveFrame` reference (JS numbers are f64). Native used Kahan. So the two
+were already non-identical past ~6 MP — two independent contracts. Porting u64 into the
+WASM kernel would BREAK the wasm↔JS byte match (JS can't do u64-exact without BigInt), so
+WASM is deliberately left on f64. D1 is correctly native-only; there is no cross-target
+desync to coordinate.
 
-**Why deferred, not done.** `luma_sum`/`luma_sq` are emitted to telemetry and the kernel
-is mirrored in `raw-converter-wasm/src/lib.rs` (`frame_stats`). The u64 result differs
-from today's Kahan f64 by ≤1 ULP at >~6 MP. Changing native alone desyncs the two
-targets. This must land as ONE change to **both** native `frame_stats.rs` and the WASM
-mirror, ideally bumping a telemetry version, with a fresh scalar-vs-WASM parity check.
+**Still open (separate, genuinely cross-target):** the `luma_variance` divisor. It scales
+variance by `1/65025` (NOT [0,1] — peaks ~16256.25). The doc is now corrected to state the
+real range. Changing the *formula* to a true [0,1] metric (÷ `65025²/4`) would touch native
++ WASM + JS together and is a deliberate telemetry-versioned change — left deferred.
 
-**Also fix in the same migration:** the `luma_variance` divisor. It currently scales
-variance by `1/65025` (NOT a [0,1] normalization — peaks ~16256.25). If a true [0,1]
-detail metric is wanted, divide by `65025²/4`. Doc already corrected to state the real
-range; the *formula* change is the deferred, cross-target part.
+## FS-D2: hash-free metrics fast path — REJECTED (dead code, no caller) 2026-06-30
 
-## FS-D2: hash-free metrics fast path (2026-06-30)
-
-The 8-lane FNV hash is a serial recurrence across blocks (each block depends on the
-prior) — it is the kernel's real throughput ceiling, not cache locality. Change-detection
-needs the hash; exposure/contrast triage (`mean_luma`, `luma_variance`) does not. A
-separate metrics-only entry (no hash, no `vpmulld` dependency chain) would let those
-callers run faster. Worth it only as a deliberate API split with a real caller that wants
-metrics without the change-id — not a runtime flag inside the hot loop.
+Investigated and rejected; logged in `docs/1 rejected optimizations.md` as FS-R4. The 8-lane
+FNV hash IS a serial recurrence (the real throughput ceiling), and a metrics-only entry
+would skip it — but **every actual caller needs the hash**. The only production consumer is
+the WASM `frame_stats` export, which emits `frameHashInt` AND luma stats; the only native
+callers are two bench examples that discard the result. A hash-free native entry point would
+have zero callers = unreachable abstraction. Revisit only when a concrete caller wants
+metrics without the change-id.

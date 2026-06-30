@@ -972,3 +972,24 @@ path was proven byte-exact-equal to the register path then removed via interleav
 **Already present, not re-applied:** the per-chunk pairwise integer reduction + single
 Kahan step (proposal called this new) was already shipped as FS-002. The "register
 reduction of chunk_sum" and "widen luma² unsigned" ideas were folded into FS-003.
+
+---
+
+## FS-R4: hash-free metrics fast path in frame_stats (2026-06-30)
+
+**Proposed (deferred FS-D2):** split a metrics-only entry point (alpha/luma/counts, no
+8-lane FNV hash) to escape the hash's serial recurrence — the kernel's true throughput
+ceiling.
+
+**Rejected — dead code, no caller.** Caller audit (`analyze(`/`frame_stats(` across the
+repo): the only production consumer is the WASM `frame_stats` export (`src/lib.rs:3316`),
+which emits `frameHashInt` **and** the luma stats — it needs the hash. The only native
+callers are `examples/frame_stats_flipflop.rs` and `examples/traversal_fusion_flipflop.rs`,
+both of which discard the result. A hash-free native entry point would therefore be
+unreachable. Adding it now is a speculative abstraction with zero offsetting benefit.
+Revisit only when a real caller wants metrics without the change-id.
+
+Note FS-R1 (deferred u64 accumulator) was the opposite outcome: it shipped as FS-D1
+(branch `perf/frame-stats-u64accum-jun30-m4k2`, scalar −35%, byte-identical on corpus)
+once the audit showed native has no cross-target/exact-equality consumer and the WASM
+kernel is a separate f64-tracks-JS contract.
