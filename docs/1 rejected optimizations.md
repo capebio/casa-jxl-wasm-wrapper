@@ -1057,3 +1057,57 @@ Items considered and NOT taken in this pass:
   allocations (-52.7%). Wall-clock ~1.1-1.3x but allocator-noise bound (the
   mock cost is far cheaper than real ANSPopulationCost, so the alloc saving is
   a larger fraction here than in production — real speedup will be smaller).
+## LJPEG-R1: `row_base` incremental-rewrite in the decode kernels (2026-06-30)
+
+ChatGPT ljpeg.rs pass proposed replacing `let row_base = base + row * stride_pixels;` (computed
+once per row at the top of every kernel's row loop) with a stateful `row_base += stride_pixels`
+advanced only on emitting rows, citing "both a micro-optimization and a real correctness repair:
+the old code could calculate overflowing row offsets even when no output was requested
+(`out_pixel_cols == 0`)." **Rejected.**
+
+- **No real perf.** The expression is evaluated **once per row**, not per pixel; the cost is `O(rows)`
+  against an `O(rows × cols × cps)` Huffman-decode inner loop. It is already invisible in the
+  `ljpeg_c1_flip` timing. Trading a trivially-correct closed-form index for a carried mutable state
+  buys nothing measurable.
+- **The "overflow bug" is unreachable in release and writes nothing.** `geometry_check` only validates
+  `max_idx` when `out_rows > 0 && out_pixel_cols > 0`; with `out_pixel_cols == 0` no store ever fires
+  (`raw_col < out_pixel_cols` is never true). So even a wrapped `row_base` causes **no OOB write, no
+  unsoundness** — release wraps harmlessly. The only observable effect is a *debug-build* arithmetic-
+  overflow panic, and only for a degenerate `base`/`stride` (e.g. `usize::MAX`) that **no production
+  caller passes** (`decode_tile_compact` uses `base = 0`; real callers pass true frame geometry).
+- **Adds bug surface.** A carried `row_base` introduces an off-by-one / skipped-advance failure mode
+  into three kernels (`decode_c1`/`decode_c2`/`decode_generic`) that are today bit-identical via a
+  closed-form index — net negative for a decoder whose correctness contract is byte-exact parity.
+
+The companion `decode(usize::MAX, usize::MAX, 0, 2)` "empty-output" test exercises a path no caller
+hits and asserts only that it does not panic — value not worth the kernel rewrite. Landed instead:
+the genuinely-byte-exact subset of the same pass (fast8 `[u16;256]`, packed lookup, oversubscribed-
+DHT panic→bail guard, struct DHT cache, one-entry plan cache, generic-kernel stack array + direct
+`&HuffTable` + unchecked store, const-generic `BitReader` telemetry gate). Branch
+`perf/ljpeg-microops-jun30-z7k`.
+
+---
+
+## LJPEG-R2..R4: rejected items from the hot-path pass (2026-06-30)
+
+Branch `perf/ljpeg-hotpath-jun30-h4t9` (built on z7k `@1c089828`) landed five byte-exact
+hot-path changes — drop `real_in_buf`/`truncated` + mask-once-per-`fill`, prevalidate
+`max_symbol ≤ precision`, branchless `extend`, drop the `row == 0` predictor branch, SWAR
+`fill` 0xFF-detect — for a measured **~30% native decode floor win** (min 84.2 ms vs z7k
+119.8 ms; 165 real DNG tiles; FNV fingerprint byte-identical OLD/NEW). The same proposal also
+suggested three changes that were **rejected**:
+
+**LJPEG-R2: `DecodeMetrics` trait to gate statistics.** The proposal re-implements telemetry
+gating as a `DecodeMetrics`/`NoStats`/`CollectStats` trait. z7k already gates every counter
+behind a const-generic `BitReader<COLLECT_STATS>` + `if COLLECT_STATS` — identical codegen (the
+production `decode_tile` path carries zero telemetry stores). The trait is a pure refactor:
+~120 lines of churn, three new types, no measurable delta. Rejected as redundant.
+
+**LJPEG-R3: `checked_mul` for `raw_cols = width * components` in `geometry_check`.** SOF width
+is a `u16` (≤ 65535) and components ≤ `MAX_COMPONENTS` (4), so the product ≤ 262 140 — it cannot
+overflow `usize` on any target (incl. wasm32's 32-bit `usize`). The check would never fire.
+Rejected as dead hardening. (z7k already guards zero dimensions.)
+
+**LJPEG-R4: `store_sample()` helper.** Wrapping `((val << pt) & 0xFFFF) as u16` in a named
+helper changes no codegen and touches three kernels for cosmetics only. Rejected (surgical-
+change discipline); the expression is already identical and commented in all three kernels.

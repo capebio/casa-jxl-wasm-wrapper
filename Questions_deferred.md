@@ -771,3 +771,66 @@ need the integrator's full toolchain and are deferred:
    semantics), but the workflow gates output-shape changes on decode/enc SHA, not theory.
 
 Harness to reproduce timing: `clang++ -O3 -std=c++17 tools/enc_bit_writer_append_ab.cc -o bw_ab`.
+
+---
+
+## LJPEG micro-ops — WASM confirmation of the hot-path codegen pieces (2026-06-30)
+
+Branch `perf/ljpeg-microops-jun30-z7k` (super only; `crates/raw-pipeline/src/ljpeg.rs`).
+Byte-exact pass: fast8 `[u32;256]`→`[u16;256]`, packed `lookup` `Vec<u16>`, const-generic
+`BitReader` (telemetry compiles out of `decode_tile`), oversubscribed-DHT panic→bail guard,
+struct DHT cache (no probe alloc), one-entry thread-local plan cache, generic-kernel stack
+array + direct `&HuffTable` + unchecked store. Already verified byte-exact: 21 ljpeg unit
+tests (known-output oracles unchanged), full crate suite 157 pass, **parity EXACT on 165 real
+DNG tiles** (cps=2/prec=16; fast8 resolves 99.89% of symbols).
+
+**Native timing — non-regression, modest floor win.** `cargo run --release --no-default-features
+--example ljpeg_c1_flip` on `PXL_20260527_180319603.RAW-02.ORIGINAL.dng` (165 tiles), OLD
+(unmodified main) vs NEW binaries, min-of-5 (machine is contended — 7 sibling worktrees — so
+**min** = contention-free floor; upper samples are pure upward noise, incl. a 401/502 ms
+outlier):
+
+| | min (floor) | median band |
+|---|---|---|
+| OLD | 266.4 ms | ~285–316 |
+| NEW | 248.3 ms | ~297–320 |
+
+Floor ≈ **−7%**; medians overlap inside the noise band. Honest read: the dominant cost is the
+per-symbol Huffman arithmetic (unchanged); the win is the smaller hot LUT + removed telemetry
+stores + 164 skipped plan re-parses, which clears the noise floor only at the min.
+
+**Open (integrator gate):** the app decodes RAW via the **WASM** raw-pipeline, not this native
+build. The fast8-u16 shrink and the const-generic telemetry removal are **codegen-dependent**
+(L1 footprint / store elision differ under emscripten/clang + wasm32). Confirm the same parity
++ non-regression on a `wasm32-unknown-unknown` build of `raw-pipeline` (the existing RAW→lightbox
+flipflop / section bench), folded into the next shared WASM rebuild — not a per-opt build. Theory
++ native parity say byte-exact and ≥-neutral; this only re-checks the wasm codegen delta.
+
+---
+
+## LJPEG hot-path pass (2026-06-30) — deferred API + WASM gate
+
+Branch `perf/ljpeg-hotpath-jun30-h4t9` (on z7k `@1c089828`): byte-exact hot-path micro-ops,
+**~30% native decode floor** (min 84.2 ms vs z7k 119.8 ms; 165 real DNG tiles cps=2/prec=16;
+FNV fingerprint `0x199b1481ead6ac12` identical OLD/NEW). Harness:
+`examples/ljpeg_hotpath_flip.rs` (prints fingerprint + interleaved decode timing for cross-build
+OLD/NEW comparison).
+
+**Deferred — public prepared-plan execution API.** The proposal added `LjpegPlan::decode_into`
+/ `decode_into_stats` + `execution_plan_check` so a caller can prepare a plan once and decode
+many tiles against it. No caller exists today, and the thread-local one-entry `LAST_PLAN` cache
+(z7k) already gives the same skip-the-reparse benefit transparently through `decode_tile`.
+Deferred until a caller actually wants to hold an `LjpegPlan` across tiles — then expose the API
+plus `execution_plan_check`.
+
+**SWAR fill (kept, real-decode neutral).** The branchless u32 0xFF-detect clears its isolated
+gate (5.4%, `ljpeg_fill_swar_flip`) but is **neutral in real decode** (fill is amortized off the
+per-symbol critical chain; the 30% comes from the `real_in_buf`/guard/`extend` changes). Kept per
+the example gate + rule 10; the integrator may drop commit `eee8564f` to keep `unsafe` minimal.
+
+**Open (integrator gate):** the app decodes RAW via the **WASM** raw-pipeline, not this native
+build. Branchless `extend`, the removed per-symbol masks, and the SWAR unaligned u32 load are all
+**codegen-dependent** under emscripten/clang + wasm32. Confirm parity (fingerprint) +
+non-regression on a `wasm32-unknown-unknown` build of `raw-pipeline` (RAW→lightbox flipflop /
+section bench), folded into the next shared WASM rebuild. Native says byte-exact + ~30% faster;
+this only re-checks the wasm codegen delta. Same gate class as the z7k pass above.
