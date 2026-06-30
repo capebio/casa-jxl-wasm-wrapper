@@ -430,20 +430,27 @@ fn downscale_rgb_float_path<F>(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    // x-spans depend only on dx, not dy — compute once (dw entries) instead of dw×dh
+    // times inside the row loop. Byte-exact: identical f32→usize derivation, hoisted.
+    let x_spans: Vec<(usize, usize)> = (0..dw)
+        .map(|dx| {
+            let x0 = (dx as f32 * xr) as usize;
+            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
+            let x1 = x1.max(x0 + 1);
+            (x0, x1 - x0)
+        })
+        .collect();
     let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
-        let y1 = y1.max(y0 + 1);
-        for dx in 0..dw {
-            let x0 = (dx as f32 * xr) as usize;
-            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
-            let x1 = x1.max(x0 + 1);
-            let n = ((y1 - y0) * (x1 - x0)).max(1) as u32;
+        let yspan = y1.max(y0 + 1) - y0;
+        for &(x0, x_count) in &x_spans {
+            let n = (yspan * x_count).max(1) as u32;
             let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
-            let mut row_base = y0 * sw;
-            for _y in y0..y1 {
-                for x in x0..x1 {
+            let mut row_base = y0 * sw + x0;
+            for _y in 0..yspan {
+                for x in 0..x_count {
                     let (r, g, b) = read_pixel(row_base + x);
                     rr += r;
                     gg += g;
@@ -1249,20 +1256,25 @@ pub fn downscale_rgb(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    // x-spans depend only on dx — hoist out of the dy loop (byte-exact: same f32→usize).
+    let x_spans: Vec<(usize, usize)> = (0..dw)
+        .map(|dx| {
+            let x0 = (dx as f32 * xr) as usize;
+            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
+            let x1 = x1.max(x0 + 1);
+            (x0, x1 - x0)
+        })
+        .collect();
     let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
-        let y1 = y1.max(y0 + 1);
-        for dx in 0..dw {
-            let x0 = (dx as f32 * xr) as usize;
-            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
-            let x1 = x1.max(x0 + 1);
-            let x_count = x1 - x0;
-            let n = ((y1 - y0) * x_count).max(1) as u32;
+        let yspan = y1.max(y0 + 1) - y0;
+        for &(x0, x_count) in &x_spans {
+            let n = (yspan * x_count).max(1) as u32;
             let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
             let mut row_base = (y0 * sw + x0) * 3;
-            for _y in y0..y1 {
+            for _y in 0..yspan {
                 let mut i = row_base;
                 for _ in 0..x_count {
                     rr += src[i] as u32;
@@ -1384,20 +1396,25 @@ pub fn downscale_rgba(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    // x-spans depend only on dx — hoist out of the dy loop (byte-exact: same f32→usize).
+    let x_spans: Vec<(usize, usize)> = (0..dw)
+        .map(|dx| {
+            let x0 = (dx as f32 * xr) as usize;
+            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
+            let x1 = x1.max(x0 + 1);
+            (x0, x1 - x0)
+        })
+        .collect();
     let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
-        let y1 = y1.max(y0 + 1);
-        for dx in 0..dw {
-            let x0 = (dx as f32 * xr) as usize;
-            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
-            let x1 = x1.max(x0 + 1);
-            let x_count = x1 - x0;
-            let n = ((y1 - y0) * x_count).max(1) as u32;
+        let yspan = y1.max(y0 + 1) - y0;
+        for &(x0, x_count) in &x_spans {
+            let n = (yspan * x_count).max(1) as u32;
             let (mut rr, mut gg, mut bb, mut aa) = (0u32, 0u32, 0u32, 0u32);
             let mut row_base = (y0 * sw + x0) * 4;
-            for _y in y0..y1 {
+            for _y in 0..yspan {
                 let mut i = row_base;
                 for _ in 0..x_count {
                     rr += src[i]     as u32;
@@ -2754,9 +2771,12 @@ impl PerceptualComparer {
             "PerceptualComparer: ref_rgba.len() ({}) != width*height*4 ({}×{}×4={})",
             ref_rgba.len(), width, height, expected,
         );
-        let n = width.saturating_mul(height);
         let inner = PerceptualCore::new(ref_rgba, width, height, Opts::default());
-        PerceptualComparer { inner, scratch: vec![0u8; n.saturating_mul(4)] }
+        // Defer the RGBA staging alloc: callers using only the copying convenience
+        // methods (all/butteraugli/ssim/psnr) never touch `scratch`. `input_ptr`
+        // grows it on the first zero-copy request. Saves a width*height*4 alloc
+        // (~96 MB @24 MP) on the copy-path-only callers.
+        PerceptualComparer { inner, scratch: Vec::new() }
     }
 
     /// Copying convenience path: pass RGBA, get {butteraugli, ssim, psnr} as a JS object.
@@ -3373,9 +3393,22 @@ impl DecodedImage {
     /// RGBA16 packed little-endian, 8 bytes/px (bit_depth == 16). Empty otherwise.
     pub fn take_rgba16_le(&mut self) -> Vec<u8> {
         let v = std::mem::take(&mut self.u16buf);
-        let mut out = Vec::with_capacity(v.len() * 2);
-        for s in v {
-            out.extend_from_slice(&s.to_le_bytes());
+        let mut out = vec![0u8; v.len() * 2];
+        #[cfg(target_endian = "little")]
+        {
+            // Packed LE bytes are exactly the u16 slice's byte image on a LE target
+            // (wasm32, x86_64) — single memcpy, no per-sample from_le_bytes/extend.
+            // Same trick as pack_rgb16_full / unpack_rgb16_le.
+            // SAFETY: &[u16] reinterpreted as &[u8] (len*2 bytes); u8 align 1 ≤ u16 align,
+            // exactly v.len()*2 source bytes copied into the equal-sized `out`.
+            let src_bytes = unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 2) };
+            out.copy_from_slice(src_bytes);
+        }
+        #[cfg(target_endian = "big")]
+        {
+            for (chunk, s) in out.chunks_exact_mut(2).zip(v.iter()) {
+                chunk.copy_from_slice(&s.to_le_bytes());
+            }
         }
         out
     }
