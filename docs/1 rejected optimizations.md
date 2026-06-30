@@ -937,3 +937,38 @@ unsafe policy.
 out of the tone path, pack to LE bytes in `take_rgb16_full`. Zero `unsafe`, byte-exact, **−32%
 process-compute peak** (−56.7 MB @9.9 MP; verified wasm A/B). Details: `CrawlBot2000Findings.md` →
 "A-5 follow-up (2026-06-29)"; branch `crawlbot/a5-pack-rgb16-deferred-jun29-x7q3`.
+
+---
+
+## FS-R1..R3: frame_stats.rs "final pass" rejections (2026-06-30)
+
+Branch `perf/frame-stats-weave-jun30-h7x3`. Several ChatGPT-proposed changes were
+examined against the **real** file (the proposals described a stale/hallucinated
+version) and rejected or found already-present.
+
+**FS-R1 — u64 exact-integer luma accumulator (replace Kahan).** Tempting meta-change:
+`luma` is integer, `luma²≤65025²≈4.23e9`, so `luma_sq` accumulates exactly in u64 up
+to ~4.3 **giga**pixels (no real image), letting us drop Kahan entirely and make
+scalar==avx2 bit-identical by construction. **Rejected for now (deferred):** it changes
+the emitted `luma_sum`/`luma_sq` f64 by ≤1 ULP at >~6 MP frames vs the current Kahan
+output, and that value is mirrored in the WASM `frame_stats` kernel — changing native
+alone desyncs cross-target telemetry. Empirically the current Kahan scalar and AVX2
+paths are already bit-identical at 24 MP (probed, `eq_bits=true`), so there is no
+correctness bug to justify the drift. Logged in `Questions_deferred.md` as a coordinated
+native+WASM migration.
+
+**FS-R2 — stackless AVX2 alpha min/max epilogue.** Proposed shifting each 32-bit alpha
+word to the low byte then doing a bytewise horizontal `min`. **Rejected (correctness):**
+the shift leaves three zero bytes per lane, so a bytewise horizontal `min` sees those
+zeros and forces `alpha_min==0`. The existing cold 64-byte stack spill (once per frame)
+is correct and not on the hot path — kept.
+
+**FS-R3 — "move arr_lo/arr_hi declarations outside the loop" (FS-001).** A no-op:
+Rust already allocates the stack frame once; hoisting the declaration does not remove
+the per-chunk store-to-load stall. The actual fix was eliminating the stack round-trip
+entirely via a register-only `madd→hadd` reduction (shipped as FS-003). The store-based
+path was proven byte-exact-equal to the register path then removed via interleaved A/B.
+
+**Already present, not re-applied:** the per-chunk pairwise integer reduction + single
+Kahan step (proposal called this new) was already shipped as FS-002. The "register
+reduction of chunk_sum" and "widen luma² unsigned" ideas were folded into FS-003.
