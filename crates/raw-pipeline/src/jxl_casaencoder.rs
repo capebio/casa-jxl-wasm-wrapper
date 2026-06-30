@@ -998,7 +998,10 @@ mod tests {
 
         let src = xorshift_u8((BIG_W * BIG_H * 3) as usize);
         let frame = Frame::rgb(&src, BIG_W, BIG_H);
-        let opts = EncodeOptions::quality(100.0);
+        // High-quality *lossy* (distance > 0): exercises the bpp_ema hint/grow
+        // path and stays large on incompressible noise. distance 0.0 would
+        // demand uses_original_profile and is rejected by libjxl.
+        let opts = EncodeOptions::distance(0.3);
 
         // Generate a reference without exercising the small-output hint.
         let mut reference = Encoder::new(opts.clone()).unwrap();
