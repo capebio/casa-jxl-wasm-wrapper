@@ -115,9 +115,15 @@ impl Comparer {
         let mut levels = Vec::with_capacity(3);
         let (mut w, mut h) = (width, height);
         let (mut cx, mut cy, mut cb) = (rx, ry, rb);
+        // One reusable blur scratch, sized to the largest (s=0) plane. box_blur_into
+        // reslices it to the current scale, so the smaller s=1/s=2 blurs reuse it
+        // instead of each allocating a fresh w*h intermediate (peak unchanged — this
+        // buffer is the same size the s=0 box_blur would transiently allocate anyway).
+        let mut blur_tmp = vec![0f32; n];
         for s in 0..3 {
             let blur_r = ((w >> 6).max(1)).min(8);
-            let mask = blur::box_blur(&cy, w, h, blur_r);
+            let mut mask = vec![0f32; w * h];
+            blur::box_blur_into(&cy, w, h, blur_r, &mut blur_tmp, &mut mask);
             if s < 2 && w > 1 && h > 1 {
                 let dw = (w >> 1).max(1);
                 let dh = (h >> 1).max(1);

@@ -1011,3 +1011,40 @@ the genuinely-byte-exact subset of the same pass (fast8 `[u16;256]`, packed look
 DHT panic→bail guard, struct DHT cache, one-entry plan cache, generic-kernel stack array + direct
 `&HuffTable` + unchecked store, const-generic `BitReader` telemetry gate). Branch
 `perf/ljpeg-microops-jun30-z7k`.
+## Perceptual scalar oracles (blur / butteraugli / xyb) — 2026-06-30
+
+Branch `perf/perc-scalar-oracle-bce-jun30-k4n7`. These four scalar fns (`box_blur`,
+`dn2`/`dn2_into`, `scale_err`, `pixels_to_xyb`) are the **bit-reference the SIMD kernels
+(avx2/avx512/wasm) test against** and are **cold on production** (a SIMD backend always
+shadows them). That dual constraint — byte-exact-to-the-oracle, cold — is why the
+following proposals from the review were rejected:
+
+- **`scale_err` reassociation `base * inv²`** (compute `kx·dx²+ky·dy²+kb·db²` once, then
+  multiply by `inv²`, saving one mul/px). **Rejected:** not byte-exact. `e2_new =
+  (Σkᵢdᵢ²)·inv²` rounds differently from `e2_old = Σkᵢ(dᵢ·inv)²`. The scalar fn is the
+  parity oracle and the SIMD kernels mirror the *old* order, so any FP reorder shifts the
+  reference and risks the `rel < 1e-4` parity gate. Speed gain is one mul/px on a kernel
+  dominated by `1/m`, `sqrt`, `cbrt` transcendentals — invisible anyway.
+- **`box_blur` zero-radius (`r==0`) fast path** (special-case single-buffer copy-ish).
+  **Rejected as dead code:** the sole caller is `Comparer::new` with
+  `blur_r = ((w>>6).max(1)).min(8)` — always `≥ 1`. `r==0` never fires; the general path
+  already handles it correctly. Adding a ULP-preserving telescoping special-case is pure
+  risk for a branch that cannot execute.
+- **`sqrt_lin_lut` as a compile-time 256-`f32` literal** (drop the `OnceLock` init).
+  **Rejected:** improves one cold one-time initialization only, bloats source/binary, and
+  does nothing for the conversion loop. The `OnceLock` already amortizes to ~0.
+- **Per-helper multithreading** (rayon inside `scale_err`/`box_blur`/`dn2`). **Rejected:**
+  `scale_err` is an ordered f64 reduction (parallel split changes the sum); these helpers
+  are small and cold; the pipeline already parallelizes one level up
+  (`downsample_dispatch` rayon::join over the 3 planes). Spawning here only adds overhead
+  and nested-pool contention.
+
+**Measured-neutral, kept on byte-exact + rule-10 grounds (not rejected, recorded for
+honesty):** the `scale_err` and `pixels_to_xyb` reslice (bounds-check elision) flip-bench
+as a **tie** on x86 (sign flips run-to-run; BCE is hidden under the gather/transcendental
+latency). Kept because they are byte-exact, mirror the `len >= n` guards the SIMD siblings
+already assert, and benefit the scalar-only fallback target where this path is hot.
+The real measured wins on this branch are **`dn2_into` +62%** (clamp-free chunked 2×2
+reduction; the `.min` provably never fires when `dw=w/2,dh=h/2`) and **`box_blur` +36-46%**
+(dead post-tail rolling-update elision + caller-owned scratch reuse via `box_blur_into`).
+Harness: `examples/perc_scalar_oracle_flip.rs` (all rows read EXACT).

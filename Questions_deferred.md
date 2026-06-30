@@ -900,3 +900,28 @@ build. The fast8-u16 shrink and the const-generic telemetry removal are **codege
 + non-regression on a `wasm32-unknown-unknown` build of `raw-pipeline` (the existing RAW→lightbox
 flipflop / section bench), folded into the next shared WASM rebuild — not a per-opt build. Theory
 + native parity say byte-exact and ≥-neutral; this only re-checks the wasm codegen delta.
+## Perceptual downsample clamp-elision — extend to the HOT path (2026-06-30)
+
+Branch `perf/perc-scalar-oracle-bce-jun30-k4n7` applied a clamp-free chunked 2×2 box
+reduction to `butteraugli::dn2_into` (the COLD construction-time downsample) — byte-exact,
+flip-measured **+62%**. The `.min(w-1)`/`.min(h-1)` edge clamps provably never fire when
+`dw = w>>1, dh = h>>1` (floor-halving drops the odd final row/col before it is sampled).
+The byte-identical clamp pattern also lives in two HOT spots this branch left untouched
+(out of the 3-file scope):
+
+1. **`perceptual/mod.rs::downsample_inplace`** — the scalar fallback the per-image
+   `butteraugli()` pyramid uses (`downsample_dispatch` → `downsample_one` → here). Same
+   never-firing clamps; the same chunked rewrite should give ~+60% on the scalar backend's
+   hot downsample. Deferred: it is the hot path and lives in `mod.rs`, not the three target
+   files; wants its own focused change + a `downsample_avx2_matches_dn2` parity re-run.
+   `downsample_inplace` and `dn2_into` are now byte-identical logic — a follow-up could
+   have one delegate to the other (or share one `pub(crate)` helper) to stop them drifting.
+2. **SIMD downsample kernels** (`simd::{avx2,avx512,wasm}::downsample_*`) already special-
+   case the interior; check whether the clamp-free chunked scalar form shifts their tail
+   cost. Low priority (SIMD already fast).
+
+Also deferred (measured, kept-but-neutral, recorded under rejected-opts 2026-06-30): the
+`scale_err` / `pixels_to_xyb` reslice (bounds-check elision) is a perf TIE on x86 (BCE is
+hidden under gather/transcendental latency). It is kept (byte-exact, defensive `len>=n`
+parity with the SIMD asserts), but its only real beneficiary is a hypothetical scalar-only
+build — re-measure there if such a target ships.

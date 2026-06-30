@@ -31,6 +31,15 @@ pub(crate) fn sqrt_lin_lut_ptr() -> &'static [f32; 256] {
 /// RGBA (stride 4, alpha ignored) → planar X/Y/B. `x`,`y`,`b_out` len == n.
 pub(crate) fn pixels_to_xyb(px: &[u8], n: usize, x: &mut [f32], y: &mut [f32], b_out: &mut [f32]) {
     let lut = sqrt_lin_lut();
+    // Pin the active extents once. After this, `px.len() == n*4` and each output
+    // plane len == n are facts the loop body can use, so LLVM drops the 4 per-pixel
+    // bounds checks (px[j], px[j+1], px[j+2] and the three plane writes). The LUT
+    // index is already constant-bounded (u8 → 0..=255). Byte-exact: the XYB
+    // arithmetic is untouched, so this stays the SIMD parity oracle.
+    let px = &px[..n * 4];
+    let x = &mut x[..n];
+    let y = &mut y[..n];
+    let b_out = &mut b_out[..n];
     let mut j = 0;
     for i in 0..n {
         let r = lut[px[j] as usize];

@@ -29,6 +29,20 @@ pub(crate) fn scale_err(
     if n == 0 {
         return 0.0;
     }
+    // Pin all seven inputs to the active length once so the per-pixel loop proves
+    // every index in-bounds and LLVM elides the bounds checks (the SIMD kernels
+    // already carry an equivalent `len >= n` guard). Byte-exact: the arithmetic and
+    // the f64 reduction order are unchanged — reassociating into `base * inv²` would
+    // shift rounding and break parity, so it is deliberately NOT done here. This
+    // stays the bit-reference for scale_err_{avx2,avx512,wasm}.
+    let mask = &mask[..n];
+    let rx = &rx[..n];
+    let ry = &ry[..n];
+    let rb = &rb[..n];
+    let tx = &tx[..n];
+    let ty = &ty[..n];
+    let tb = &tb[..n];
+    let (kx, ky, kb) = (k.kx, k.ky, k.kb);
     let mut sum = 0f64;
     for i in 0..n {
         let m = (mask[i] * 2.0 + 0.15).max(0.15);
@@ -36,7 +50,7 @@ pub(crate) fn scale_err(
         let ex = (rx[i] - tx[i]) * inv;
         let ey = (ry[i] - ty[i]) * inv;
         let eb = (rb[i] - tb[i]) * inv;
-        let e2 = k.kx * ex * ex + k.ky * ey * ey + k.kb * eb * eb;
+        let e2 = kx * ex * ex + ky * ey * ey + kb * eb * eb;
         sum += (e2 * (e2 + 1e-12).sqrt()) as f64; // e2^(3/2)
     }
     // cbrt() is faster and more accurate than powf(1.0/3.0) (two transcendentals).
@@ -68,6 +82,29 @@ pub(crate) fn dn2(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
 /// Avoids the internal allocation of `dn2`; useful when the caller pre-allocates
 /// the destination buffer (e.g. during Comparer construction to reduce peak RSS).
 pub(crate) fn dn2_into(src: &[f32], dst: &mut [f32], w: usize, h: usize, dw: usize, dh: usize) {
+    // Production pyramid path: w>1, h>1, dw=w/2, dh=h/2. There the `.min(w-1)`/`.min(h-1)`
+    // edge clamps provably never fire — floor-halving drops any odd final row/column
+    // before it could be sampled, so `2x+1 <= w-1` and `2y+1 <= h-1` for every output.
+    // Emit a clamp-free 2×2 box reduction over chunked rows: `chunks_exact` lets LLVM
+    // prove the four loads + store in-bounds (no per-pixel bounds checks, no per-pixel
+    // `min`). The four-add order is preserved, so the result is byte-identical to the
+    // clamped loop and this stays the parity oracle for downsample_{avx2,avx512,wasm}.
+    if w > 1 && h > 1 && dw == w >> 1 && dh == h >> 1 {
+        let src = &src[..w * h];
+        let dst = &mut dst[..dw * dh];
+        for (dst_row, rows) in dst.chunks_exact_mut(dw).zip(src.chunks_exact(w * 2)) {
+            let (top, bottom) = rows.split_at(w);
+            for ((t, b), o) in top
+                .chunks_exact(2)
+                .zip(bottom.chunks_exact(2))
+                .zip(dst_row.iter_mut())
+            {
+                *o = (t[0] + t[1] + b[0] + b[1]) * 0.25;
+            }
+        }
+        return;
+    }
+    // Edge-clamped fallback for 1-pixel dimensions or non-standard destination geometry.
     for y in 0..dh {
         let sy0 = y << 1;
         let sy1 = (sy0 + 1).min(h - 1);
