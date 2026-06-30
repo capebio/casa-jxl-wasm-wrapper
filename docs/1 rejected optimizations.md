@@ -937,3 +937,49 @@ unsafe policy.
 out of the tone path, pack to LE bytes in `take_rgb16_full`. Zero `unsafe`, byte-exact, **−32%
 process-compute peak** (−56.7 MB @9.9 MP; verified wasm A/B). Details: `CrawlBot2000Findings.md` →
 "A-5 follow-up (2026-06-29)"; branch `crawlbot/a5-pack-rgb16-deferred-jun29-x7q3`.
+
+---
+
+## 2026-06-30 — PIPE-014 per-worker reusable SIMD scratch (`for_each_init`) — REJECTED (measured slower)
+
+`pipeline::process_into_simd` / `process_16bit_simd` parallel paths allocate `[0f32; BLK] × 3`
+(BLK = 2048) scratch **inside every Rayon block closure** and zero it. A code comment called this
+"unavoidable without thread_local overhead." Hypothesis: the ~280 MB of per-block stack zeroing at
+24 MP is wasted, and giving each worker one reusable scratch triple via `for_each_init` would cut it.
+
+**Measured worse.** Interleaved A/B (`examples/tone_simd_scratch_flip.rs`, 12 Rayon workers, parity
+byte-EXACT all sizes):
+
+| size | A = per-block stack | B = `for_each_init` reuse | Δ |
+|------|--------------------:|--------------------------:|----:|
+| 4 MP  |  20.19 ms |  22.54 ms | **−11.6%** |
+| 12 MP |  62.68 ms |  66.95 ms | **−6.8%** |
+| 24 MP | 127.61 ms | 136.37 ms | **−6.9%** |
+| 48 MP | 264.67 ms | 249.12 ms | +5.9% |
+
+The per-block `[0f32; BLK]` lives at a fixed stack address, so its zero-fill stays L1-resident
+(near-free) and the array codegens better than a `Vec<f32>` reached through `&mut` (extra
+indirection, weaker aliasing/vectorisation). B only pays off at 48 MP, where it regresses the
+common 4-24 MP ingest sizes by 7-12%. The original author's note was correct - kept per-block stack
+scratch. Harness retained as evidence. (The "280 MB memset is the cost" reasoning was wrong: the
+memset targets hot L1, not DRAM.)
+
+## 2026-06-30 — downscale "45-bit reciprocal + remainder correction" rewrite — REJECTED (superseded)
+
+A handoff proposed replacing the exact-factor `recip = (1u128<<64)/n as u64` multiply with a 45-bit
+reciprocal plus a per-pixel remainder-correction step, to fix the `n == 1` black-frame bug (see
+PIPE-015 / Questions_deferred). Rejected: the rewrite changes the rounding of **every** exact-factor
+downscale (current `>>64` truncation vs. a corrected round), which would invalidate the existing
+`downscale_recip_parity_tests` tolerance (`factor_2x_bit_exact`, `..._4x_bit_exact`) and adds a
+multiply + compare to the hot inner loop. The actual defect is *only* the `n == 1` identity case;
+a one-line `if sw==dw && sh==dh { copy; return }` guard fixes it exactly (and is faster - memcpy
+beats the sum/reciprocal loop) while leaving all `n >= 2` output byte-for-byte unchanged. Shipped the
+guard (PIPE-015); did not touch the reciprocal.
+
+## 2026-06-30 — flip_horizontal direct-write + orientation parallelisation — REJECTED (negligible)
+
+A handoff flagged `flip_horizontal` doing `src.to_vec()` then in-place swaps (one extra full-frame
+write vs. a direct src->dst mirror), and that it/`transpose`/`anti_transpose` are not Rayon-parallel.
+Rejected for this pass: these run **once per image at EXIF-orientation time** (tags 2/4/5/7 only),
+not per slider tick, and are a vanishingly small fraction of a RAW->lightbox wall. The change is real
+but the payoff is noise and it widens the diff into already-tested orientation code. Left as-is.

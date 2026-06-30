@@ -771,3 +771,42 @@ need the integrator's full toolchain and are deferred:
    semantics), but the workflow gates output-shape changes on decode/enc SHA, not theory.
 
 Harness to reproduce timing: `clang++ -O3 -std=c++17 tools/enc_bit_writer_append_ab.cc -o bw_ab`.
+
+---
+
+## 2026-06-30 — pipeline.rs deep-pass deferrals (branch perf/pipeline-simd-scratch-jun30-w3k7)
+
+Three items surfaced during the pipeline.rs optimization pass that are real but either untestable
+in this worktree or out of scope for a perf pass. Landed alongside: PIPE-015 downscale identity
+black-frame fix, PIPE-013 perceptual-grid OnceLock, dead LN/EXP-LUT removal.
+
+1. **c-perceptual AVX2 bulk path skips the colour matrix — likely a correctness bug (DEFERRED:
+   untestable here).** In `process_into`'s `#[cfg(feature="c-perceptual")]` `do_bulk` tile, the
+   gathered SoA `tr/tg/tb` are the raw **pre-LUT camera-RGB** values fed straight to
+   `perceptual_apply_full_avx2`. The scalar reference (`apply_tone_math`, perceptual branch) first
+   applies the 3x3 `m` (CamRGB->sRGB) and feeds **post-matrix** values to `perceptual_apply_full`.
+   So the AVX2 bulk and the scalar paths diverge: the bulk path is missing the matrix stage. Fix is
+   to apply `m` (FMA matvec) to `tr/tg/tb` before the bulk call, mirroring the scalar path. NOT
+   shipped: the `c-perceptual` feature needs the C++ `perceptual_apply_full_avx2` bridge symbol to
+   build/run, which this worktree can't link, so the fix can't be byte-A/B verified here. Integrator
+   with the c-perceptual native build should apply the matrix-before-bulk and confirm scalar==bulk
+   output on a perceptual-constancy stream. Note: `c-perceptual` is OFF in the shipped WASM app, so
+   this does not affect the default pipeline — it's a latent native-feature divergence.
+
+2. **`validate_pixel_dims` treats the 1 GiB cap as element count, not bytes, for u16 (DEFERRED:
+   semantics/naming nit, tightening risk).** `validate_pixel_buffer_u16` -> `validate_pixel_dims`
+   computes `w*h*channels` and compares to `MAX_PIXEL_BUFFER_BYTES` (1 GiB) without multiplying by
+   `size_of::<u16>()`, so a u16 payload up to ~2 GiB of actual memory passes the "byte" budget. Not
+   a live exploit (the buffer is caller-allocated; validate only asserts `len == w*h*c`), and
+   multiplying by element size would *tighten* the limit and could reject currently-valid large u16
+   buffers (and any test that builds one). Left unchanged in a perf pass; revisit only if the cap is
+   meant as a hard byte ceiling, in which case add a typed `element_bytes` multiply + a test.
+
+3. **Separable-blur temp re-interleave/de-interleave round-trip (DEFERRED: needs its own flip).**
+   `separable_blur_into` writes its horizontal-pass result back to an **interleaved** `temp`
+   (re-interleave at the row tail), then the vertical pass in `separable_blur_with_bufs`
+   de-interleaves each tap row again. Keeping `temp` planar-per-row (`[R..|G..|B..]`) would drop one
+   interleave + one de-interleave. Plausible, but: blur only runs when texture/clarity/luminance-NR
+   are active (not the default ingest hot path), the blur kernels are already heavily flip-tuned
+   (`blur_mul_add_flip`, `blur_cache_tile_flip`, y-ring), and the change is intricate with a real
+   regression risk. Needs a dedicated planar-vs-interleaved flip with byte parity before landing.
