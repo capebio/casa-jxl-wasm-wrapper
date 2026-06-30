@@ -968,3 +968,29 @@ the genuinely-byte-exact subset of the same pass (fast8 `[u16;256]`, packed look
 DHT panic→bail guard, struct DHT cache, one-entry plan cache, generic-kernel stack array + direct
 `&HuffTable` + unchecked store, const-generic `BitReader` telemetry gate). Branch
 `perf/ljpeg-microops-jun30-z7k`.
+
+---
+
+## LJPEG-R2..R4: rejected items from the hot-path pass (2026-06-30)
+
+Branch `perf/ljpeg-hotpath-jun30-h4t9` (built on z7k `@1c089828`) landed five byte-exact
+hot-path changes — drop `real_in_buf`/`truncated` + mask-once-per-`fill`, prevalidate
+`max_symbol ≤ precision`, branchless `extend`, drop the `row == 0` predictor branch, SWAR
+`fill` 0xFF-detect — for a measured **~30% native decode floor win** (min 84.2 ms vs z7k
+119.8 ms; 165 real DNG tiles; FNV fingerprint byte-identical OLD/NEW). The same proposal also
+suggested three changes that were **rejected**:
+
+**LJPEG-R2: `DecodeMetrics` trait to gate statistics.** The proposal re-implements telemetry
+gating as a `DecodeMetrics`/`NoStats`/`CollectStats` trait. z7k already gates every counter
+behind a const-generic `BitReader<COLLECT_STATS>` + `if COLLECT_STATS` — identical codegen (the
+production `decode_tile` path carries zero telemetry stores). The trait is a pure refactor:
+~120 lines of churn, three new types, no measurable delta. Rejected as redundant.
+
+**LJPEG-R3: `checked_mul` for `raw_cols = width * components` in `geometry_check`.** SOF width
+is a `u16` (≤ 65535) and components ≤ `MAX_COMPONENTS` (4), so the product ≤ 262 140 — it cannot
+overflow `usize` on any target (incl. wasm32's 32-bit `usize`). The check would never fire.
+Rejected as dead hardening. (z7k already guards zero dimensions.)
+
+**LJPEG-R4: `store_sample()` helper.** Wrapping `((val << pt) & 0xFFFF) as u16` in a named
+helper changes no codegen and touches three kernels for cosmetics only. Rejected (surgical-
+change discipline); the expression is already identical and commented in all three kernels.

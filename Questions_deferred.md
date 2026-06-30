@@ -805,3 +805,32 @@ build. The fast8-u16 shrink and the const-generic telemetry removal are **codege
 + non-regression on a `wasm32-unknown-unknown` build of `raw-pipeline` (the existing RAW→lightbox
 flipflop / section bench), folded into the next shared WASM rebuild — not a per-opt build. Theory
 + native parity say byte-exact and ≥-neutral; this only re-checks the wasm codegen delta.
+
+---
+
+## LJPEG hot-path pass (2026-06-30) — deferred API + WASM gate
+
+Branch `perf/ljpeg-hotpath-jun30-h4t9` (on z7k `@1c089828`): byte-exact hot-path micro-ops,
+**~30% native decode floor** (min 84.2 ms vs z7k 119.8 ms; 165 real DNG tiles cps=2/prec=16;
+FNV fingerprint `0x199b1481ead6ac12` identical OLD/NEW). Harness:
+`examples/ljpeg_hotpath_flip.rs` (prints fingerprint + interleaved decode timing for cross-build
+OLD/NEW comparison).
+
+**Deferred — public prepared-plan execution API.** The proposal added `LjpegPlan::decode_into`
+/ `decode_into_stats` + `execution_plan_check` so a caller can prepare a plan once and decode
+many tiles against it. No caller exists today, and the thread-local one-entry `LAST_PLAN` cache
+(z7k) already gives the same skip-the-reparse benefit transparently through `decode_tile`.
+Deferred until a caller actually wants to hold an `LjpegPlan` across tiles — then expose the API
+plus `execution_plan_check`.
+
+**SWAR fill (kept, real-decode neutral).** The branchless u32 0xFF-detect clears its isolated
+gate (5.4%, `ljpeg_fill_swar_flip`) but is **neutral in real decode** (fill is amortized off the
+per-symbol critical chain; the 30% comes from the `real_in_buf`/guard/`extend` changes). Kept per
+the example gate + rule 10; the integrator may drop commit `eee8564f` to keep `unsafe` minimal.
+
+**Open (integrator gate):** the app decodes RAW via the **WASM** raw-pipeline, not this native
+build. Branchless `extend`, the removed per-symbol masks, and the SWAR unaligned u32 load are all
+**codegen-dependent** under emscripten/clang + wasm32. Confirm parity (fingerprint) +
+non-regression on a `wasm32-unknown-unknown` build of `raw-pipeline` (RAW→lightbox flipflop /
+section bench), folded into the next shared WASM rebuild. Native says byte-exact + ~30% faster;
+this only re-checks the wasm codegen delta. Same gate class as the z7k pass above.

@@ -1513,6 +1513,35 @@ mod tests {
         assert!(err.to_string().contains("ljpeg: category 9 exceeds precision 8"), "got: {}", err);
     }
 
+    #[test]
+    fn ljpeg_prepare_rejects_category_above_precision_before_decode() {
+        // The category-vs-precision guard now lives in prepare() (validated once
+        // per table via max_symbol), not in the per-symbol decode. Prove it fires
+        // at prepare time with NO entropy bytes at all — the bad category is never
+        // decoded, yet prepare must still reject the malformed table.
+        LAST_PLAN.with(|slot| *slot.borrow_mut() = None);
+        let src = vec![
+            0xFF, 0xD8,
+            0xFF, 0xC3, 0x00, 0x0B,
+            0x08, 0x00, 0x01, 0x00, 0x01, 0x01,
+            0x01, 0x11, 0x00,
+            0xFF, 0xC4, 0x00, 0x14,
+            0x00,
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            9,
+            0xFF, 0xDA, 0x00, 0x08,
+            0x01, 0x01, 0x00,
+            0x01, 0x00, 0x00,
+            // intentionally no entropy-coded bytes
+        ];
+        let err = LjpegPlan::prepare(&src).unwrap_err();
+        assert!(
+            err.to_string().contains("ljpeg: category 9 exceeds precision 8"),
+            "prepare must reject before decode; got: {}",
+            err
+        );
+    }
+
     // LJPEG-001: property-based tests for extend() edge cases.
     #[test]
     fn extend_t0_always_zero() {
