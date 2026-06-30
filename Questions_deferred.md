@@ -10,6 +10,56 @@ Deferred items grouped by file/package scope + dependency + effort.
 
 ---
 
+## Measurement recipes — a WASM rebuild is ONE shared artifact, NOT per-opt
+
+Many entries below say "needs a WASM build / ~34-min integrator gate to flipflop."
+That reads as a build *per optimization* — it is not. `build.mjs` compiles the
+**entire** integrated `libjxl-012` + `bridge.cpp` into the 6 `dist` modules in **one**
+run; every facade-level test/flipflop loads that same `dist`. Merge the opts, build
+**once**, measure all of them. Worked examples drawn from the entries in this doc:
+
+**1. Native A/B — NO build at all (where most kernel opts belong).**
+Any opt with an isolated `*_ab.cc` harness compiles straight with clang and times
+OLD vs NEW in-process — no libjxl build, no WASM, seconds to run:
+```
+clang++ -O3 -std=c++17 tools/enc_bit_writer_append_ab.cc -o bw_ab && ./bw_ab
+clang++ -O3 -std=c++17 tools/dc_ctxmap_ab.cc -o dc_ab && ./dc_ab
+```
+Right tool for enc_bit_writer, enc_cluster, dc_ctxmap, ac_strategy, enc_xyb, conv5 —
+a kernel-level number without touching the build.
+
+**2. Real dec-path number — ONE shared rebuild; baseline is already in git (no 2nd build).**
+For dec opts that DO fire in the app (CfL X-zero dequant, compressed_dc X-zero): do
+not build per-opt. Merge the dec opts, run the single `build.mjs` rebuild, then
+flipflop the new `dist` against the pre-integration `dist` **already in git history**
+(built from 10783f7e at `b4a55047`) — the baseline needs no rebuild:
+```
+git show b4a55047:packages/jxl-wasm/dist/jxl-core.dec.simd.wasm > /tmp/old.dec.simd.wasm
+git show b4a55047:packages/jxl-wasm/dist/jxl-core.dec.simd.js   > /tmp/old.dec.simd.js
+# NEW = current dist (rebuilt from integrated main); flipflop OLD vs NEW via facade/section bench.
+```
+That one build covers every merged dec opt together — the 34-min cost is shared, paid once.
+
+**3. Encoder number — one native cjxl A/B build pair (not WASM, not per-test).**
+For enc opts (enc_cluster, enc_bit_writer SHA + timing): build cjxl OLD vs NEW once
+via `jxl_encdec_ab` (`LIBJXL_SOURCE_DIR`), SHA-compare e3+e9 (byte-exact gate) and read
+the timing delta. One build pair, shared across all merged enc opts.
+
+**4. Don't build at all — no-evidence / negligible / correctness.**
+- `quantizer-inl AdjustQuantBias` reschedule: compiler already reorders independent ops
+  at -O2/-O3; building to chase a source-level guess is negative-EV. Gate is a per-target
+  **assembly diff**, not a flipflop.
+- `ans_common CreateFlatHistogram`: off every hot path; no measurement justifies the branch.
+- `quantizer` lower-bound clamps: a **correctness/reachability** question, not a perf A/B —
+  not byte-exact, so it cannot ride a flipflop branch at all.
+
+**App-path-dead caveat:** some opts never run in the RAW→sRGB app path (enc_xyb fires only
+linear / non-sRGB-CMS; CfL `RatioJPEG` only on JPEG-recon; compressed_dc #6 only when
+subsampled). A facade flipflop reads **neutral** for these no matter how often you rebuild —
+measure them native-isolated (recipe 1) or accept "provably-less-work, unmeasured."
+
+---
+
 ## WORKSTREAM 1: Raw-Pipeline Colour & Output Validation
 
 **Priority:** HIGH (user-visible colour/geometry changes)  
@@ -544,3 +594,180 @@ Deferred from THIS pass:
    bitstream (needs a size bench); D3 is NOT byte-exact (fractional-entropy floor is
    nonlinear, so dropping the constant non-colour channels can flip a near-tie RCT
    choice) — confirmed this pass, do not land as "byte-exact".
+
+---
+
+## compressed_dc DC-context-map (2026-06-29)
+
+Branch `capebio/perf/dec-compressed-dc-ctxmap-jun29-q7x` @f7f5db73 (off submodule
+main 0ba69efd) landed #5 (4:4:4) + #6 (subsampled) byte-exact builder
+specializations. Deferred from that pass:
+
+1. **#6 vertical chroma reuse.** Current #6 reuses each native chroma bucket only
+   *within* a row (x>>HShift monotone). A native chroma row is still reclassified
+   for every luma row it covers (2 rows in 4:2:0). Full 2-D reuse needs a per-row
+   native-bucket scratch buffer; left out to stay allocation-free and avoid a
+   per-DC-group alloc regression on small groups. Revisit only if a profile shows
+   the subsampled context build is hot (it is JPEG-recompression territory; the
+   RAW→XYB pipeline is 4:4:4 and never hits #6).
+
+2. **Integrator decode-A/B gate.** Equivalence here is proven on the isolated
+   builder (tools/dc_ctxmap_ab.cc, 6.66M bytes, 0 fails) + by construction. The
+   full-lib gate is a decode A/B (native static djxl or WASM) on a stream that
+   actually signals num_dc_ctxs>1 — RAW-app JXLs may never exercise this path, so
+   pick/encode a multi-DC-context VarDCT stream to confirm before merge.
+
+---
+
+## enc_xyb (3rd-hottest) — 2026-06-29 (branch capebio/perf/enc-xyb-copy-elim-jun29-k3w9)
+
+Landed this pass (byte-exact, verified native cjxl A/B): ChatGPT **1A** (fused
+`LinearSRGBToXYBAndCopy`) + **1B** (out-of-place `LinearSRGBToXYBFrom`) copy
+eliminations in `ToXYB`. These fire only for linear-sRGB / non-sRGB-CMS inputs at
+VarDCT+kKitten — the RAW→sRGB app path never reaches them (sRGB branch untouched).
+
+Remaining ChatGPT enc_xyb ideas NOT pursued (deferred, not rejected):
+
+1. **ScaleXYB → Highway SIMD + dispatch.** Real SIMD hole (scalar per-pixel,
+   outside HWY_NAMESPACE). Worth it only if `ScaleXYB` is hot — it runs on the
+   scaled-XYB VarDCT path. Needs a flipflop/micro-harness to justify; not
+   byte-exact-trivial (must preserve op order, no MulAdd). Output unchanged.
+2. **No-clamp template (skip 3× ZeroIfNegative for proven-nonnegative input).**
+   3 vector clamps vs 3 cube roots — tiny. Needs an importer-propagated
+   "samples nonnegative" invariant that the API doesn't carry today. Low EV.
+3. **Shorten OpsinAbsorbance coeff lifetimes / YCbCr unit-mul deletion (kDiffR/
+   kDiffB == 1.0).** Disassembly-gated; clang likely already folds. Low EV.
+4. **Area-stripe scheduling for the 3 XYB paths** (they do one task/row; only
+   RgbToYcbcr stripes). Geometric, not byte-exact-trivial; RAW images are large
+   enough that per-row tasking rarely starves the pool. Needs benchmark.
+5. **Direct RGB8→XYB ingest / prepared-constants cache / empty-image early-exit.**
+   Architectural, belong at the import boundary, not inside enc_xyb.
+
+Verify-harness note: the minimal static cjxl can't read PNG/JPEG pixels, so the
+1B (CMS) vector needed `-DJPEGXL_ENABLE_APNG=1 -DJPEGXL_BUNDLE_LIBPNG=1` to read
+an AdobeRGB-ICC PNG. A ToXYB micro-flipflop (to actually *measure* the copy-elim,
+which is ~0.03% of an e9 encode and thus unmeasurable at process scope) was not
+built — the win is provably-less-work and app-irrelevant. Build if a future pass
+wants a number.
+
+---
+
+## CfL X-zero family — byte-exact follow-ups (deferred 2026-06-30)
+
+Context: implemented decoder X-CfL-free dequant specialization in dec_group.cc
+(branch `perf/dec-group-xzero-dequant-jun30-x4k9`, capebio, off submodule
+00f4d7fc). When the X color-correlation factor is exactly 0 (XYB default for the
+whole X channel), `MulAdd(0, dequant_y, dequant_x_cc) == dequant_x_cc` bit-exact,
+so a `kXCfL=false` template variant drops one vector FMA per X lane. These
+sibling items from the same ChatGPT CfL analysis are NOT done — clean, byte-exact,
+worth a future pass:
+
+1. **compressed_dc.cc DC X-zero specialization** — `DequantDCImpl<bool kUseXDCfL>`
+   gated on `cfl_factors[0] == 0.0f`. Line 228 still unconditional
+   `Store(MulAdd(in_y, cfl_fac_x, in_x), ...)`. Same byte-exact argument; smaller
+   win (1 sample/8x8 block vs per-coeff) but pairs cleanly. DC path = early decode.
+
+2. **dec_group JPEG `RatioJPEG` hoist** — JPEG-recon branch recomputes
+   `ColorCorrelation::RatioJPEG(row_cmap[c][abs_tx])` per 8x8 block per channel
+   (dec_group.cc ~617). Hoist to per-color-tile `jpeg_scale[3]`. Exact integer
+   arithmetic, JPEG-reconstruction path only (irrelevant to RAW→JXL app workflow).
+
+3. **chroma_from_luma.cc micro-cleanups** — transactional `DecodeDC` (parse into
+   locals → validate both bases → commit once + single `RecomputeDCFactors`,
+   currently `SetColorFactor` recomputes early then again at end); `GetColorFactor()`
+   return `uint32_t` not `float` (stored type is already uint32_t). Header-decode
+   micro, not ms-level.
+
+WASM decode A/B (StandardMultifileTest / section bench, ~34min build) is the
+integrator gate for the X-zero magnitude — native AVX2 harness only shows
+direction (one FMA; WASM drops mul+add, no native FMA → larger win expected).
+
+---
+
+## ans_common.cc / .h — CreateFlatHistogram write-count tweak (2026-06-30)
+
+**Deferred, not implemented.** ChatGPT pass proposed making `CreateFlatHistogram`
+(ans_common.h) write `min(rem, len-rem)` adjusted entries instead of always `rem`
+(start from `count+1` and decrement the suffix when the remainder is the larger
+half). Byte-identical output, verified by inspection.
+
+**Why deferred:** truly negligible — the function builds a tiny vector and is not
+on any hot path; the change adds a branch + a second construction path for a
+saving of at most len/2 integer increments. Fails the surgical/simplicity bar for
+the marginal gain. Revisit only if a profile ever flags flat-histogram setup.
+
+The real ans_common win (allocation-free `InitAliasTable`, 3.61x faster table
+build, byte-exact) landed on submodule branch
+`capebio/perf/ans-common-allocfree-jun30-z7k` (PUSHED, not merged). The three
+ChatGPT "bug"/Lookup claims were debunked — see docs/1 rejected optimizations.md
+(ANS-R1..R3).
+
+---
+
+## enc_cluster: merged-population-cost cache (2026-06-30)
+
+Branch `capebio/perf/enc-cluster-fuse-reindex-jun30-v8n3` (PUSHED, not merged).
+
+**Deferred (benchmark-gated, NOT landed):** In the kBest merge loop, a valid
+`HistogramPair` already paid for the exact merged `ANSPopulationCost()`. When
+that pair is accepted, the loop recomputes the same cost after `AddHistogram`.
+Caching it in the heap entry would save one `ANSPopulationCost()` per accepted
+merge — but it widens every `HistogramPair` from 16 to >=20 bytes, hurting
+priority-queue cache density for ALL queued (mostly rejected) negative pairs.
+Net effect is data-dependent (merge acceptance rate vs queue depth) and must be
+measured on a real encoder corpus at e9 before landing. Not byte-affecting
+(pure caching), so low risk — purely a perf trade-off.
+
+**Also deferred — full timing gate:** the landed changes are byte-exact and
+each is a strict work/alloc reduction (fused traversal, no deep-copy reindex,
+O(α) union-find vs O(N) scan, no per-block branch in distance/KL). Per the
+"byte-exact + theoretically better => choose new" rule they were taken without
+a flip-flop, since the timing harness requires a full libjxl-012 encoder build
+(native cjxl or WASM enc). Integrator gate: native/WASM enc A/B at e9 (kBest)
+for end-to-end byte-identical output + a timing delta.
+
+---
+
+## 2026-06-30 — quantizer-inl.h AdjustQuantBias SIMD reschedule (needs assembly + bench)
+
+**Deferred, not implemented.** Proposed reordering of `AdjustQuantBias`
+(`quantizer-inl.h`): compute `ApproximateReciprocal(quant)` and the
+`Set(df, biases[c])` / `Set(df, biases[3])` broadcasts up front so sign/mask work
+overlaps reciprocal latency. Byte-exact (pure independent-op reorder, identical ops
+and approximation).
+
+**Why deferred:** no evidence it is a win. The ops are already independent and the
+compiler scheduler reorders them at -O2/-O3; hoisting the reciprocal lengthens its
+live range and may cost a register/spill. This helper is hot (dec_group + enc_group
+AC dequant, instantiated SSE2/SSE4/AVX2 + WASM). Decision needs per-target generated
+assembly inspection and a flipflop/A-B across the target matrix — not a source-level
+guess. Revisit only with that evidence.
+
+## 2026-06-30 — Quantizer lower-bound clamps (correctness question, not perf)
+
+**Deferred as a correctness question.** A pass proposed `std::max(1, lround(...))` in
+`ScaleGlobalScale` and `std::max(1.0f, fval)` in `ComputeGlobalScaleAndQuant`,
+guarding against `global_scale`/`quant_dc` rounding to 0 (→ `inv_quant_dc_ = inf`).
+Upstream has no such guard. Excluded from the byte-exact branch because it changes
+output. **Open question for the maintainers:** is the zero/near-zero path actually
+reachable from any encoder configuration? If yes, this is a real robustness fix worth
+landing as an explicit (non-byte-exact) change; if no, leave upstream as-is. Needs a
+reachability analysis over the quant_dc / global_scale derivation, not a blind clamp.
+
+## 2026-06-30 — enc_bit_writer append pass: integrator verification gate (deferred)
+
+Branch `perf/enc-bit-writer-append-jun30-w8k4` (capebio, off submodule main `00f4d7fc`)
+is byte-exact-verified by a standalone A/B harness (192 cases, 0 mismatches) and
+real `-fsyntax-only` compiles of `enc_bit_writer.cc` + 7 caller TUs, but two checks
+need the integrator's full toolchain and are deferred:
+
+1. **Full `enc_bit_writer_test` execution.** gtest source is absent from the worktree's
+   `third_party`, so the extended `AppendUnaligned` gtest (all 8 dst offsets, multi-block
+   + partial-bit sources, back-to-back appends, zero-tail trailing write) was logic-proven
+   via the standalone harness but not run under gtest. Run `ninja enc_bit_writer_test`.
+2. **WASM enc A/B byte-exact.** The templated `WithMaxBits` (was `std::function`) is
+   codegen-dependent; confirm OLD-vs-NEW encoder output is SHA/size identical on a real
+   RAW→JXL stream (e3 + e9). Theory says byte-exact (only call binding changed, no bit
+   semantics), but the workflow gates output-shape changes on decode/enc SHA, not theory.
+
+Harness to reproduce timing: `clang++ -O3 -std=c++17 tools/enc_bit_writer_append_ab.cc -o bw_ab`.
