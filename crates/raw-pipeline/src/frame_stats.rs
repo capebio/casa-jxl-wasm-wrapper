@@ -62,9 +62,11 @@ impl FrameStats {
             pixel_count: self.pixel_count + other.pixel_count,
         }
     }
-    /// Returns luma variance normalized by 65025.0 (= max luma per pixel = 255×255).
-    /// Result is in [0.0, 1.0]: 0.0 = uniform frame, 1.0 = maximum contrast/detail.
-    /// Note: divides by 65025.0 (not 65536.0) so the normalization matches the actual luma range.
+    /// Returns luma variance scaled by 1/65025.0 (= max luma per pixel = 255×255).
+    /// 0.0 = uniform frame; larger = more contrast/detail. This is a *scale*, not a
+    /// [0,1] normalization: variance peaks at 65025²/4 (a half-black/half-white frame),
+    /// so the result can reach ~16256.25. Keep this divisor in lock-step with the WASM
+    /// `frame_stats` mirror — changing it here alone would desync cross-target telemetry.
     pub fn luma_variance(&self) -> f64 {
         if self.pixel_count == 0 { return 0.0; }
         let m = self.mean_luma();
@@ -88,28 +90,30 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
     // At 24MP luma values up to 65025 lead to l_sq sums ~1e17, which exceeds f64's
     // exact integer range (~9e15). Compensation keeps the running error below 1 ULP.
     let mut l_sq_c = 0f64; // Kahan compensation term
-    for p in 0..px {
-        let i = p * 4;
-        let r = d[i] as u32;
-        let g = d[i + 1] as u32;
-        let b = d[i + 2] as u32;
-        let a = d[i + 3] as u32;
-        let w = u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
-        let lane = p & 7;
-        lanes[lane] = (lanes[lane] ^ w).wrapping_mul(PRIME);
+    // FS-003: iterate whole RGBA words via chunks_exact(4) — one bounds-checked word
+    // load per pixel instead of four byte loads plus a redundant from_le_bytes re-read
+    // of the same four bytes. Same pixel order, same arithmetic, same Kahan cadence
+    // ⇒ bit-identical to the old per-byte loop.
+    for (p, px4) in d[..px * 4].chunks_exact(4).enumerate() {
+        let w = u32::from_le_bytes([px4[0], px4[1], px4[2], px4[3]]);
+        lanes[p & 7] = (lanes[p & 7] ^ w).wrapping_mul(PRIME);
+        let r = w & 0xff;
+        let g = (w >> 8) & 0xff;
+        let b = (w >> 16) & 0xff;
+        let a = w >> 24;
         rgb_nz += (r != 0) as u64 + (g != 0) as u64 + (b != 0) as u64;
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
-        let l = 54 * r + 183 * g + 18 * b;
-        let lf = l as f64;
+        let lf = (54 * r + 183 * g + 18 * b) as f64;
         l_sum += lf;
         let term = lf * lf - l_sq_c;
         let new_sq = l_sq + term;
         l_sq_c = (new_sq - l_sq) - term;
         l_sq = new_sq;
     }
-    if px == 0 { a_min = 255; a_max = 0; }
+    // px == 0 ⇒ the loop body never runs, so a_min/a_max keep their 255/0 init
+    // (the old explicit reset is now dead and removed).
     FrameStats {
         alpha_min: a_min, alpha_max: a_max, alpha_zero: a_zero, rgb_nonzero: rgb_nz,
         luma_sum: l_sum, luma_sq: l_sq, hash: combine_lanes(&lanes), pixel_count: px,
@@ -147,11 +151,6 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54,
     );
 
-    // FS-001: moved arr_lo/arr_hi declarations outside the loop so the stack frame is allocated
-    // once. Rust hoists them anyway, but making it explicit also documents the intent.
-    let mut arr_lo = [0i32; 8];
-    let mut arr_hi = [0i32; 8];
-
     // Kahan compensation for l_sq to prevent f64 precision loss at 24MP+.
     let mut l_sq_c = 0f64;
 
@@ -167,22 +166,43 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         a_zero += (zmask & 0x8888_8888).count_ones() as u64;
         rgb_nz += 24 - (zmask & 0x7777_7777).count_ones() as u64;
 
+        // FS-003: register-only luma reduction (supersedes FS-001/FS-002's stack path).
+        // madd→hadd packs the 8 per-pixel luma values into one vector — permuted, but
+        // order is irrelevant for a sum / sum-of-squares — then we reduce in registers.
+        // Removes the 64-byte stack store + 16 scalar reloads + two iterator passes per
+        // chunk (a store-to-load forwarding stall). chunk_sum / chunk_sq_sum are the SAME
+        // exact integers as the old array path, so l_sum / l_sq stay bit-identical.
         let lo16 = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(pv));
         let hi16 = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(pv, 1));
-        // FS-001: store-to-load stall fix — storeu writes 256 bits then the per-lane adds read 32-bit
-        // sub-words, causing forwarding stalls. Keep the storeu (cleanest portable extract) but move
-        // the declarations outside the loop so they are not re-initialized each iteration.
-        _mm256_storeu_si256(arr_lo.as_mut_ptr() as *mut __m256i, _mm256_madd_epi16(lo16, wv));
-        _mm256_storeu_si256(arr_hi.as_mut_ptr() as *mut __m256i, _mm256_madd_epi16(hi16, wv));
-        // FS-002: pairwise integer reduction — one chunk_sum + one chunk_sq_sum, one Kahan step per
-        // 8-pixel chunk instead of 8 steps. Reduces f64 ops from 24M→3M at 24MP. Exact for i64:
-        // max chunk_sq_sum = 8 × 65025² ≈ 3.4e10, well within i64 range. Bit-identical l_sum/l_sq.
-        let luma = [
-            arr_lo[0] + arr_lo[1], arr_lo[2] + arr_lo[3], arr_lo[4] + arr_lo[5], arr_lo[6] + arr_lo[7],
-            arr_hi[0] + arr_hi[1], arr_hi[2] + arr_hi[3], arr_hi[4] + arr_hi[5], arr_hi[6] + arr_hi[7],
-        ];
-        let chunk_sum: i64 = luma.iter().map(|&x| x as i64).sum();
-        let chunk_sq_sum: i64 = luma.iter().map(|&x| (x as i64) * (x as i64)).sum();
+        // Each madd pairs (54r+183g, 18b); hadd folds the pair → full per-pixel luma.
+        let luma_v = _mm256_hadd_epi32(
+            _mm256_madd_epi16(lo16, wv),
+            _mm256_madd_epi16(hi16, wv),
+        );
+
+        // chunk_sum = Σ luma  (≤ 8 × 65025 = 520200, fits i32).
+        let s4 = _mm_add_epi32(
+            _mm256_castsi256_si128(luma_v),
+            _mm256_extracti128_si256(luma_v, 1),
+        );
+        let s2 = _mm_hadd_epi32(s4, s4);
+        let s1 = _mm_hadd_epi32(s2, s2);
+        let chunk_sum = _mm_cvtsi128_si32(s1) as u32 as i64;
+
+        // chunk_sq_sum = Σ luma². Each luma² ≤ 65025² ≈ 4.23e9 fits u32 (mullo's low 32
+        // bits are exact); widen UNSIGNED before the 8-way sum (≤ 3.4e10 needs 64-bit).
+        let sq32 = _mm256_mullo_epi32(luma_v, luma_v);
+        let sq64 = _mm256_add_epi64(
+            _mm256_cvtepu32_epi64(_mm256_castsi256_si128(sq32)),
+            _mm256_cvtepu32_epi64(_mm256_extracti128_si256(sq32, 1)),
+        );
+        let sq2 = _mm_add_epi64(
+            _mm256_castsi256_si128(sq64),
+            _mm256_extracti128_si256(sq64, 1),
+        );
+        let sq1 = _mm_add_epi64(sq2, _mm_unpackhi_epi64(sq2, sq2));
+        let chunk_sq_sum = _mm_cvtsi128_si64(sq1);
+
         l_sum += chunk_sum as f64;
         let term = chunk_sq_sum as f64 - l_sq_c;
         let new_sq = l_sq + term;
@@ -282,22 +302,60 @@ mod tests {
     }
 
     #[test]
-    fn scalar_avx2_parity() {
-        for (w, h) in [(64usize, 48usize), (101, 49), (1920, 1280)] {
-            let buf = mkbuf(w * h, (w + h) as u32);
-            let sc = analyze_scalar(&buf, w * h);
-            #[cfg(target_arch = "x86_64")]
-            if is_x86_feature_detected!("avx2") {
-                let av = unsafe { analyze_avx2(&buf, w * h) };
-                assert_eq!(sc, av, "scalar vs avx2 mismatch at {}x{}", w, h);
-            }
+    #[ignore] // byte-exact gate: run on OLD and NEW binaries, diff stdout (must be identical)
+    fn dump_fixed() {
+        for (w, h, seed) in [
+            (64usize, 48usize, 1u32), (101, 49, 7), (257, 257, 3),
+            (1920, 1280, 11), (6000, 4000, 99),
+        ] {
+            let buf = mkbuf(w * h, seed);
+            let s = analyze(&buf, w, h);
+            println!(
+                "{}x{} amin={} amax={} az={} nz={} ls={:016x} lq={:016x} h={:08x} pc={}",
+                w, h, s.alpha_min, s.alpha_max, s.alpha_zero, s.rgb_nonzero,
+                s.luma_sum.to_bits(), s.luma_sq.to_bits(), s.hash, s.pixel_count,
+            );
         }
+    }
+
+    fn assert_parity(buf: &[u8], px: usize, tag: &str) {
+        let sc = analyze_scalar(buf, px);
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            let av = unsafe { analyze_avx2(buf, px) };
+            assert_eq!(sc, av, "scalar vs avx2 mismatch at {tag}");
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = (sc, tag);
+    }
+
+    #[test]
+    fn scalar_avx2_parity() {
+        // Including 24MP: l_sq there exceeds f64's exact range, so this exercises the
+        // scalar-vs-AVX2 Kahan grouping that small frames never reach.
+        for (w, h) in [(64usize, 48usize), (101, 49), (1920, 1280), (6000, 4000)] {
+            let buf = mkbuf(w * h, (w + h) as u32);
+            assert_parity(&buf, w * h, &format!("{w}x{h}"));
+        }
+        // Every SIMD tail length 0..=17 (full-block boundary is 8 px): the tail must
+        // restart hashing at lane 0 and match scalar exactly.
+        for px in 0..=17usize {
+            let buf = mkbuf(px, px as u32 + 17);
+            assert_parity(&buf, px, &format!("tail-{px}"));
+        }
+        // Degenerate content: all-zero (alpha_zero/rgb edge) and all-opaque-white.
+        assert_parity(&vec![0u8; 17 * 4], 17, "all-zero");
+        assert_parity(&vec![255u8; 17 * 4], 17, "all-white");
+        // Unaligned RGBA base address — AVX2 uses loadu, must stay correct.
+        let mut un = vec![0x5au8];
+        un.extend_from_slice(&mkbuf(17, 0x1234_5678));
+        assert_parity(&un[1..], 17, "unaligned");
     }
 
     #[test]
     #[ignore] // run: cargo test --no-default-features --release -- --ignored --nocapture native_bench
     fn native_bench() {
-        let sizes = [(1920usize, 1280usize, "2.46MP"), (1024, 1024, "1.05MP")];
+        let sizes = [(1920usize, 1280usize, "2.46MP"), (1024, 1024, "1.05MP"), (6000, 4000, "24.0MP")];
         #[cfg(target_arch = "x86_64")]
         let has_avx2 = is_x86_feature_detected!("avx2");
         #[cfg(not(target_arch = "x86_64"))]

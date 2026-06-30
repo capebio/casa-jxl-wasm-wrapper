@@ -858,3 +858,33 @@ the frame much.
 
 3. **`BLK` tile sweep (512/1024/1536/2048).** Only with `tone_matrix_prepared_flip` /
    `process_simd_flip` evidence; the 24 KiB working set is currently deliberate.
+## FS-D1: frame_stats u64 exact-integer luma accumulator (native + WASM, coordinated) (2026-06-30)
+
+Branch context: `perf/frame-stats-weave-jun30-h7x3` (shipped only byte-exact micro-ops).
+
+**Opportunity.** `luma = 54r+183g+18b ≤ 65025`; `luma² ≤ 4.23e9`. A plain `u64`
+accumulator for `luma_sum` and `luma_sq` stays exact to ~4.3 gigapixels (luma_sq) /
+~2.8e14 px (luma_sum) — beyond any addressable RGBA buffer. That would: (a) delete all
+Kahan machinery from both hot loops (scalar + AVX2), a real speed/clarity win; (b) make
+scalar and AVX2 bit-identical **by construction** at all sizes; (c) yield the
+correctly-rounded f64 (≥ Kahan accuracy).
+
+**Why deferred, not done.** `luma_sum`/`luma_sq` are emitted to telemetry and the kernel
+is mirrored in `raw-converter-wasm/src/lib.rs` (`frame_stats`). The u64 result differs
+from today's Kahan f64 by ≤1 ULP at >~6 MP. Changing native alone desyncs the two
+targets. This must land as ONE change to **both** native `frame_stats.rs` and the WASM
+mirror, ideally bumping a telemetry version, with a fresh scalar-vs-WASM parity check.
+
+**Also fix in the same migration:** the `luma_variance` divisor. It currently scales
+variance by `1/65025` (NOT a [0,1] normalization — peaks ~16256.25). If a true [0,1]
+detail metric is wanted, divide by `65025²/4`. Doc already corrected to state the real
+range; the *formula* change is the deferred, cross-target part.
+
+## FS-D2: hash-free metrics fast path (2026-06-30)
+
+The 8-lane FNV hash is a serial recurrence across blocks (each block depends on the
+prior) — it is the kernel's real throughput ceiling, not cache locality. Change-detection
+needs the hash; exposure/contrast triage (`mean_luma`, `luma_variance`) does not. A
+separate metrics-only entry (no hash, no `vpmulld` dependency chain) would let those
+callers run faster. Worth it only as a deliberate API split with a real caller that wants
+metrics without the change-id — not a runtime flag inside the hot loop.
