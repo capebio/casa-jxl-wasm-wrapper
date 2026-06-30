@@ -32,6 +32,21 @@ pub fn decompress_rows(compressed: &[u8], width: usize, height: usize, max_rows:
     let n = width
         .checked_mul(nrows)
         .ok_or_else(|| format!("decompress: {}x{} overflows", width, nrows))?;
+    // Reject impossibly-short payloads BEFORE the zero-fill alloc: a malformed tiny
+    // input claiming a huge WxH would otherwise force a large allocation + full
+    // memset only to fail inside `_into`. Floor = 6 bits/pixel (read_bits(3) +
+    // >=1-bit unary "high" + >=2-bit literal) — a safe lower bound that can never
+    // reject a valid stream, so the only behaviour change is a faster, alloc-free
+    // failure with the identical error text. (Sub-HEADER_SKIP inputs fall through to
+    // `_into`'s existing "input too short" message — semantics unchanged.)
+    if n != 0 && compressed.len() > HEADER_SKIP {
+        if let Some(min_bits) = n.checked_mul(6) {
+            let min_bytes = (min_bits + 7) / 8;
+            if compressed.len() - HEADER_SKIP < min_bytes {
+                return Err(bitstream_exhausted(width, nrows));
+            }
+        }
+    }
     let mut out = vec![0u16; n];
     let rows = decompress_rows_into(compressed, width, height, max_rows, &mut out)?;
     out.truncate(width * rows);
@@ -73,7 +88,13 @@ pub fn decompress_rows_into(
             compressed.len(), HEADER_SKIP
         ));
     }
-    let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
+    // A zero-width frame has no pixels; the row loop would otherwise spin `nrows`
+    // times doing no reads/writes (a cheap DoS on adversarial height). The
+    // contract (out[0..rows*width] valid) holds trivially for width 0.
+    if width == 0 {
+        return Ok(nrows);
+    }
+    let mut br = BitReader::<WIDE_FILL>::new(&compressed[HEADER_SKIP..]);
 
     for row in 0..nrows {
         // acarry[parity] = [last_value, running_avg_signed, stable_counter]
@@ -190,8 +211,17 @@ pub fn decompress_rows_into(
     Ok(nrows)
 }
 
+/// Native targets use the u64 wide-load refill; wasm keeps the byte loop (no
+/// cheap byteswap there — see `docs`/Questions_deferred D-wide-refill).
+#[cfg(not(target_arch = "wasm32"))]
+const WIDE_FILL: bool = true;
+#[cfg(target_arch = "wasm32")]
+const WIDE_FILL: bool = false;
+
 /// MSB-first bit reader.  No byte stuffing (Olympus does not set `zero_after_ff`).
-struct BitReader<'a> {
+/// `WIDE` selects the refill strategy (see [`BitReader::fill`]); it is a const
+/// generic only so the `dec_variant` bisect can A/B wide-vs-byteloop in one binary.
+struct BitReader<'a, const WIDE: bool> {
     data: &'a [u8],
     pos: usize,
     buf: u64,
@@ -202,7 +232,7 @@ struct BitReader<'a> {
     truncated: bool,
 }
 
-impl<'a> BitReader<'a> {
+impl<'a, const WIDE: bool> BitReader<'a, WIDE> {
     fn new(data: &'a [u8]) -> Self {
         Self {
             data,
@@ -219,10 +249,25 @@ impl<'a> BitReader<'a> {
         if self.nbits >= need { return; }
         // Batch-fill to 56 bits so subsequent calls are usually no-ops.
         // Safe headroom: 56 + 8 (one more read_huff/read_bits) = 64 = u64 max.
+        // The formula guarantees in_bounds*8 <= 56 - nbits, so the existing <=15
+        // valid bits never shift past bit 55 — no u64 overflow.
         let in_bounds = self.data.len().saturating_sub(self.pos)
             .min(((56 - self.nbits.min(56)) / 8) as usize);
-        for i in 0..in_bounds {
-            self.buf = (self.buf << 8) | self.data[self.pos + i] as u64;
+        if WIDE && in_bounds > 0 && self.pos + 8 <= self.data.len() {
+            // Wide path: one unaligned big-endian u64 load instead of up to 7
+            // dependent `(buf<<8)|byte` shifts on the inter-pixel critical path.
+            // from_be_bytes puts data[pos] in the MSB; keeping the top `in_bounds`
+            // bytes (>> the rest) reproduces the byte loop's MSB-first packing
+            // EXACTLY. in_bounds is 1..=7, so the shift is 8..=56 (never 64/UB).
+            let word = u64::from_be_bytes(
+                self.data[self.pos..self.pos + 8].try_into().unwrap(),
+            );
+            let chunk = word >> ((8 - in_bounds) as u32 * 8);
+            self.buf = (self.buf << (in_bounds as u32 * 8)) | chunk;
+        } else {
+            for i in 0..in_bounds {
+                self.buf = (self.buf << 8) | self.data[self.pos + i] as u64;
+            }
         }
         self.pos += in_bounds;
         self.nbits += (in_bounds as u32) * 8;
@@ -422,6 +467,29 @@ mod tests {
         assert!(err.contains("decompress: output too small"));
     }
 
+    // #2: an impossibly-short payload for a giant claimed frame must be rejected
+    // BEFORE the output is allocated. n = 1e10 px would need a ~20 GB zero-filled
+    // Vec; if the pre-alloc guard regressed, this test would OOM instead of pass.
+    #[test]
+    fn decompress_rows_rejects_giant_dims_without_alloc() {
+        let tiny = vec![0u8; HEADER_SKIP + 16];
+        let err = decompress_rows(&tiny, 100_000, 100_000, 100_000).unwrap_err();
+        assert!(err.contains("bitstream exhausted before 100000x100000"), "got: {}", err);
+    }
+
+    // #3: zero-width frame decodes to zero pixels for any height without spinning
+    // the row loop (out tail untouched; returns the row count).
+    #[test]
+    fn decompress_zero_width_is_noop() {
+        let payload = synth_payload(1, 1, 1); // any >HEADER_SKIP payload
+        let mut out: [u16; 0] = [];
+        assert_eq!(decompress_rows_into(&payload, 0, 5, 5, &mut out).unwrap(), 5);
+        assert_eq!(decompress(&payload, 0, 5).unwrap(), Vec::<u16>::new());
+        // sub-header input for width 0 still reports "input too short" (unchanged)
+        let err = decompress_rows_into(&[0u8; 3], 0, 5, 5, &mut out).unwrap_err();
+        assert!(err.contains("input too short"), "got: {}", err);
+    }
+
     #[test]
     fn decompress_errors_use_ascii_x() {
         let short: Vec<u8> = GOLDEN_FULL[..(7 + 5)].to_vec();
@@ -481,7 +549,8 @@ mod tests {
                 compressed.len(), HEADER_SKIP
             ));
         }
-        let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
+        // <false> = byte-loop refill: the true pre-optimisation baseline.
+        let mut br = BitReader::<false>::new(&compressed[HEADER_SKIP..]);
         for row in 0..nrows {
             let mut acarry = [[0i32; 3]; 2];
             let row_base = row * width;
@@ -558,9 +627,9 @@ mod tests {
     }
 
     // Bisect vehicle: FOLD = D9 single truncation check; HOIST = D10 north load
-    // hoist. <false,false> == OLD, <true,true> == production. Const generics let
-    // each combo monomorphize to clean branch-free code for relative timing.
-    fn dec_variant<const FOLD: bool, const HOIST: bool>(
+    // hoist; WIDE = u64 wide refill. <false,false,false> == original OLD. Const
+    // generics let each combo monomorphize to clean branch-free code for timing.
+    fn dec_variant<const FOLD: bool, const HOIST: bool, const WIDE: bool>(
         compressed: &[u8],
         width: usize,
         height: usize,
@@ -572,7 +641,7 @@ mod tests {
         if out.len() < n { return Err("small".into()); }
         if nrows == 0 { return Ok(0); }
         if compressed.len() <= HEADER_SKIP { return Err("short".into()); }
-        let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
+        let mut br = BitReader::<WIDE>::new(&compressed[HEADER_SKIP..]);
         for row in 0..nrows {
             let mut acarry = [[0i32; 3]; 2];
             let row_base = row * width;
@@ -692,11 +761,16 @@ mod tests {
 
         // 4 variants: base / fold-only / hoist-only / both(==production path).
         type F = fn(&[u8], usize, usize, usize, &mut [u16]) -> Result<usize, String>;
-        let variants: [(&str, F); 5] = [
-            ("base    ", dec_variant::<false, false>),
-            ("fold    ", dec_variant::<true, false>),
-            ("hoist   ", dec_variant::<false, true>),
-            ("fold+hst", dec_variant::<true, true>),
+        // base = original (byte-loop fill, 4 checks, dup north). hoist = +D10.
+        // hst+wide = +D10 +u64 wide refill (isolates the fill win). fold = +D9
+        // (rejected, kept for the record). PROD = the real shipped fn (cold helper
+        // + D10 + WIDE_FILL on native). fold uses byte-loop fill to match base.
+        let variants: [(&str, F); 6] = [
+            ("base    ", dec_variant::<false, false, false>),
+            ("fold    ", dec_variant::<true, false, false>),
+            ("hoist   ", dec_variant::<false, true, false>),
+            ("hst+wide", dec_variant::<false, true, true>),
+            ("fld+h+wd", dec_variant::<true, true, true>),
             ("PROD    ", decompress_rows_into),
         ];
 

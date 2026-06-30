@@ -1072,3 +1072,29 @@ Landed this pass (byte-exact, +4.5% vs base on synthetic): D10 north-load hoist,
   preview/thumbnail/downstream-transform pipelines (mem WxH -> Wx3). New public API; the
   current full-frame `decompress_rows_into` (output-buffer-as-history) stays optimal for
   callers that need the whole image. Design task, not a micro-op.
+
+## decompress.rs — UPDATE 2026-07-01: 3 of 4 deferred items ENACTED
+
+Same branch perf/decompress-trunc-fold-jul01-q8z (2nd commit). After re-review at max
+effort, three of the four deferred items were implementable + verifiable here:
+
+- **[ENACTED] native u64 wide refill** — biggest win of the pass. `BitReader` is now
+  `BitReader<const WIDE: bool>`; native uses a single unaligned `from_be_bytes` u64 load
+  (keeping the top `in_bounds` bytes = byte-exact MSB-first packing) instead of up to 7
+  dependent `(buf<<8)|byte` shifts on the inter-pixel critical path, with a byte-loop
+  fallback in the last <8 bytes. Measured via the 6-way bisect (hst+wide vs hoist):
+  ~-7% isolated; PROD -6.0..-8.9% vs original base, sign-stable x3. Byte-exact (the
+  differential oracle uses `BitReader<false>` vs production `BitReader<WIDE_FILL=true>`).
+  wasm keeps the byte loop (`WIDE_FILL=false` via cfg) — the deferral's byteswap concern
+  is sidestepped, not risked; `cargo check --target wasm32` clean.
+- **[ENACTED] min-payload pre-alloc rejection** — `decompress_rows` now rejects payloads
+  below the 6-bits/pixel floor before the zero-fill alloc (identical Err text; safe lower
+  bound, never false-rejects). Test `decompress_rows_rejects_giant_dims_without_alloc`
+  (100000x100000 would need ~20 GB; passes = guard fired pre-alloc).
+- **[ENACTED] width==0 guard** — early `Ok(nrows)` after the short-input check (preserves
+  the sub-HEADER_SKIP "input too short" Err; kills the adversarial-height no-op spin).
+  Test `decompress_zero_width_is_noop`.
+
+- **[STILL DEFERRED] streaming two-row / window decode API** — unchanged. New public API
+  + caller migration + design buy-in; not a verifiable micro-change. Needs brainstorming,
+  not enactment.
