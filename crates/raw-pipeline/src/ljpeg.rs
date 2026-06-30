@@ -12,20 +12,43 @@ use std::sync::Arc;
 
 const MAX_COMPONENTS: usize = 4;
 
+/// One parsed DHT keyed by its exact wire payload (the 16 length counts plus the
+/// value bytes). Storing the key as `[u8; 16]` + `Box<[u8]>` lets a cache lookup
+/// compare in place — no per-parse key `Vec` is allocated just to probe.
+#[derive(Debug)]
+struct DhtCacheEntry {
+    bits: [u8; 16],
+    values: Box<[u8]>,
+    table: Arc<HuffTable>,
+}
+
+/// One exact-header plan, covering the normal sequential-tile case (every tile of
+/// a DNG strip shares one SOF/DHT/SOS header) without re-parsing markers or
+/// re-resolving Huffman tables. Thread-local and bounded to a single entry, so it
+/// adds no locks and no unbounded WASM/native growth.
+#[derive(Debug)]
+struct CachedPlan {
+    header: Box<[u8]>,
+    plan: LjpegPlan,
+}
+
 thread_local! {
-    static DHT_CACHE: RefCell<Vec<(Vec<u8>, Arc<HuffTable>)>> = RefCell::new(Vec::new());
+    static DHT_CACHE: RefCell<Vec<DhtCacheEntry>> = RefCell::new(Vec::new());
+    static LAST_PLAN: RefCell<Option<CachedPlan>> = RefCell::new(None);
 }
 
 #[derive(Debug)]
 struct HuffTable {
-    // Decoded length per code → list of values, plus min/max code per length.
-    // We use the canonical method: store (code_len, value) pairs sorted by code.
-    // For decode we maintain a max_bits-sized table (right-sized, not fixed 16).
-    lookup: Vec<(u8, u8)>, // index = peek(max_bits), (consume_bits, value). 0 if invalid.
+    // Canonical decode tables. Each entry packs `consume_bits | (category << 8)`
+    // into a u16; entry 0 is the invalid/too-long sentinel (any valid code has
+    // consume ≥ 1). `lookup` is indexed by peek(max_bits) for the cold long-code
+    // fallback; `fast8` by peek(8) for the hot ≤8-bit path.
+    lookup: Vec<u16>, // index = peek(max_bits). 0 if invalid.
     max_bits: u8,
-    // Fast 8-bit prefix table: index = peek(8), value = consume_bits | (category << 8).
-    // 0 means code is longer than 8 bits — fall back to full lookup.
-    fast8: [u32; 256],
+    // Fast 8-bit prefix table: 512 B (was 1 KiB as u32) → better L1 residency on
+    // the per-symbol hot path. 0 means the code is longer than 8 bits — fall back
+    // to `lookup`.
+    fast8: [u16; 256],
 }
 
 impl HuffTable {
@@ -41,7 +64,15 @@ impl HuffTable {
         for len_minus_1 in 0..16usize {
             let n = bits[len_minus_1] as usize;
             let code_len = (len_minus_1 + 1) as u8;
+            // An oversubscribed (malformed) table would drive `code` past
+            // `2^code_len`; left unchecked, `code << shift` then indexes past the
+            // `1<<max_bits` lookup slice and panics on attacker-controlled bytes.
+            // Reject it cleanly instead.
+            let limit = 1u32 << code_len;
             for _ in 0..n {
+                if code >= limit {
+                    bail!("ljpeg: oversubscribed huffman table");
+                }
                 codes.push((code_len, values[idx], code));
                 idx += 1;
                 code += 1;
@@ -54,24 +85,24 @@ impl HuffTable {
         // Build max_bits prefix lookup (L10): for each code, all values whose
         // top `code_len` bits match get filled. Sized 1<<max_bits not 1<<16.
         let table_size = if max_bits == 0 { 1 } else { 1usize << max_bits };
-        let mut lookup = vec![(0u8, 0u8); table_size];
-        let mut fast8 = [0u32; 256];
+        let mut lookup = vec![0u16; table_size];
+        let mut fast8 = [0u16; 256];
         for &(code_len, value, code) in &codes {
+            // Packed entry shared by both tables: consume | category<<8 (≠ 0).
+            let entry = (code_len as u16) | ((value as u16) << 8);
             // Full-width table.
             let shift = max_bits as u32 - code_len as u32;
             let lo = (code << shift) as usize;
             let hi = lo + (1 << shift);
             for slot in &mut lookup[lo..hi] {
-                *slot = (code_len, value);
+                *slot = entry;
             }
             // 8-bit fast table for short codes: map every 8-bit pattern whose
-            // top code_len bits match this code → encode (consume|category<<8).
-            // Non-zero sentinel: consume ≥ 1 for any valid code.
+            // top code_len bits match this code. Non-zero sentinel: consume ≥ 1.
             if code_len <= 8 {
                 let shift8 = 8u32 - code_len as u32;
                 let lo8 = (code << shift8) as usize;
                 let hi8 = lo8 + (1usize << shift8);
-                let entry = (code_len as u32) | ((value as u32) << 8);
                 for slot in &mut fast8[lo8..hi8] {
                     *slot = entry;
                 }
@@ -113,7 +144,7 @@ pub struct LjpegStats {
     pub category_hist: [u64; 17],
 }
 
-struct BitReader<'a> {
+struct BitReader<'a, const COLLECT_STATS: bool> {
     src: &'a [u8],
     pos: usize,
     bits: u64,
@@ -121,13 +152,14 @@ struct BitReader<'a> {
     finished: bool,
     real_in_buf: u32,
     truncated: bool,
-    // Diagnostics — always tracked, near-zero overhead (fill called rarely).
+    // Diagnostics — only written when COLLECT_STATS, so the production decode path
+    // (decode_tile) carries no refill telemetry stores at all.
     fill_calls: u64,
     bulk_hits: u64,
     slow_hits: u64,
 }
 
-impl<'a> BitReader<'a> {
+impl<'a, const COLLECT_STATS: bool> BitReader<'a, COLLECT_STATS> {
     fn new(src: &'a [u8]) -> Self {
         BitReader {
             src,
@@ -145,7 +177,9 @@ impl<'a> BitReader<'a> {
 
     #[inline]
     fn fill(&mut self) {
-        self.fill_calls += 1;
+        if COLLECT_STATS {
+            self.fill_calls += 1;
+        }
         while self.nbits <= 48 && !self.finished {
             let remaining = self.src.len().saturating_sub(self.pos);
             // Fast bulk path: load 4 non-FF bytes as one 32-bit word.
@@ -165,7 +199,9 @@ impl<'a> BitReader<'a> {
                     self.nbits += 32;
                     self.real_in_buf += 32;
                     self.pos += 4;
-                    self.bulk_hits += 1;
+                    if COLLECT_STATS {
+                        self.bulk_hits += 1;
+                    }
                     continue;
                 }
             }
@@ -176,7 +212,9 @@ impl<'a> BitReader<'a> {
             }
             let b = self.src[self.pos];
             self.pos += 1;
-            self.slow_hits += 1;
+            if COLLECT_STATS {
+                self.slow_hits += 1;
+            }
             if b == 0xFF {
                 if self.pos >= self.src.len() {
                     self.finished = true;
@@ -331,7 +369,7 @@ fn read_u8(src: &[u8], pos: &mut usize) -> Result<u8> {
 /// **once** by [`LjpegPlan::prepare`], so the per-pixel kernels carry no parsing
 /// or table-construction cost. Mirrors the JXL encoder's prepared-state design:
 /// parse/plan once, then dispatch to a specialized kernel.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LjpegPlan {
     /// SOF image width (samples per row, *before* component interleave).
     pub width: usize,
@@ -351,6 +389,37 @@ pub struct LjpegPlan {
     entropy_offset: usize,
 }
 
+/// Return a clone of the cached plan iff `src` begins with the exact header
+/// bytes it was built from. The plan depends only on those header bytes
+/// (geometry/precision/tables); the entropy segment is re-read from the live
+/// `src` on every decode, so reusing the plan is byte-exact.
+#[inline]
+fn cached_plan(src: &[u8]) -> Option<LjpegPlan> {
+    LAST_PLAN.with(|slot| {
+        let slot = slot.borrow();
+        let entry = slot.as_ref()?;
+        let header = entry.header.as_ref();
+        if src.len() >= header.len() && &src[..header.len()] == header {
+            Some(entry.plan.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Record `plan` under its exact header prefix (`src[..entropy_offset]`) for the
+/// next same-header tile. Bounded to one entry per thread.
+#[inline]
+fn cache_plan(src: &[u8], plan: &LjpegPlan) {
+    debug_assert!(plan.entropy_offset <= src.len());
+    LAST_PLAN.with(|slot| {
+        *slot.borrow_mut() = Some(CachedPlan {
+            header: src[..plan.entropy_offset].to_vec().into_boxed_slice(),
+            plan: plan.clone(),
+        });
+    });
+}
+
 impl LjpegPlan {
     /// Parse SOI..SOS, build/resolve the Huffman tables, and validate the
     /// header. No entropy decoding happens here. The returned plan borrows
@@ -359,6 +428,10 @@ impl LjpegPlan {
     pub fn prepare(src: &[u8]) -> Result<Self> {
         if src.len() < 4 || src[0] != 0xFF || src[1] != 0xD8 {
             bail!("ljpeg: missing SOI");
+        }
+        // Fast path: the previous tile's plan, if this tile's header is byte-identical.
+        if let Some(plan) = cached_plan(src) {
+            return Ok(plan);
         }
         let mut pos = 2usize;
 
@@ -414,11 +487,13 @@ impl LjpegPlan {
                             .ok_or_else(|| anyhow::anyhow!("ljpeg: DHT values EOF"))?;
                         let values = &src[pos..val_end];
                         pos = val_end;
-                        // L11: thread-local exact-payload cache (Rc, WASM-safe). Key = bits[16]++values.
-                        let key: Vec<u8> = bits.iter().copied().chain(values.iter().copied()).collect();
+                        // L11: thread-local exact-payload cache (WASM-safe). Probe by
+                        // comparing the wire payload in place — no key Vec allocated.
                         let cached = DHT_CACHE.with(|c| {
-                            let cache = c.borrow();
-                            cache.iter().find(|(k, _)| k == &key).map(|(_, t)| t.clone())
+                            c.borrow()
+                                .iter()
+                                .find(|e| e.bits == bits && e.values.as_ref() == values)
+                                .map(|e| e.table.clone())
                         });
                         let tbl = if let Some(t) = cached {
                             t
@@ -426,7 +501,11 @@ impl LjpegPlan {
                             let t = Arc::new(HuffTable::build(&bits, values)?);
                             DHT_CACHE.with(|c| {
                                 let mut cache = c.borrow_mut();
-                                cache.push((key, t.clone()));
+                                cache.push(DhtCacheEntry {
+                                    bits,
+                                    values: values.to_vec().into_boxed_slice(),
+                                    table: t.clone(),
+                                });
                                 if cache.len() > 8 {
                                     cache.remove(0); // FIFO evict
                                 }
@@ -498,6 +577,9 @@ impl LjpegPlan {
         if cps == 0 || cps > MAX_COMPONENTS {
             bail!("ljpeg: bad component count");
         }
+        if sof.width == 0 || sof.height == 0 {
+            bail!("ljpeg: zero SOF dimension");
+        }
 
         // Resolve the Huffman table for each scan component once, so the kernels
         // index a small Arc array instead of re-looking-up by DHT id per pixel.
@@ -510,7 +592,7 @@ impl LjpegPlan {
             }
         }
 
-        Ok(LjpegPlan {
+        let plan = LjpegPlan {
             width: sof.width as usize,
             height: sof.height as usize,
             components: cps,
@@ -519,7 +601,9 @@ impl LjpegPlan {
             predictor: sos.predictor,
             tables,
             entropy_offset: pos,
-        })
+        };
+        cache_plan(src, &plan);
+        Ok(plan)
     }
 
     /// The entropy-coded segment of `src` (bytes after the SOS header).
@@ -611,7 +695,7 @@ fn execute<const COLLECT_STATS: bool>(
 /// the category. Shared verbatim by both kernels so they stay bit-identical.
 #[inline(always)]
 fn next_category<const COLLECT_STATS: bool>(
-    br: &mut BitReader,
+    br: &mut BitReader<'_, COLLECT_STATS>,
     table: &HuffTable,
     fast8_hits: &mut u64,
     slow_huffman_hits: &mut u64,
@@ -619,20 +703,21 @@ fn next_category<const COLLECT_STATS: bool>(
     category_hist: &mut [u64; 17],
 ) -> Result<u8> {
     // Fast 8-bit prefix lookup: resolves codes ≤ 8 bits without a second peek.
-    // Falls back to the full-width table only for long codes.
+    // Falls back to the full-width table only for long codes. Both tables pack
+    // consume | category<<8 into a u16; 0 is the invalid/too-long sentinel.
     let peek8 = br.peek(8);
     let fast_entry = table.fast8[peek8 as usize];
     let (consume, t) = if fast_entry != 0 {
         if COLLECT_STATS { *fast8_hits += 1; }
-        ((fast_entry & 0xFF) as u8, ((fast_entry >> 8) & 0xFF) as u8)
+        ((fast_entry & 0xFF) as u8, (fast_entry >> 8) as u8)
     } else {
         if COLLECT_STATS { *slow_huffman_hits += 1; }
         let peek_full = br.peek(table.max_bits as u32);
         let entry = table.lookup[peek_full as usize];
-        if entry.0 == 0 {
+        if entry == 0 {
             bail!("ljpeg: invalid huffman code");
         }
-        entry
+        ((entry & 0xFF) as u8, (entry >> 8) as u8)
     };
     if COLLECT_STATS {
         *total_symbols += 1;
@@ -652,7 +737,7 @@ fn next_category<const COLLECT_STATS: bool>(
 /// to the original inline diff math; shared by the monomorphized kernels.
 #[inline(always)]
 fn decode_diff<const PRECISION: u8, const COLLECT_STATS: bool>(
-    br: &mut BitReader,
+    br: &mut BitReader<'_, COLLECT_STATS>,
     t: u8,
     get_bits_calls: &mut u64,
     get_bits_total_bits: &mut u64,
@@ -701,7 +786,7 @@ fn decode_c1<const PRECISION: u8, const COLLECT_STATS: bool>(
     let base_pred = 1i32 << (PRECISION - point_transform - 1);
     let width = plan.width;
     let height = plan.height;
-    let mut br = BitReader::new(plan.entropy(src));
+    let mut br = BitReader::<COLLECT_STATS>::new(plan.entropy(src));
 
     let mut total_symbols = 0u64;
     let mut fast8_hits = 0u64;
@@ -787,7 +872,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
     let base_pred = 1i32 << (PRECISION - point_transform - 1);
     let width = plan.width;
     let height = plan.height;
-    let mut br = BitReader::new(plan.entropy(src));
+    let mut br = BitReader::<COLLECT_STATS>::new(plan.entropy(src));
 
     let mut total_symbols = 0u64;
     let mut fast8_hits = 0u64;
@@ -894,16 +979,22 @@ fn decode_generic<const COLLECT_STATS: bool>(
     let precision = plan.precision;
     let point_transform = plan.point_transform;
     let base_pred = 1i32 << (precision - point_transform - 1);
-    let mut br = BitReader::new(plan.entropy(src));
+    let mut br = BitReader::<COLLECT_STATS>::new(plan.entropy(src));
 
-    // Pre-resolve table refs to avoid an Arc deref + Option check per pixel.
-    let mut comp_tables: [Option<&HuffTable>; MAX_COMPONENTS] = [None; MAX_COMPONENTS];
-    for c in 0..cps {
-        comp_tables[c] = Some(plan.tables[c].as_deref().expect("generic: table resolved in prepare"));
+    // Pre-resolve table refs to a plain `&HuffTable` array — no per-pixel Option
+    // tag/unwrap. Slots [cps..] alias table0 and are never indexed (comp < cps).
+    let table0 = plan.tables[0]
+        .as_deref()
+        .expect("generic: table[0] resolved in prepare");
+    let mut comp_tables: [&HuffTable; MAX_COMPONENTS] = [table0; MAX_COMPONENTS];
+    for c in 1..cps {
+        comp_tables[c] = plan.tables[c]
+            .as_deref()
+            .expect("generic: table resolved in prepare");
     }
 
-    // Per-component column-0 value of the previous row.
-    let mut prev_row_first = vec![0i32; cps];
+    // Per-component column-0 value of the previous row (stack, no heap alloc).
+    let mut prev_row_first = [0i32; MAX_COMPONENTS];
 
     let mut total_symbols = 0u64;
     let mut fast8_hits = 0u64;
@@ -917,15 +1008,17 @@ fn decode_generic<const COLLECT_STATS: bool>(
         let emit_row = row < out_rows;
         let mut left = [0i32; MAX_COMPONENTS];
         for col in 0..sof_w {
+            let first_col = col == 0;
+            // One multiply per source column; the per-component index is just +1.
+            let mut raw_col = col * cps;
             for comp in 0..cps {
-                let predictor = if col == 0 {
+                let predictor = if first_col {
                     if row == 0 { base_pred } else { prev_row_first[comp] }
                 } else {
                     left[comp]
                 };
 
-                // SAFETY: comp < cps, all slots set above.
-                let table = comp_tables[comp].unwrap();
+                let table = comp_tables[comp];
 
                 let t = next_category::<COLLECT_STATS>(
                     &mut br, table, &mut fast8_hits, &mut slow_huffman_hits, &mut total_symbols,
@@ -959,19 +1052,20 @@ fn decode_generic<const COLLECT_STATS: bool>(
 
                 let val = predictor.wrapping_add(diff);
                 left[comp] = val;
-                if col == 0 {
+                if first_col {
                     prev_row_first[comp] = val;
                 }
 
-                if emit_row {
-                    let raw_col = col * cps + comp;
-                    if raw_col < out_pixel_cols {
-                        // Index is bounded by emit_row (row < out_rows) and
-                        // raw_col < out_pixel_cols; max is the `max_idx` validated
-                        // < out.len() in geometry_check. Always in bounds.
-                        out[row_base + raw_col] = ((val << point_transform) & 0xFFFF) as u16;
+                if emit_row && raw_col < out_pixel_cols {
+                    // SAFETY: row<out_rows + raw_col<out_pixel_cols ⇒ index ≤ the
+                    // max validated < out.len() by geometry_check before this kernel
+                    // runs. Same validated unchecked-store model as decode_c1/c2.
+                    unsafe {
+                        *out.get_unchecked_mut(row_base + raw_col) =
+                            ((val << point_transform) & 0xFFFF) as u16;
                     }
                 }
+                raw_col += 1;
             }
         }
     }
@@ -1327,6 +1421,64 @@ mod tests {
         let mut out2 = vec![0u16; 4];
         decode_tile(&src, &mut out2, 0, 2, 2, 2).unwrap();
         assert_eq!(out1, out2);
+    }
+
+    #[test]
+    fn ljpeg_rejects_oversubscribed_huffman_table() {
+        // 2 codes at len1 use up both 1-bit prefixes (0,1); the next length then
+        // has no room, so `code` outruns its width. Must bail, not panic on a
+        // slice index past the 1<<max_bits lookup table.
+        let bits = [2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let values = [0u8; 5];
+        let err = HuffTable::build(&bits, &values).unwrap_err();
+        assert!(
+            err.to_string().contains("oversubscribed huffman table"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ljpeg_plan_cache_reuses_identical_header() {
+        // Reset both thread-local caches so the assertion isolates the plan cache.
+        LAST_PLAN.with(|slot| *slot.borrow_mut() = None);
+        DHT_CACHE.with(|cache| cache.borrow_mut().clear());
+
+        let src = make_minimal_sof3();
+        let first = LjpegPlan::prepare(&src).expect("first plan");
+
+        // Clear the DHT cache so a *full* re-parse would build a fresh HuffTable
+        // (distinct Arc). A matching Arc therefore proves the plan cache fired.
+        DHT_CACHE.with(|cache| cache.borrow_mut().clear());
+        let second = LjpegPlan::prepare(&src).expect("cached plan");
+
+        assert!(
+            std::sync::Arc::ptr_eq(
+                first.tables[0].as_ref().unwrap(),
+                second.tables[0].as_ref().unwrap(),
+            ),
+            "plan cache should return the same Arc-shared tables for an identical header"
+        );
+    }
+
+    #[test]
+    fn ljpeg_stats_path_still_collects_counters() {
+        // The const-generic BitReader must keep emitting full telemetry on the
+        // stats path even though decode_tile carries none.
+        let src = make_minimal_sof3();
+        let mut out = vec![0u16; 4];
+        let stats = decode_tile_stats(&src, &mut out, 0, 2, 2, 2).expect("stats decode");
+
+        assert_eq!(&out[..], &[100u16, 101, 102, 103]);
+        assert_eq!(stats.total_symbols, 4);
+        assert_eq!(stats.fast8_hits, 4);
+        assert_eq!(stats.slow_huffman_hits, 0);
+        assert_eq!(stats.get_bits_calls, 4);
+        assert_eq!(stats.get_bits_total_bits, 9);
+        assert!(stats.fill_calls > 0, "fill_calls must still be counted on the stats path");
+        assert_eq!(stats.category_hist[1], 2);
+        assert_eq!(stats.category_hist[2], 1);
+        assert_eq!(stats.category_hist[5], 1);
     }
 
     #[test]

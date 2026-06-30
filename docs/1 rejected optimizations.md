@@ -983,3 +983,31 @@ write vs. a direct src->dst mirror), and that it/`transpose`/`anti_transpose` ar
 Rejected for this pass: these run **once per image at EXIF-orientation time** (tags 2/4/5/7 only),
 not per slider tick, and are a vanishingly small fraction of a RAW->lightbox wall. The change is real
 but the payoff is noise and it widens the diff into already-tested orientation code. Left as-is.
+## LJPEG-R1: `row_base` incremental-rewrite in the decode kernels (2026-06-30)
+
+ChatGPT ljpeg.rs pass proposed replacing `let row_base = base + row * stride_pixels;` (computed
+once per row at the top of every kernel's row loop) with a stateful `row_base += stride_pixels`
+advanced only on emitting rows, citing "both a micro-optimization and a real correctness repair:
+the old code could calculate overflowing row offsets even when no output was requested
+(`out_pixel_cols == 0`)." **Rejected.**
+
+- **No real perf.** The expression is evaluated **once per row**, not per pixel; the cost is `O(rows)`
+  against an `O(rows × cols × cps)` Huffman-decode inner loop. It is already invisible in the
+  `ljpeg_c1_flip` timing. Trading a trivially-correct closed-form index for a carried mutable state
+  buys nothing measurable.
+- **The "overflow bug" is unreachable in release and writes nothing.** `geometry_check` only validates
+  `max_idx` when `out_rows > 0 && out_pixel_cols > 0`; with `out_pixel_cols == 0` no store ever fires
+  (`raw_col < out_pixel_cols` is never true). So even a wrapped `row_base` causes **no OOB write, no
+  unsoundness** — release wraps harmlessly. The only observable effect is a *debug-build* arithmetic-
+  overflow panic, and only for a degenerate `base`/`stride` (e.g. `usize::MAX`) that **no production
+  caller passes** (`decode_tile_compact` uses `base = 0`; real callers pass true frame geometry).
+- **Adds bug surface.** A carried `row_base` introduces an off-by-one / skipped-advance failure mode
+  into three kernels (`decode_c1`/`decode_c2`/`decode_generic`) that are today bit-identical via a
+  closed-form index — net negative for a decoder whose correctness contract is byte-exact parity.
+
+The companion `decode(usize::MAX, usize::MAX, 0, 2)` "empty-output" test exercises a path no caller
+hits and asserts only that it does not panic — value not worth the kernel rewrite. Landed instead:
+the genuinely-byte-exact subset of the same pass (fast8 `[u16;256]`, packed lookup, oversubscribed-
+DHT panic→bail guard, struct DHT cache, one-entry plan cache, generic-kernel stack array + direct
+`&HuffTable` + unchecked store, const-generic `BitReader` telemetry gate). Branch
+`perf/ljpeg-microops-jun30-z7k`.

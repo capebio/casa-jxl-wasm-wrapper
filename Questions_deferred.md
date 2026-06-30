@@ -866,3 +866,37 @@ stage-timing split (ORF+DNG+CR2). Deferred / not-done, with reasons:
    probes and the demosaic flip-flop exports are `#[wasm_bindgen]` → retained in shipped WASM,
    keeping otherwise-dead demosaic/stat impls reachable (binary size / cold-start, not runtime).
    Needs two WASM builds (with/without) to measure `.wasm` size + instantiate delta. Deferred.
+
+---
+
+## LJPEG micro-ops — WASM confirmation of the hot-path codegen pieces (2026-06-30)
+
+Branch `perf/ljpeg-microops-jun30-z7k` (super only; `crates/raw-pipeline/src/ljpeg.rs`).
+Byte-exact pass: fast8 `[u32;256]`→`[u16;256]`, packed `lookup` `Vec<u16>`, const-generic
+`BitReader` (telemetry compiles out of `decode_tile`), oversubscribed-DHT panic→bail guard,
+struct DHT cache (no probe alloc), one-entry thread-local plan cache, generic-kernel stack
+array + direct `&HuffTable` + unchecked store. Already verified byte-exact: 21 ljpeg unit
+tests (known-output oracles unchanged), full crate suite 157 pass, **parity EXACT on 165 real
+DNG tiles** (cps=2/prec=16; fast8 resolves 99.89% of symbols).
+
+**Native timing — non-regression, modest floor win.** `cargo run --release --no-default-features
+--example ljpeg_c1_flip` on `PXL_20260527_180319603.RAW-02.ORIGINAL.dng` (165 tiles), OLD
+(unmodified main) vs NEW binaries, min-of-5 (machine is contended — 7 sibling worktrees — so
+**min** = contention-free floor; upper samples are pure upward noise, incl. a 401/502 ms
+outlier):
+
+| | min (floor) | median band |
+|---|---|---|
+| OLD | 266.4 ms | ~285–316 |
+| NEW | 248.3 ms | ~297–320 |
+
+Floor ≈ **−7%**; medians overlap inside the noise band. Honest read: the dominant cost is the
+per-symbol Huffman arithmetic (unchanged); the win is the smaller hot LUT + removed telemetry
+stores + 164 skipped plan re-parses, which clears the noise floor only at the min.
+
+**Open (integrator gate):** the app decodes RAW via the **WASM** raw-pipeline, not this native
+build. The fast8-u16 shrink and the const-generic telemetry removal are **codegen-dependent**
+(L1 footprint / store elision differ under emscripten/clang + wasm32). Confirm the same parity
++ non-regression on a `wasm32-unknown-unknown` build of `raw-pipeline` (the existing RAW→lightbox
+flipflop / section bench), folded into the next shared WASM rebuild — not a per-opt build. Theory
++ native parity say byte-exact and ≥-neutral; this only re-checks the wasm codegen delta.
