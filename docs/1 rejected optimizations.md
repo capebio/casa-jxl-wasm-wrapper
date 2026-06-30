@@ -1111,3 +1111,39 @@ Rejected as dead hardening. (z7k already guards zero dimensions.)
 **LJPEG-R4: `store_sample()` helper.** Wrapping `((val << pt) & 0xFFFF) as u16` in a named
 helper changes no codegen and touches three kernels for cosmetics only. Rejected (surgical-
 change discipline); the expression is already identical and commented in all three kernels.
+## 2026-06-30 — `tone_simd.rs` final-pass proposals (ChatGPT) — partial REJECT
+
+Context: a multi-pass ChatGPT analysis of `tone_simd.rs`. The byte-exact subset (matrix-fused
+seam: `apply_tone_bulk_matrix` + wiring `ti.matrix_fused` into `simd_block_kernel`, post-LUT
+assert, parity tests) **LANDED** on branch `perf/tone-simd-matrix-seam-jun30-t9k2`. The rest:
+
+- **Rayon worker-local SIMD scratch (thread_local / `for_each_init` reuse) — REJECTED.**
+  Claim: the parallel `process_into_simd`/`process_16bit_simd` closures zero a 24 KiB
+  `[0f32; 2048]×3` stack frame per block; reuse it per worker. This is the SAME change already
+  measured and rejected on 2026-06-30 (branch `perf/pipeline-simd-scratch-jun30-w3k7`): flipflop
+  showed **−7..12% @ 4–24 MP** — the per-block stack zero is L1-resident and effectively free,
+  while the reused-scratch indirection loses. Do not re-attempt scratch-hoist.
+
+- **AVX2/SIMD128 reciprocal-estimate + Newton for the vibrance divide — REJECTED.**
+  WASM SIMD128 has no `rcp` intrinsic (Newton needs more ops than the exact `f32x4_div`); the
+  vibrance path is a minority branch (fires only when `vib != 0`). ChatGPT itself rejected this
+  after its own microbench; aligns with the prior `reciprocal-rewrite` rejection. The in-source
+  `PIPE-010` note already documents this.
+
+- **Full `TonePlan` enum restructure (LumaOnly/Matrix/Active) — DEFERRED, not rejected.**
+  See `Questions_deferred.md`. The matrix-fused seam already captures the "prepare once" win for
+  the common path without restructuring all three backends; the enum is a larger surface change
+  on a path that is ~4% of the frame (post-LUT gather is 45%).
+
+- **`sat == 0` luma-only SIMD kernel — DEFERRED.** See `Questions_deferred.md`. Triggers only at
+  saturation slider = −1.0 ∧ vibrance = 0 (full B&W); the matrix path already produces the
+  byte-exact grayscale result, so the win is a niche flop reduction, not correctness.
+
+- **`MaybeUninit` scratch in `apply_tone_fused_u16_u8` — REJECTED (no benefit).** That helper is
+  dormant (not on any production path; called only by the parity test). Its scratch is zeroed
+  ONCE per call (not per block), so `unsafe` `MaybeUninit` buys nothing measurable and adds an
+  unsafe surface the repo policy discourages. (Post-LUT length assert was added — that part landed.)
+
+- **`BLK` tile-size change (512/1024/1536) — REJECTED without evidence.** Benchmark-gated; the
+  24 KiB SoA working set is deliberate and the prior scratch-zeroing measurement implies the tile
+  is L1-friendly. No change without a flipflop showing a win.

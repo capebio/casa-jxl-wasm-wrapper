@@ -1671,6 +1671,11 @@ fn simd_block_kernel<T: Copy>(
     pre_lut_shift: u32,
     pre_lut_mask: usize,
     m: &[[f32; 3]; 3],
+    // Pre-fused S·M for the default no-vibrance path, built ONCE per render by
+    // `derive_tone_inputs`. When `Some`, the tone step is a single matvec via the
+    // matrix-only kernel — so the block loop no longer rebuilds `vib_zero_matrix(m, sat)`
+    // for every block. `None` ⇒ vibrance active: fall back to the full `apply_tone_bulk`.
+    fused_matrix: Option<&[[f32; 3]; 3]>,
     sat: f32,
     vib: f32,
     vib_zero: bool,
@@ -1682,7 +1687,10 @@ fn simd_block_kernel<T: Copy>(
         g[i] = pre_g[(ib[i * 3 + 1] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
         b[i] = pre_b[(ib[i * 3 + 2] as usize >> pre_lut_shift) & pre_lut_mask] as f32;
     }
-    crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, sat, vib, vib_zero);
+    match fused_matrix {
+        Some(mf) => crate::tone_simd::apply_tone_bulk_matrix(&mut r[..np], &mut g[..np], &mut b[..np], mf),
+        None => crate::tone_simd::apply_tone_bulk(&mut r[..np], &mut g[..np], &mut b[..np], m, sat, vib, vib_zero),
+    }
     // MEASURED FLOOR (2026-06-19, item-0 `examples/tonemap_subspans.rs`): this post stage
     // (clamp + f32→u16 cast + LUT gather) is ~45% of the 24 MP tone frame and is the bottleneck
     // — NOT build (2%), copy (14%), or math (4%). The gather itself is already cheap (~0.5 ns,
@@ -1717,6 +1725,10 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
     let ti = derive_tone_inputs(params);
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
+    // Pre-fused S·M (built once in derive_tone_inputs) for the default no-vibrance path;
+    // `Some ⟺ vib_zero` here (perceptual_constancy is asserted off). Feeding it to the
+    // kernel skips the per-block `vib_zero_matrix` rebuild. Copy: Option<&[[f32;3];3]>.
+    let fused = ti.matrix_fused.as_ref();
     let (pre_r, pre_g, pre_b, post, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
         ensure_lut(&mut cache_cell.borrow_mut(), params, &ti, false);
         let c = cache_cell.borrow();
@@ -1739,7 +1751,7 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
                 let mut b = [0f32; BLK];
                 simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
                     &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
-                    m, ti.sat, ti.vib, ti.vib_zero,
+                    m, fused, ti.sat, ti.vib, ti.vib_zero,
                     |v| post[(v as u16) as usize]);
             });
     }
@@ -1753,7 +1765,7 @@ pub fn process_into_simd(rgb16: &[u16], params: &PipelineParams, out: &mut [u8])
         for (ob, ib) in out.chunks_mut(3 * BLK).zip(rgb16.chunks(3 * BLK)) {
             simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
                 &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
-                m, ti.sat, ti.vib, ti.vib_zero,
+                m, fused, ti.sat, ti.vib, ti.vib_zero,
                 |v| post[(v as u16) as usize]);
         }
     }
@@ -2150,6 +2162,8 @@ pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
     assert!(!ti.perceptual_constancy, "process_16bit_simd is the plain ingest path only; use process_16bit_scalar for perceptual_constancy");
     let fallback = CAM_TO_SRGB;
     let m = params.color_matrix.as_ref().unwrap_or(&fallback);
+    // See process_into_simd: pre-fused matrix skips the per-block vib_zero_matrix rebuild.
+    let fused = ti.matrix_fused.as_ref();
     let n = rgb16.len() / 3;
     let mut out = vec![0u16; n * 3];
     let (pre_r, pre_g, pre_b, post16, pre_lut_mask, pre_lut_shift) = LUT_CACHE.with(|cache_cell| {
@@ -2172,7 +2186,7 @@ pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
                 let mut b = [0f32; BLK];
                 simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
                     &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
-                    m, ti.sat, ti.vib, ti.vib_zero,
+                    m, fused, ti.sat, ti.vib, ti.vib_zero,
                     |v| post16[(v as u16) as usize]);
             });
     }
@@ -2185,7 +2199,7 @@ pub fn process_16bit_simd(rgb16: &[u16], params: &PipelineParams) -> Vec<u16> {
         for (ob, ib) in out.chunks_mut(3 * BLK).zip(rgb16.chunks(3 * BLK)) {
             simd_block_kernel(ob, ib, &mut r, &mut g, &mut b,
                 &pre_r, &pre_g, &pre_b, pre_lut_shift, pre_lut_mask,
-                m, ti.sat, ti.vib, ti.vib_zero,
+                m, fused, ti.sat, ti.vib, ti.vib_zero,
                 |v| post16[(v as u16) as usize]);
         }
     }

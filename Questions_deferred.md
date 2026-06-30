@@ -834,3 +834,27 @@ build. Branchless `extend`, the removed per-symbol masks, and the SWAR unaligned
 non-regression on a `wasm32-unknown-unknown` build of `raw-pipeline` (RAW→lightbox flipflop /
 section bench), folded into the next shared WASM rebuild. Native says byte-exact + ~30% faster;
 this only re-checks the wasm codegen delta. Same gate class as the z7k pass above.
+## 2026-06-30 — tone_simd.rs deferred (from the matrix-fused-seam pass)
+
+Branch `perf/tone-simd-matrix-seam-jun30-t9k2` landed the byte-exact seam. Two ChatGPT
+proposals are plausible but not worth landing now; revisit only with a flipflop win, and
+note the ceiling: the tone matvec is **~4% of the frame** (post-LUT clamp+cast+gather is
+~45% — the real bottleneck, already at its measured floor). Tone-math micro-ops cannot move
+the frame much.
+
+1. **`TonePlan` enum (LumaOnly / Matrix / Active), built once per render.** Would fold mode
+   classification + coefficient prep out of `apply_tone_bulk` into a small state machine that
+   the kernel matches on. The seam already gives the common (Matrix) path its "prepare once"
+   benefit; the enum's extra value is only the LumaOnly branch (below) and removing the
+   per-call `luma_weights`/`c1`/`c2` setup from the active path (a handful of flops, once per
+   block). Larger surface (touches all 3 backends + the pipeline call sites). Gate on a
+   flipflop showing the active-path setup is measurable.
+
+2. **`sat == 0` luma-only SIMD kernel** (one `lm·rgb` dot + 3 broadcast stores vs a full 3×3
+   matvec). Byte-exact to the current matrix path (rows all equal `lm`), ~3× fewer flops on
+   that block. Triggers only when the saturation slider is at −1.0 AND vibrance is 0 (full
+   monochrome). If B&W conversion ever becomes a measured hot path, add it (probably as the
+   LumaOnly arm of the TonePlan enum); until then the matrix path covers it correctly.
+
+3. **`BLK` tile sweep (512/1024/1536/2048).** Only with `tone_matrix_prepared_flip` /
+   `process_simd_flip` evidence; the 24 KiB working set is currently deliberate.

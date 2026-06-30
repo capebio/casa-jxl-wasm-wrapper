@@ -132,14 +132,9 @@ fn apply_tone_bulk_scalar(
     m: &[[f32; 3]; 3], sat: f32, vib: f32, vib_zero: bool, n: usize,
 ) {
     if vib_zero {
-        // Entire tone is the single 3×3 M'.
+        // Entire tone is the single 3×3 M' — applied by the shared matrix-only kernel.
         let p = vib_zero_matrix(m, sat);
-        for i in 0..n {
-            let (rr, gg, bb) = (r[i], g[i], b[i]);
-            r[i] = p[0][0].mul_add(rr, p[0][1].mul_add(gg, p[0][2] * bb));
-            g[i] = p[1][0].mul_add(rr, p[1][1].mul_add(gg, p[1][2] * bb));
-            b[i] = p[2][0].mul_add(rr, p[2][1].mul_add(gg, p[2][2] * bb));
-        }
+        apply_tone_bulk_matrix_scalar(r, g, b, &p, n);
     } else {
         let lm = luma_weights(m);
         let vib6 = vib * 0.6;
@@ -165,31 +160,9 @@ unsafe fn apply_tone_bulk_avx2(
     let mut i = 0;
     if vib_zero {
         // M'·rgb — one matrix multiply covers matrix + sat blend + identity.
+        // Delegated to the shared matrix-only kernel (same lanes + fused tail).
         let p = vib_zero_matrix(m, sat);
-        let (p00, p01, p02) = (_mm256_set1_ps(p[0][0]), _mm256_set1_ps(p[0][1]), _mm256_set1_ps(p[0][2]));
-        let (p10, p11, p12) = (_mm256_set1_ps(p[1][0]), _mm256_set1_ps(p[1][1]), _mm256_set1_ps(p[1][2]));
-        let (p20, p21, p22) = (_mm256_set1_ps(p[2][0]), _mm256_set1_ps(p[2][1]), _mm256_set1_ps(p[2][2]));
-        while i < lanes {
-            let vr = _mm256_loadu_ps(r.as_ptr().add(i));
-            let vg = _mm256_loadu_ps(g.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            let nr = _mm256_fmadd_ps(p00, vr, _mm256_fmadd_ps(p01, vg, _mm256_mul_ps(p02, vb)));
-            let ng = _mm256_fmadd_ps(p10, vr, _mm256_fmadd_ps(p11, vg, _mm256_mul_ps(p12, vb)));
-            let nb = _mm256_fmadd_ps(p20, vr, _mm256_fmadd_ps(p21, vg, _mm256_mul_ps(p22, vb)));
-            _mm256_storeu_ps(r.as_mut_ptr().add(i), nr);
-            _mm256_storeu_ps(g.as_mut_ptr().add(i), ng);
-            _mm256_storeu_ps(b.as_mut_ptr().add(i), nb);
-            i += 8;
-        }
-        // Fused tail — reuse the SAME M' as the lanes so the ragged block end stays byte-exact
-        // vs scalar process_into (was calling unfused apply_tone_math → ≤1-LUT-step tail mismatch).
-        while i < n {
-            let (rr, gg, bb) = (r[i], g[i], b[i]);
-            r[i] = p[0][0].mul_add(rr, p[0][1].mul_add(gg, p[0][2] * bb));
-            g[i] = p[1][0].mul_add(rr, p[1][1].mul_add(gg, p[1][2] * bb));
-            b[i] = p[2][0].mul_add(rr, p[2][1].mul_add(gg, p[2][2] * bb));
-            i += 1;
-        }
+        apply_tone_bulk_matrix_avx2(r, g, b, &p, n);
     } else {
         let (m00, m01, m02) = (_mm256_set1_ps(m[0][0]), _mm256_set1_ps(m[0][1]), _mm256_set1_ps(m[0][2]));
         let (m10, m11, m12) = (_mm256_set1_ps(m[1][0]), _mm256_set1_ps(m[1][1]), _mm256_set1_ps(m[1][2]));
@@ -249,31 +222,12 @@ fn apply_tone_bulk_wasm(
     let mut i = 0;
     unsafe {
         if vib_zero {
+            // Delegated to the shared matrix-only kernel (same lanes + fused mul+add tail).
+            // It processes the full [0, n) range, so advance `i` to `n` to make the shared
+            // scalar tail below a no-op (otherwise it would re-apply the matrix to every pixel).
             let p = vib_zero_matrix(m, sat);
-            let (p00, p01, p02) = (f32x4_splat(p[0][0]), f32x4_splat(p[0][1]), f32x4_splat(p[0][2]));
-            let (p10, p11, p12) = (f32x4_splat(p[1][0]), f32x4_splat(p[1][1]), f32x4_splat(p[1][2]));
-            let (p20, p21, p22) = (f32x4_splat(p[2][0]), f32x4_splat(p[2][1]), f32x4_splat(p[2][2]));
-            while i < lanes {
-                let vr = v128_load(r.as_ptr().add(i) as *const v128);
-                let vg = v128_load(g.as_ptr().add(i) as *const v128);
-                let vb = v128_load(b.as_ptr().add(i) as *const v128);
-                let nr = f32x4_add(f32x4_mul(p00, vr), f32x4_add(f32x4_mul(p01, vg), f32x4_mul(p02, vb)));
-                let ng = f32x4_add(f32x4_mul(p10, vr), f32x4_add(f32x4_mul(p11, vg), f32x4_mul(p12, vb)));
-                let nb = f32x4_add(f32x4_mul(p20, vr), f32x4_add(f32x4_mul(p21, vg), f32x4_mul(p22, vb)));
-                v128_store(r.as_mut_ptr().add(i) as *mut v128, nr);
-                v128_store(g.as_mut_ptr().add(i) as *mut v128, ng);
-                v128_store(b.as_mut_ptr().add(i) as *mut v128, nb);
-                i += 4;
-            }
-            // Fused tail (mul+add to match the lanes; simd128 has no FMA) — keeps the block
-            // self-consistent. Brings i to n, so the shared scalar tail below is a no-op here.
-            while i < n {
-                let (rr, gg, bb) = (r[i], g[i], b[i]);
-                r[i] = p[0][0] * rr + (p[0][1] * gg + p[0][2] * bb);
-                g[i] = p[1][0] * rr + (p[1][1] * gg + p[1][2] * bb);
-                b[i] = p[2][0] * rr + (p[2][1] * gg + p[2][2] * bb);
-                i += 1;
-            }
+            apply_tone_bulk_matrix_wasm(r, g, b, &p, n);
+            i = n;
         } else {
             let (m00, m01, m02) = (f32x4_splat(m[0][0]), f32x4_splat(m[0][1]), f32x4_splat(m[0][2]));
             let (m10, m11, m12) = (f32x4_splat(m[1][0]), f32x4_splat(m[1][1]), f32x4_splat(m[1][2]));
@@ -321,6 +275,126 @@ fn apply_tone_bulk_wasm(
     }
 }
 
+/// Apply an **already-prepared** 3×3 tone matrix `M'` in-place over the SoA planes.
+///
+/// This is the body of the `vib_zero` branch with preparation lifted out: the caller
+/// owns `M'`. In the normal no-vibrance path that is the `matrix_fused` matrix that
+/// `pipeline::derive_tone_inputs` builds **once per render** (via the same
+/// `vib_zero_matrix`), so the block loop no longer rebuilds it for every ~2048-pixel
+/// block. Byte-exact to the `vib_zero` path of `apply_tone_bulk` (identical lanes and
+/// fused tail). Dispatches AVX2+FMA / SIMD128 / branchless scalar exactly like
+/// `apply_tone_bulk`; length is clamped to the shortest slice.
+#[inline]
+pub fn apply_tone_bulk_matrix(
+    r: &mut [f32],
+    g: &mut [f32],
+    b: &mut [f32],
+    p: &[[f32; 3]; 3],
+) {
+    let n = r.len().min(g.len()).min(b.len());
+    debug_assert_eq!(g.len(), r.len());
+    debug_assert_eq!(b.len(), r.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            unsafe { apply_tone_bulk_matrix_avx2(r, g, b, p, n) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        apply_tone_bulk_matrix_wasm(r, g, b, p, n);
+        return;
+    }
+    #[allow(unreachable_code)]
+    apply_tone_bulk_matrix_scalar(r, g, b, p, n);
+}
+
+/// Scalar matrix-only matvec (`M'·rgb`), FMA via `mul_add`. Matches the previous inline
+/// `vib_zero` scalar body verbatim.
+#[inline]
+fn apply_tone_bulk_matrix_scalar(
+    r: &mut [f32], g: &mut [f32], b: &mut [f32], p: &[[f32; 3]; 3], n: usize,
+) {
+    for i in 0..n {
+        let (rr, gg, bb) = (r[i], g[i], b[i]);
+        r[i] = p[0][0].mul_add(rr, p[0][1].mul_add(gg, p[0][2] * bb));
+        g[i] = p[1][0].mul_add(rr, p[1][1].mul_add(gg, p[1][2] * bb));
+        b[i] = p[2][0].mul_add(rr, p[2][1].mul_add(gg, p[2][2] * bb));
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn apply_tone_bulk_matrix_avx2(
+    r: &mut [f32], g: &mut [f32], b: &mut [f32], p: &[[f32; 3]; 3], n: usize,
+) {
+    // Safety: callers pass n = min(r.len(), g.len(), b.len()); all three slices hold ≥ n.
+    debug_assert!(n <= r.len() && n <= g.len() && n <= b.len());
+    use core::arch::x86_64::*;
+    let lanes = n / 8 * 8;
+    let mut i = 0;
+    let (p00, p01, p02) = (_mm256_set1_ps(p[0][0]), _mm256_set1_ps(p[0][1]), _mm256_set1_ps(p[0][2]));
+    let (p10, p11, p12) = (_mm256_set1_ps(p[1][0]), _mm256_set1_ps(p[1][1]), _mm256_set1_ps(p[1][2]));
+    let (p20, p21, p22) = (_mm256_set1_ps(p[2][0]), _mm256_set1_ps(p[2][1]), _mm256_set1_ps(p[2][2]));
+    while i < lanes {
+        let vr = _mm256_loadu_ps(r.as_ptr().add(i));
+        let vg = _mm256_loadu_ps(g.as_ptr().add(i));
+        let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+        let nr = _mm256_fmadd_ps(p00, vr, _mm256_fmadd_ps(p01, vg, _mm256_mul_ps(p02, vb)));
+        let ng = _mm256_fmadd_ps(p10, vr, _mm256_fmadd_ps(p11, vg, _mm256_mul_ps(p12, vb)));
+        let nb = _mm256_fmadd_ps(p20, vr, _mm256_fmadd_ps(p21, vg, _mm256_mul_ps(p22, vb)));
+        _mm256_storeu_ps(r.as_mut_ptr().add(i), nr);
+        _mm256_storeu_ps(g.as_mut_ptr().add(i), ng);
+        _mm256_storeu_ps(b.as_mut_ptr().add(i), nb);
+        i += 8;
+    }
+    // Fused tail — reuse the SAME M' as the lanes so the ragged block end stays byte-exact.
+    while i < n {
+        let (rr, gg, bb) = (r[i], g[i], b[i]);
+        r[i] = p[0][0].mul_add(rr, p[0][1].mul_add(gg, p[0][2] * bb));
+        g[i] = p[1][0].mul_add(rr, p[1][1].mul_add(gg, p[1][2] * bb));
+        b[i] = p[2][0].mul_add(rr, p[2][1].mul_add(gg, p[2][2] * bb));
+        i += 1;
+    }
+}
+
+/// wasm32 SIMD128 matrix-only matvec — `mul`+`add` (no FMA), matching the previous inline
+/// `vib_zero` wasm body. Processes the full `[0, n)` range (lanes + scalar mul+add tail).
+#[cfg(target_arch = "wasm32")]
+fn apply_tone_bulk_matrix_wasm(
+    r: &mut [f32], g: &mut [f32], b: &mut [f32], p: &[[f32; 3]; 3], n: usize,
+) {
+    use core::arch::wasm32::*;
+    let lanes = n / 4 * 4;
+    let mut i = 0;
+    unsafe {
+        let (p00, p01, p02) = (f32x4_splat(p[0][0]), f32x4_splat(p[0][1]), f32x4_splat(p[0][2]));
+        let (p10, p11, p12) = (f32x4_splat(p[1][0]), f32x4_splat(p[1][1]), f32x4_splat(p[1][2]));
+        let (p20, p21, p22) = (f32x4_splat(p[2][0]), f32x4_splat(p[2][1]), f32x4_splat(p[2][2]));
+        while i < lanes {
+            let vr = v128_load(r.as_ptr().add(i) as *const v128);
+            let vg = v128_load(g.as_ptr().add(i) as *const v128);
+            let vb = v128_load(b.as_ptr().add(i) as *const v128);
+            let nr = f32x4_add(f32x4_mul(p00, vr), f32x4_add(f32x4_mul(p01, vg), f32x4_mul(p02, vb)));
+            let ng = f32x4_add(f32x4_mul(p10, vr), f32x4_add(f32x4_mul(p11, vg), f32x4_mul(p12, vb)));
+            let nb = f32x4_add(f32x4_mul(p20, vr), f32x4_add(f32x4_mul(p21, vg), f32x4_mul(p22, vb)));
+            v128_store(r.as_mut_ptr().add(i) as *mut v128, nr);
+            v128_store(g.as_mut_ptr().add(i) as *mut v128, ng);
+            v128_store(b.as_mut_ptr().add(i) as *mut v128, nb);
+            i += 4;
+        }
+    }
+    // Fused tail (mul+add to match the lanes; simd128 has no FMA).
+    while i < n {
+        let (rr, gg, bb) = (r[i], g[i], b[i]);
+        r[i] = p[0][0] * rr + (p[0][1] * gg + p[0][2] * bb);
+        g[i] = p[1][0] * rr + (p[1][1] * gg + p[1][2] * bb);
+        b[i] = p[2][0] * rr + (p[2][1] * gg + p[2][2] * bb);
+        i += 1;
+    }
+}
+
 /// Fused single-pass tone for the caller's `process_into_simd` shape (Blueprint
 /// Ch.1/6: eliminate copies + per-block zeroing, fuse kernels). Interleaved u16 →
 /// pre-LUT gather → matrix/sat/vibrance (SIMD via `apply_tone_bulk`) → post-LUT →
@@ -347,6 +421,8 @@ pub fn apply_tone_fused_u16_u8(
     assert!(pre_r.len() >= 65536, "apply_tone_fused_u16_u8: pre_r must have at least 65536 entries");
     assert!(pre_g.len() >= 65536, "apply_tone_fused_u16_u8: pre_g must have at least 65536 entries");
     assert!(pre_b.len() >= 65536, "apply_tone_fused_u16_u8: pre_b must have at least 65536 entries");
+    // The post-LUT is indexed by the full u16 domain (clamped f32→u16), so it must cover it too.
+    assert!(post.len() >= 65536, "apply_tone_fused_u16_u8: post must have at least 65536 entries");
     const BLK: usize = 2048;
     let np = (rgb16.len() / 3).min(out.len() / 3);
     // One reused stack scratch (zeroed once), not a fresh zeroed buffer per block.
@@ -542,6 +618,43 @@ mod tests {
             let mut got = vec![0u8; np * 3];
             apply_tone_fused_u16_u8(&rgb16, &pre, &pre, &pre, &post, &M, sat, vib, vz, &mut got);
             assert_eq!(want, got, "fused mismatch vz={vz} sat={sat} vib={vib}");
+        }
+    }
+
+    // Parity across lengths that straddle the SIMD lane width (full vectors + a ragged
+    // tail of every residue), for both the vib_zero (matrix-only) and active paths.
+    #[test]
+    fn parity_vector_plus_tail() {
+        for &n in &[1usize, 3, 7, 8, 9, 15, 16, 17, 31, 1009] {
+            check(&M, true, 1.30, 0.0, n);
+            check(&M, false, 1.30, 0.5, n);
+            check_scalar(&M, true, 1.30, 0.0, n);
+            check_scalar(&M, false, 1.30, 0.5, n);
+        }
+    }
+
+    // The prepared matrix-only kernel (`apply_tone_bulk_matrix`) must be BIT-IDENTICAL to the
+    // vib_zero path of `apply_tone_bulk` — both run the same lanes + fused tail on the same M'.
+    // This locks the seam used by `simd_block_kernel` (which feeds it `ti.matrix_fused`).
+    #[test]
+    fn matrix_only_matches_vib_zero_path() {
+        for &n in &[3usize, 7, 8, 17, 1009] {
+            for &sat in &[0.0f32, 0.5, 1.0, 1.30] {
+                let (r0, g0, b0) = data(n);
+                // regular vib_zero path
+                let (mut vr, mut vg, mut vb) = (r0.clone(), g0.clone(), b0.clone());
+                apply_tone_bulk(&mut vr, &mut vg, &mut vb, &M, sat, 0.0, true);
+                // prepared matrix-only path
+                let p = vib_zero_matrix(&M, sat);
+                let (mut mr, mut mg, mut mb) = (r0, g0, b0);
+                apply_tone_bulk_matrix(&mut mr, &mut mg, &mut mb, &p);
+                assert_eq!(vr.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                           mr.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), "r n={n} sat={sat}");
+                assert_eq!(vg.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                           mg.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), "g n={n} sat={sat}");
+                assert_eq!(vb.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                           mb.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), "b n={n} sat={sat}");
+            }
         }
     }
 }
