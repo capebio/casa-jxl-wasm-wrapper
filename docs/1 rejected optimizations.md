@@ -937,3 +937,37 @@ unsafe policy.
 out of the tone path, pack to LE bytes in `take_rgb16_full`. Zero `unsafe`, byte-exact, **−32%
 process-compute peak** (−56.7 MB @9.9 MP; verified wasm A/B). Details: `CrawlBot2000Findings.md` →
 "A-5 follow-up (2026-06-29)"; branch `crawlbot/a5-pack-rgb16-deferred-jun29-x7q3`.
+
+---
+
+## 2026-06-30 — quant_weights/quantizer "P0 inverted AllFalse" bug — REJECTED (false claim; proposed fix breaks the encoder)
+
+A ChatGPT "3rd-hottest-file" review flagged `quant_weights.cc` `ComputeQuantTable`'s
+table-validity check as an inverted predicate that "fails on all valid tables", and
+proposed replacing it. **The original code is correct; the proposed fix is the actual
+bug.** Current (`@00f4d7fc`, `kAlmostZero = 1e-8f`, so `1/kAlmostZero = 1e8`):
+
+```cpp
+if (!AllFalse(d, Ge(inv_val, Set(d, 1.0f / kAlmostZero))) ||   // any lane >= 1e8?
+    !AllFalse(d, Lt(inv_val, Set(d, kAlmostZero))))             // any lane < 1e-8?
+  return JXL_FAILURE("Invalid quantization table");
+```
+
+Both comparisons test **out-of-range** conditions. A valid `inv_val` (e.g. 2.5) is
+neither `>= 1e8` nor `< 1e-8`, so both comparisons are all-false → `AllFalse` = true →
+`!AllFalse` = false → no failure. Correct, and exactly why `quantizer_test`/`DCTUniform`
+pass today. ChatGPT's error: it asserted valid values produce *true* lanes (read the
+bounds backwards). Its replacement,
+`AllTrue(And(Ge(inv_val, 1e8), Lt(inv_val, 1e-8)))`, ANDs two mutually-exclusive
+conditions → never true → `AllTrue` always false → **rejects every quant table → codec
+dead.** Do not apply. (A genuinely correct NaN-rejecting form would need the opposite
+bounds: `AllTrue(And(Ge(inv_val, 1e-8), Lt(inv_val, 1e8)))`. The only real merit in the
+claim is that the current check lets NaN through — a minor robustness note, not a P0, and
+the direct-write patch on branch `perf/quant-weights-byteexact-jun30-q9z3k` instead adds
+a debug poison + `isnan` coverage assert.)
+
+Also rejected the same pass (consistent with prior logs): **uint16 natural-order
+`coeff_order_t`** (regresses DecodeAC ~2%, per `coeff_order_fwd.h`) and a **64×64 combined
+ZeroDensity table** (8 KiB displaces hot data). The **`InterpolateVec` `b/a` ratio
+precompute** is NOT rejected but deferred — it removes a vector divide yet is not
+byte-exact (scalar precompute vs vector divide shifts float bits); see Questions_deferred.

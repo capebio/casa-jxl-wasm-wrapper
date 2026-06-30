@@ -544,3 +544,48 @@ Deferred from THIS pass:
    bitstream (needs a size bench); D3 is NOT byte-exact (fractional-entropy floor is
    nonlinear, so dropping the constant non-colour channels can flip a near-tie RCT
    choice) — confirmed this pass, do not land as "byte-exact".
+
+## 2026-06-30 — quant_weights / quantizer deferred (3rd-hottest-file pass)
+
+Landed byte-exact this pass on `perf/quant-weights-byteexact-jun30-q9z3k` (submodule,
+capebio, off `00f4d7fc`): GetQuantWeights channel-fusion + num_bands==1 hoist,
+ComputeQuantTable direct-write into inv_table, SetQuantField buffer reuse. Harness
+`tools/quant_weights_equiv_ab.cc` (833 configs + recip, 0 fails). Deferred — all
+need measured WASM A/B and/or are not byte-exact-trivial:
+
+1. **Per-table, directional lazy materialization of DequantMatrices.** First
+   `EnsureComputed` allocates the whole universe (~3.01 MiB: table+inv for all 2056
+   blocks × 3) even for a DCT-only frame that needs ~1.5 KiB. Biggest first-paint/peak
+   win, but the riskiest: `InvMatrix` has deliberately-zeroed low-frequency entries
+   (`quant_weights.cc` low-freq zeroing) so it is NOT a pure reciprocal — cannot blindly
+   split dequant/inverse storage without auditing every `InvMatrix` caller. Use a
+   `computed_table_mask_` + dual mode (table-granular for sparse decoder requests,
+   one contiguous slab for all-strategy encoder requests). Keep table construction
+   single-threaded before workers read matrix pointers.
+2. **`inv_quant_ac` 256-entry LUT.** `inv_quant_ac(q) = inv_global_scale_ / q` divides
+   per call; valid `q` clamped to [1,256]. Fill `inv_quant_ac_[1..256]` once in
+   `RecomputeFromGlobalScale` (bit-exact, q≤256 exact in float). Worth it only if the
+   call is genuinely in the per-block hot path — profile call rate first; +1 KiB/quantizer.
+3. **`InterpolateVec` `b/a` ratio precompute.** Removes a vector divide per interp, but
+   NOT byte-exact (scalar precompute vs vector `Div` shifts float bits). Bench + matrix
+   bit-hash across HWY targets before landing; only after the byte-exact set is stable.
+4. **`AdjustQuantBias` all-small (0/±1) fast path.** Skip `ApproximateReciprocal` when
+   `AllTrue(is_01)`. Output-exact but distribution-sensitive (the `AllTrue` reduction
+   can lose on dense coefficient blocks). Needs sparse-vs-dense corpus bench.
+5. **SIMD `SetQuantFieldRect`** (currently scalar `ClampVal(qf*scale+0.5)`). MulAdd →
+   clamp-in-float → truncate. Win only for large adaptive-quant maps; setup/dispatch
+   can lose on 8×8. Bench-gated.
+6. **Native-wide `GetQuantWeights`** (it hard-caps `DF4 = HWY_CAPPED(float,4)`; leaves
+   AVX2/512 throughput on the table for 16×16+). Low priority for the WASM target (no
+   gain there); only if native desktop matters after the alloc/cache fixes.
+7. **Trivial cleanliness (not perf, deferred to keep this PR byte-exact-only):** RAW
+   move semantics (`new std::vector<int>(std::move(qtable))` + move-assign + self-assign
+   guard), `predefined * kNumQuantTables + table` library indexing (dormant: 1 predefined
+   set today), init DC padding lane `mul_dc_[3]/inv_mul_dc_[3] = 1.0f`, drop the
+   constructor's redundant `inv_quant_dc_` assignment (RecomputeFromGlobalScale already
+   sets it).
+
+Integrator gate for the landed branch: WASM enc A/B (fusion's real FastPowf/sqrt gain is
+codegen-dependent; harness microbench is scalar/pow-dominated = 1.17x floor, not the
+SIMD number) + full libjxl compile (third_party submodules were not init in the worktree,
+so no real compile ran — scalar harness proves the loop-restructure byte-exact only).
