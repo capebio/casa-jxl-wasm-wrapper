@@ -1,8 +1,20 @@
 //! Native frame-stats telemetry kernel (server / batch path; e.g. time-lapse triage).
 //! RGBA8 single-pass reduction: alpha min/max, alpha-zero count, rgb-nonzero count,
 //! luma mean/variance accumulators, and an 8-lane word-hash (content-change id).
-//! Mirrors the wasm `frame_stats` kernel in raw-converter-wasm/src/lib.rs; here the
-//! server can use AVX2 (256-bit). scalar and avx2 produce bit-identical results.
+//! Parallels the wasm `frame_stats` kernel in raw-converter-wasm/src/lib.rs, but the two
+//! are *independent contracts*: the wasm kernel accumulates luma in plain f64 to byte-match
+//! the JS `analyzeProgressiveFrame` reference (JS numbers are f64), while this native/batch
+//! kernel accumulates luma in exact u64 (see FS-D1 below) and converts once at the end. They
+//! are not required to be bit-identical to each other and aren't past ~6 MP — do not "sync"
+//! them by porting u64 into the wasm kernel; that would break the wasm↔JS byte contract.
+//!
+//! FS-D1: luma is integer (`54r+183g+18b ≤ 65025`, so `luma² ≤ 4.23e9`). Summed in u64 it is
+//! exact to ~4.3 gigapixels (luma_sq) / ~2.8e14 px (luma_sum) — beyond any addressable RGBA
+//! buffer — so no Kahan compensation is needed and `analyze_scalar`/`analyze_avx2` are
+//! bit-identical for *every* input (not just well-conditioned ones). The public `luma_sum`/
+//! `luma_sq` stay f64 (the exact integer rounded once to nearest f64).
+//!
+//! Here the server can use AVX2 (256-bit). scalar and avx2 produce bit-identical results.
 //!
 //! Use for batch/time-lapse: frameHash (near-duplicate / change detection), mean_luma
 //! (exposure/lighting trajectory), luma_variance (detail/contrast over time).
@@ -81,19 +93,15 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
     // undersized/malformed input is affected (avoids an OOB index panic).
     let px = px.min(d.len() / 4);
     let (mut a_min, mut a_max, mut a_zero, mut rgb_nz) = (255u32, 0u32, 0u64, 0u64);
-    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    // FS-D1: exact u64 luma accumulation (no Kahan — see module header). Bit-identical
+    // to analyze_avx2 for every input because both sum the same exact integers.
+    let (mut l_sum, mut l_sq) = (0u64, 0u64);
     let mut lanes = [
         lane_seed(0), lane_seed(1), lane_seed(2), lane_seed(3),
         lane_seed(4), lane_seed(5), lane_seed(6), lane_seed(7),
     ];
-    // Kahan compensated summation for l_sq to prevent f64 precision loss at 24MP+.
-    // At 24MP luma values up to 65025 lead to l_sq sums ~1e17, which exceeds f64's
-    // exact integer range (~9e15). Compensation keeps the running error below 1 ULP.
-    let mut l_sq_c = 0f64; // Kahan compensation term
     // FS-003: iterate whole RGBA words via chunks_exact(4) — one bounds-checked word
-    // load per pixel instead of four byte loads plus a redundant from_le_bytes re-read
-    // of the same four bytes. Same pixel order, same arithmetic, same Kahan cadence
-    // ⇒ bit-identical to the old per-byte loop.
+    // load per pixel instead of four byte loads plus a redundant from_le_bytes re-read.
     for (p, px4) in d[..px * 4].chunks_exact(4).enumerate() {
         let w = u32::from_le_bytes([px4[0], px4[1], px4[2], px4[3]]);
         lanes[p & 7] = (lanes[p & 7] ^ w).wrapping_mul(PRIME);
@@ -105,18 +113,14 @@ pub fn analyze_scalar(d: &[u8], px: usize) -> FrameStats {
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
-        let lf = (54 * r + 183 * g + 18 * b) as f64;
-        l_sum += lf;
-        let term = lf * lf - l_sq_c;
-        let new_sq = l_sq + term;
-        l_sq_c = (new_sq - l_sq) - term;
-        l_sq = new_sq;
+        let l = (54 * r + 183 * g + 18 * b) as u64; // ≤ 65025
+        l_sum += l;
+        l_sq += l * l; // ≤ 4.23e9 per px; u64 exact to ~4.3 Gpx
     }
-    // px == 0 ⇒ the loop body never runs, so a_min/a_max keep their 255/0 init
-    // (the old explicit reset is now dead and removed).
+    // px == 0 ⇒ the loop body never runs, so a_min/a_max keep their 255/0 init.
     FrameStats {
         alpha_min: a_min, alpha_max: a_max, alpha_zero: a_zero, rgb_nonzero: rgb_nz,
-        luma_sum: l_sum, luma_sq: l_sq, hash: combine_lanes(&lanes), pixel_count: px,
+        luma_sum: l_sum as f64, luma_sq: l_sq as f64, hash: combine_lanes(&lanes), pixel_count: px,
     }
 }
 
@@ -133,7 +137,8 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
     let px = px.min(d.len() / 4);
     let chunks = px / 8; // 8 px = 32 bytes per __m256i
     let (mut a_zero, mut rgb_nz) = (0u64, 0u64);
-    let (mut l_sum, mut l_sq) = (0f64, 0f64);
+    // FS-D1: exact u64 luma accumulation (no Kahan — see module header).
+    let (mut l_sum, mut l_sq) = (0u64, 0u64);
 
     let mut hv = _mm256_setr_epi32(
         lane_seed(0) as i32, lane_seed(1) as i32, lane_seed(2) as i32, lane_seed(3) as i32,
@@ -150,9 +155,6 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
     let wv = _mm256_set_epi16(
         0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54, 0, 18, 183, 54,
     );
-
-    // Kahan compensation for l_sq to prevent f64 precision loss at 24MP+.
-    let mut l_sq_c = 0f64;
 
     for c in 0..chunks {
         let pv = _mm256_loadu_si256(d.as_ptr().add(c * 32) as *const __m256i);
@@ -203,11 +205,8 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         let sq1 = _mm_add_epi64(sq2, _mm_unpackhi_epi64(sq2, sq2));
         let chunk_sq_sum = _mm_cvtsi128_si64(sq1);
 
-        l_sum += chunk_sum as f64;
-        let term = chunk_sq_sum as f64 - l_sq_c;
-        let new_sq = l_sq + term;
-        l_sq_c = (new_sq - l_sq) - term;
-        l_sq = new_sq;
+        l_sum += chunk_sum as u64; // chunk_sum ≥ 0 (≤ 520200)
+        l_sq += chunk_sq_sum as u64; // chunk_sq_sum ≥ 0 (≤ 3.4e10)
     }
 
     let mut mins = [0u8; 32];
@@ -239,19 +238,15 @@ unsafe fn analyze_avx2(d: &[u8], px: usize) -> FrameStats {
         if a < a_min { a_min = a; }
         if a > a_max { a_max = a; }
         if a == 0 { a_zero += 1; }
-        let l = 54 * r + 183 * g + 18 * b;
-        let lf = l as f64;
-        l_sum += lf;
-        let term = lf * lf - l_sq_c;
-        let new_sq = l_sq + term;
-        l_sq_c = (new_sq - l_sq) - term;
-        l_sq = new_sq;
+        let l = (54 * r + 183 * g + 18 * b) as u64;
+        l_sum += l;
+        l_sq += l * l;
     }
     if px == 0 { a_min = 255; a_max = 0; }
 
     FrameStats {
         alpha_min: a_min, alpha_max: a_max, alpha_zero: a_zero, rgb_nonzero: rgb_nz,
-        luma_sum: l_sum, luma_sq: l_sq, hash: combine_lanes(&lanes), pixel_count: px,
+        luma_sum: l_sum as f64, luma_sq: l_sq as f64, hash: combine_lanes(&lanes), pixel_count: px,
     }
 }
 
@@ -332,11 +327,14 @@ mod tests {
     #[test]
     fn scalar_avx2_parity() {
         // Including 24MP: l_sq there exceeds f64's exact range, so this exercises the
-        // scalar-vs-AVX2 Kahan grouping that small frames never reach.
+        // u64 accumulation that small frames never stress (FS-D1).
         for (w, h) in [(64usize, 48usize), (101, 49), (1920, 1280), (6000, 4000)] {
             let buf = mkbuf(w * h, (w + h) as u32);
             assert_parity(&buf, w * h, &format!("{w}x{h}"));
         }
+        // FS-D1 worst case: all-max luma (every byte 255 ⇒ luma=65025) at 4MP. l_sq here is
+        // ~1.7e16, well past 2^53; u64 stays exact so scalar and avx2 must still agree.
+        assert_parity(&vec![255u8; 2048 * 2048 * 4], 2048 * 2048, "all-max-4MP");
         // Every SIMD tail length 0..=17 (full-block boundary is 8 px): the tail must
         // restart hashing at lane 0 and match scalar exactly.
         for px in 0..=17usize {
