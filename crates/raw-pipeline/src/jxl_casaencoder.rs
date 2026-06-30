@@ -20,7 +20,6 @@
 
 #![cfg(all(feature = "jxl-codec", not(target_arch = "wasm32")))]
 
-use std::cell::Cell;
 use std::os::raw::{c_int, c_void};
 use std::ptr;
 
@@ -115,13 +114,13 @@ impl ExtraKind {
 }
 
 /// A planar extra channel (hyperspectral band, depth, thermal, …). `data` is
-/// `width * height` samples, borrowed (zero-copy).
+/// `width * height` samples, borrowed (no Rust-side conversion or copy).
 pub struct ExtraChannel<'a, S: Sample> {
     pub kind: ExtraKind,
     pub data: &'a [S],
 }
 
-/// One image to encode. `color` is interleaved and borrowed (zero-copy in).
+/// One image to encode. `color` is interleaved and borrowed (no Rust-side copy).
 pub struct Frame<'a, S: Sample> {
     /// Interleaved color (+ interleaved alpha when `alpha`); borrowed.
     pub color: &'a [S],
@@ -327,17 +326,20 @@ pub struct Encoder {
     /// Optional thread-parallel runner, owned; null when single-threaded.
     runner: *mut c_void,
     opts: EncodeOptions,
-    /// EMA of compressed-bytes-per-pixel for the *lossy* paths. Seeds the output
-    /// buffer hint on the next encode so the drain loop almost never grows after
-    /// the first frame. Interior-mutable (`Cell`) so the hot `&self` encode path
-    /// can update it; sound because `Encoder` is `!Sync`. Lossless ignores this
-    /// (its hint is the exact uncompressed footprint).
-    bpp_ema: Cell<f32>,
+    /// EMA of compressed bytes per colour pixel for lossy encodes. It seeds the
+    /// next output-buffer hint, so steady-state ingest loops rarely grow.
+    /// `encode` already holds `&mut self`, so this needs no interior mutability.
+    /// Lossless ignores it and budgets from the complete uncompressed footprint.
+    bpp_ema: f32,
 }
 
 /// Initial lossy bytes/pixel guess before the EMA warms. JXL q90 photos land
 /// ~0.1–0.4 bpp; 0.5 is conservative without zeroing many× the real output.
 const BPP_SEED: f32 = 0.5;
+const MIN_OUTPUT_HINT: usize = 1 << 16;
+const MAX_OUTPUT_HINT: usize = 256 << 20;
+/// Covers codestream/container metadata beyond the raw samples on lossless paths.
+const LOSSLESS_OUTPUT_SLACK: usize = 1 << 12;
 
 // libjxl looks up its LCMS context per-use (not stored), same justification as
 // upstream: safe to move across threads, not to share.
@@ -354,7 +356,7 @@ impl Encoder {
             enc,
             runner: ptr::null_mut(),
             opts,
-            bpp_ema: Cell::new(BPP_SEED),
+            bpp_ema: BPP_SEED,
         })
     }
 
@@ -409,7 +411,8 @@ impl Encoder {
 
     /// Like [`encode`] but appends output to a caller-supplied buffer. The
     /// caller can `clear()` the buffer between calls to reuse its capacity,
-    /// avoiding the per-encode allocation on ingest loops.
+    /// avoiding the per-encode allocation on ingest loops. On an [`EncodeError`],
+    /// `out` is restored to its incoming length (though its capacity may grow).
     ///
     /// ```rust,ignore
     /// let mut buf = Vec::with_capacity(1 << 20);
@@ -429,14 +432,17 @@ impl Encoder {
         r
     }
 
-    unsafe fn encode_inner<S: Sample>(&self, frame: &Frame<S>) -> Result<Vec<u8>, EncodeError> {
+    unsafe fn encode_inner<S: Sample>(
+        &mut self,
+        frame: &Frame<S>,
+    ) -> Result<Vec<u8>, EncodeError> {
         let mut out = Vec::new();
         self.encode_inner_into(frame, &mut out)?;
         Ok(out)
     }
 
     unsafe fn encode_inner_into<S: Sample>(
-        &self,
+        &mut self,
         frame: &Frame<S>,
         out: &mut Vec<u8>,
     ) -> Result<(), EncodeError> {
@@ -448,34 +454,57 @@ impl Encoder {
                 frame.color_channels
             )));
         }
-        let planar_alpha = frame.extra.iter().any(|e| e.kind == ExtraKind::Alpha);
-        if frame.alpha && planar_alpha {
+        let interleaved_channels = frame.interleaved_channels();
+
+        // Checked geometry keeps a 32-bit size_t overflow from turning a
+        // wrong-sized buffer into an apparently valid FFI input.
+        let px = (frame.width as usize)
+            .checked_mul(frame.height as usize)
+            .ok_or(EncodeError::Size {
+                expected: usize::MAX,
+                got: frame.color.len(),
+            })?;
+        let expected_color = px
+            .checked_mul(interleaved_channels as usize)
+            .ok_or(EncodeError::Size {
+                expected: usize::MAX,
+                got: frame.color.len(),
+            })?;
+        if frame.color.len() != expected_color {
+            return Err(EncodeError::Size {
+                expected: expected_color,
+                got: frame.color.len(),
+            });
+        }
+
+        let extra_count = frame.extra.len() as u32;
+        if extra_count as usize != frame.extra.len() {
             return Err(EncodeError::Channels(
-                "alpha supplied both interleaved and as a planar channel".into(),
+                "too many extra channels for JxlBasicInfo".into(),
             ));
         }
-        // Checked multiply: on 32-bit/WASM targets width*height*channels can overflow
-        // usize and wrap to a small value that spuriously matches frame.color.len(),
-        // allowing a wrong-sized buffer to slip past this guard into libjxl.
-        let px = (frame.width as usize).checked_mul(frame.height as usize);
-        let expected_color = px.and_then(|p| p.checked_mul(frame.interleaved_channels() as usize));
-        match expected_color {
-            Some(expected) if frame.color.len() == expected => {}
-            Some(expected) => {
-                return Err(EncodeError::Size {
-                    expected,
-                    got: frame.color.len(),
-                });
-            }
-            None => {
-                return Err(EncodeError::Size {
-                    expected: usize::MAX,
-                    got: frame.color.len(),
-                });
-            }
-        }
-        let px = px.unwrap(); // safe: checked above
+
+        let alpha_extra = if frame.alpha { 1u32 } else { 0u32 };
+        let num_extra = alpha_extra.checked_add(extra_count).ok_or_else(|| {
+            EncodeError::Channels("too many extra channels for JxlBasicInfo".into())
+        })?;
+
+        let mut planar_alpha = false;
         for e in frame.extra {
+            if e.kind == ExtraKind::Alpha {
+                if frame.alpha {
+                    return Err(EncodeError::Channels(
+                        "alpha supplied both interleaved and as a planar channel".into(),
+                    ));
+                }
+                if planar_alpha {
+                    return Err(EncodeError::Channels(
+                        "at most one planar alpha channel is supported".into(),
+                    ));
+                }
+                planar_alpha = true;
+            }
+
             if e.data.len() != px {
                 return Err(EncodeError::Size {
                     expected: px,
@@ -483,6 +512,12 @@ impl Encoder {
                 });
             }
         }
+
+        let color_bytes = std::mem::size_of_val(frame.color);
+        let input_bytes = color_bytes.saturating_add(
+            px.saturating_mul(frame.extra.len())
+                .saturating_mul(std::mem::size_of::<S>()),
+        );
 
         let enc = self.enc;
 
@@ -504,9 +539,6 @@ impl Encoder {
         // ── basic info ─────────────────────────────────────────────────────
         let (bits, exp_bits) = S::bits_per_sample();
         let lossless = matches!(self.opts.rate, Rate::Lossless);
-        // interleaved alpha occupies one extra channel slot (index 0).
-        let alpha_extra = if frame.alpha { 1 } else { 0 };
-        let num_extra = alpha_extra + frame.extra.len() as u32;
 
         let mut info = std::mem::MaybeUninit::<ffi::JxlBasicInfo>::uninit();
         ffi::JxlEncoderInitBasicInfo(info.as_mut_ptr());
@@ -600,14 +632,13 @@ impl Encoder {
             set_opt(fs, enc, id, val)?;
         }
 
-        // ── add interleaved color frame (zero-copy) ────────────────────────
+        // ── add interleaved color frame (no Rust-side copy) ───────────────
         let pf = ffi::JxlPixelFormat {
-            num_channels: frame.interleaved_channels(),
+            num_channels: interleaved_channels,
             data_type: S::data_type(),
             endianness: frame.endianness,
             align: 0,
         };
-        let color_bytes = std::mem::size_of_val(frame.color);
         check_enc(
             ffi::JxlEncoderAddImageFrame(
                 fs,
@@ -619,7 +650,7 @@ impl Encoder {
             enc,
         )?;
 
-        // ── supply planar extra-channel buffers (zero-copy) ────────────────
+        // ── supply planar extra-channel buffers (no Rust-side copy) ───────
         let pf1 = ffi::JxlPixelFormat {
             num_channels: 1,
             data_type: S::data_type(),
@@ -627,7 +658,7 @@ impl Encoder {
             align: 0,
         };
         for (i, e) in frame.extra.iter().enumerate() {
-            let idx = (alpha_extra as usize + i) as u32;
+            let idx = alpha_extra + i as u32;
             check_enc(
                 ffi::JxlEncoderSetExtraChannelBuffer(
                     fs,
@@ -643,58 +674,62 @@ impl Encoder {
 
         ffi::JxlEncoderCloseInput(enc);
 
-        // ── drain output (write into uninitialized spare capacity) ─────────
-        // No zero-fill: we `reserve` raw capacity and hand libjxl a pointer into
-        // the uninitialized tail, then `set_len` only over the bytes it actually
-        // wrote. `out`'s len stays at `base` for the whole loop, so the existing
-        // append-and-truncate semantics of `encode_into` are preserved exactly.
+        // ── drain output (write directly into spare Vec capacity) ──────────
+        // libjxl advances `next`/decrements `avail`. Before a grow can reallocate,
+        // commit the emitted tail with `set_len(pos)`: Vec only preserves bytes below
+        // its length across a reallocation. On a later encoder error, truncate back
+        // to `base`, so `encode_into` remains atomic from the caller's perspective.
         //
-        // Rate-aware hint: lossless budgets the exact uncompressed pixel footprint
-        // (worst case). Lossy seeds from the per-encoder EMA of compressed
-        // bytes/pixel (warms to the real ratio after the first frame → the grow
-        // branch below almost never fires). Clamped to [64 KiB, 256 MiB].
-        let px_count = (frame.width as usize).saturating_mul(frame.height as usize);
-        let lossy = !matches!(self.opts.rate, Rate::Lossless);
+        // Lossless budgets every supplied sample, including planar extras, plus a
+        // small codestream margin. Lossy tracks compressed bytes per colour pixel.
+        // Both hints are clamped to avoid pathological one-shot reservations.
+        let lossy = !lossless;
         let hint_bytes = if lossy {
-            ((px_count as f32) * self.bpp_ema.get()) as usize
+            (px as f32 * self.bpp_ema) as usize
         } else {
-            px_count
-                .saturating_mul(std::mem::size_of::<S>())
-                .saturating_mul(frame.interleaved_channels() as usize)
+            input_bytes.saturating_add(LOSSLESS_OUTPUT_SLACK)
         }
-        .clamp(1 << 16, 256 << 20);
+        .clamp(MIN_OUTPUT_HINT, MAX_OUTPUT_HINT);
 
         let base = out.len();
-        out.reserve(hint_bytes); // raw capacity; not zeroed
+        out.reserve(hint_bytes);
         let mut pos = base;
+
         loop {
-            // `len` is pinned at `base`; the writable window is the spare capacity.
             let cap = out.capacity();
             let mut next = out.as_mut_ptr().add(pos);
             let mut avail = cap - pos;
             let st = ffi::JxlEncoderProcessOutput(enc, &mut next, &mut avail);
             let written = (cap - pos) - avail;
             pos += written;
+
             if st == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
-                out.set_len(pos); // commit only the bytes libjxl wrote
-                if lossy && px_count > 0 {
-                    let bpp = (pos - base) as f32 / px_count as f32;
-                    // 50/50 EMA: tracks content drift without overreacting.
-                    self.bpp_ema.set(0.5 * self.bpp_ema.get() + 0.5 * bpp);
+                out.set_len(pos);
+
+                if lossy && px > 0 {
+                    let bpp = (pos - base) as f32 / px as f32;
+                    self.bpp_ema = 0.5 * self.bpp_ema + 0.5 * bpp;
                 }
-                break;
-            } else if st == ffi::JxlEncoderStatus::JXL_ENC_NEED_MORE_OUTPUT {
-                // Amortized doubling of the spare region (min 64 KiB step).
-                let grow = (pos - base).max(1 << 16);
-                out.reserve((pos - base) + grow);
-            } else {
-                return Err(EncodeError::Jxl(format!(
-                    "JxlEncoderProcessOutput error (code {})",
-                    encoder_error_code(enc)
-                )));
+
+                return Ok(());
             }
+
+            if st == ffi::JxlEncoderStatus::JXL_ENC_NEED_MORE_OUTPUT {
+                // Publish initialized bytes before reserve can relocate the Vec.
+                out.set_len(pos);
+
+                // reserve() is relative to len == pos: this doubles produced output
+                // in the normal full-buffer case, with a 64 KiB minimum increment.
+                out.reserve((pos - base).max(MIN_OUTPUT_HINT));
+                continue;
+            }
+
+            out.truncate(base);
+            return Err(EncodeError::Jxl(format!(
+                "JxlEncoderProcessOutput error (code {})",
+                encoder_error_code(enc)
+            )));
         }
-        Ok(())
     }
 }
 
@@ -782,6 +817,20 @@ mod tests {
     fn ramp_u8(channels: u32) -> Vec<u8> {
         let n = (W * H * channels) as usize;
         (0..n).map(|i| (i % 251) as u8).collect()
+    }
+
+    fn xorshift_u8(len: usize) -> Vec<u8> {
+        let mut state = 0xA511_E9B3u32;
+        let mut out = Vec::with_capacity(len);
+
+        for _ in 0..len {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            out.push(state as u8);
+        }
+
+        out
     }
 
     // ── per-sample-type lossless round-trips (bit-exact for int) ────────────
@@ -897,6 +946,84 @@ mod tests {
         };
         let mut enc = Encoder::new(EncodeOptions::lossless()).unwrap();
         assert!(matches!(enc.encode(&frame), Err(EncodeError::Channels(_))));
+    }
+
+    #[test]
+    fn planar_alpha_roundtrips_and_duplicate_planar_alpha_is_rejected() {
+        let color = ramp_u8(3);
+        let alpha: Vec<u8> = (0..(W * H) as usize)
+            .map(|i| if i % 3 == 0 { 37 } else { 255 })
+            .collect();
+
+        let extra = [ExtraChannel {
+            kind: ExtraKind::Alpha,
+            data: &alpha,
+        }];
+        let frame = Frame {
+            extra: &extra,
+            ..Frame::rgb(&color, W, H)
+        };
+
+        let mut enc = Encoder::new(EncodeOptions::lossless()).unwrap();
+        let jxl = enc.encode(&frame).unwrap();
+        let (rgba, _, _) = decode_interleaved::<u8>(&jxl, 4).unwrap();
+
+        for ((rgb, &a), rgba) in color.chunks_exact(3).zip(&alpha).zip(rgba.chunks_exact(4)) {
+            assert_eq!(&rgba[..3], rgb);
+            assert_eq!(rgba[3], a);
+        }
+
+        let duplicate = [
+            ExtraChannel {
+                kind: ExtraKind::Alpha,
+                data: &alpha,
+            },
+            ExtraChannel {
+                kind: ExtraKind::Alpha,
+                data: &alpha,
+            },
+        ];
+        let bad = Frame {
+            extra: &duplicate,
+            ..Frame::rgb(&color, W, H)
+        };
+
+        assert!(matches!(enc.encode(&bad), Err(EncodeError::Channels(_))));
+    }
+
+    #[test]
+    fn encode_into_growth_preserves_prefix_and_all_emitted_bytes() {
+        const BIG_W: u32 = 512;
+        const BIG_H: u32 = 512;
+
+        let src = xorshift_u8((BIG_W * BIG_H * 3) as usize);
+        let frame = Frame::rgb(&src, BIG_W, BIG_H);
+        let opts = EncodeOptions::quality(100.0);
+
+        // Generate a reference without exercising the small-output hint.
+        let mut reference = Encoder::new(opts.clone()).unwrap();
+        reference.bpp_ema = 8.0;
+        let expected = reference.encode(&frame).unwrap();
+
+        let prefix = [0xA5; 17];
+        let mut out = prefix.to_vec();
+        out.reserve(MIN_OUTPUT_HINT);
+        let initial_capacity = out.capacity();
+
+        // Make a moving reallocation substantially more likely.
+        let _blocker = vec![0u8; MIN_OUTPUT_HINT];
+
+        assert!(
+            prefix.len() + expected.len() > initial_capacity,
+            "test corpus must force the output grow path"
+        );
+
+        let mut enc = Encoder::new(opts).unwrap();
+        enc.bpp_ema = 0.0;
+        enc.encode_into(&frame, &mut out).unwrap();
+
+        assert_eq!(&out[..prefix.len()], &prefix[..]);
+        assert_eq!(&out[prefix.len()..], expected.as_slice());
     }
 
     #[test]
