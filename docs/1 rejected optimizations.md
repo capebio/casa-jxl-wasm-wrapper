@@ -1048,3 +1048,60 @@ The real measured wins on this branch are **`dn2_into` +62%** (clamp-free chunke
 reduction; the `.min` provably never fires when `dw=w/2,dh=h/2`) and **`box_blur` +36-46%**
 (dead post-tail rolling-update elision + caller-owned scratch reuse via `box_blur_into`).
 Harness: `examples/perc_scalar_oracle_flip.rs` (all rows read EXACT).
+## 2026-06-30 — quant_weights/quantizer "P0 inverted AllFalse" bug — REJECTED (false claim; proposed fix breaks the encoder)
+
+A ChatGPT "3rd-hottest-file" review flagged `quant_weights.cc` `ComputeQuantTable`'s
+table-validity check as an inverted predicate that "fails on all valid tables", and
+proposed replacing it. **The original code is correct; the proposed fix is the actual
+bug.** Current (`@00f4d7fc`, `kAlmostZero = 1e-8f`, so `1/kAlmostZero = 1e8`):
+
+```cpp
+if (!AllFalse(d, Ge(inv_val, Set(d, 1.0f / kAlmostZero))) ||   // any lane >= 1e8?
+    !AllFalse(d, Lt(inv_val, Set(d, kAlmostZero))))             // any lane < 1e-8?
+  return JXL_FAILURE("Invalid quantization table");
+```
+
+Both comparisons test **out-of-range** conditions. A valid `inv_val` (e.g. 2.5) is
+neither `>= 1e8` nor `< 1e-8`, so both comparisons are all-false → `AllFalse` = true →
+`!AllFalse` = false → no failure. Correct, and exactly why `quantizer_test`/`DCTUniform`
+pass today. ChatGPT's error: it asserted valid values produce *true* lanes (read the
+bounds backwards). Its replacement,
+`AllTrue(And(Ge(inv_val, 1e8), Lt(inv_val, 1e-8)))`, ANDs two mutually-exclusive
+conditions → never true → `AllTrue` always false → **rejects every quant table → codec
+dead.** Do not apply. (A genuinely correct NaN-rejecting form would need the opposite
+bounds: `AllTrue(And(Ge(inv_val, 1e-8), Lt(inv_val, 1e8)))`. The only real merit in the
+claim is that the current check lets NaN through — a minor robustness note, not a P0, and
+the direct-write patch on branch `perf/quant-weights-byteexact-jun30-q9z3k` instead adds
+a debug poison + `isnan` coverage assert.)
+
+Also rejected the same pass (consistent with prior logs): **uint16 natural-order
+`coeff_order_t`** (regresses DecodeAC ~2%, per `coeff_order_fwd.h`) and a **64×64 combined
+ZeroDensity table** (8 KiB displaces hot data). The **`InterpolateVec` `b/a` ratio
+precompute** is NOT rejected but deferred — it removes a vector divide yet is not
+byte-exact (scalar precompute vs vector divide shifts float bits); see Questions_deferred.
+
+---
+
+## 2026-06-30 — inv_quant_ac LAZY-fill LUT (fill on first use) — REJECTED (data race), EAGER landed instead
+
+The `inv_quant_ac` 256-entry LUT was landed (commit `9e685f77`) to replace a per-block
+float division with a load. The **lazy** variant — `RecomputeFromGlobalScale` only
+invalidates a `ready` flag, and the table is filled on the first `inv_quant_ac()` call —
+was considered (and modeled favourably in a single-threaded flipflop) but **rejected as a
+data race.** `inv_quant_ac` is read by `QuantizeRoundtripYBlockAC` →
+`ComputeCoefficients(group_idx, …)`, which runs **per-group in parallel** (RunOnPool) on
+the single shared `enc_state->shared.quantizer`. A lazy fill would perform the table WRITE
+(and `ready`-flag write) during that parallel phase: concurrent writers to the same
+addresses + an unsynchronized flag = UB, with a real torn-read window (a thread can see
+`ready==true` without a happens-before on the array stores). The single-threaded flipflop
+could not surface this.
+
+**Landed instead: EAGER fill** in the single-threaded `RecomputeFromGlobalScale`. Parallel
+groups only READ the table, under the same "global scale is frozen during encode"
+invariant the pre-existing `inv_global_scale_` read already relies on (if that invariant
+were violated, today's division would already be racy). Eager was also the faster arm in
+the flipflop (~+13-15% vs lazy ~+5-12% min_ms), and its only downside — a 256-division
+refill on the decode path — is negligible (Decode recomputes once and never reads the
+table). Note the headline %saved is on the `inv_quant_ac` access pattern in isolation; the
+division is amortized over each block's coefficient loop, so the end-to-end encode gain is
+a fraction of that. Real WASM enc A/B is the integrator confirmation gate.

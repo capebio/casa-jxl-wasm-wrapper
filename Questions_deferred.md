@@ -925,3 +925,80 @@ Also deferred (measured, kept-but-neutral, recorded under rejected-opts 2026-06-
 hidden under gather/transcendental latency). It is kept (byte-exact, defensive `len>=n`
 parity with the SIMD asserts), but its only real beneficiary is a hypothetical scalar-only
 build — re-measure there if such a target ships.
+## 2026-06-30 — quant_weights / quantizer deferred (3rd-hottest-file pass)
+
+Landed byte-exact this pass on `perf/quant-weights-byteexact-jun30-q9z3k` (submodule,
+capebio, off `00f4d7fc`): GetQuantWeights channel-fusion + num_bands==1 hoist,
+ComputeQuantTable direct-write into inv_table, SetQuantField buffer reuse. Harness
+`tools/quant_weights_equiv_ab.cc` (833 configs + recip, 0 fails). Deferred — all
+need measured WASM A/B and/or are not byte-exact-trivial:
+
+1. **Per-table, directional lazy materialization of DequantMatrices.** First
+   `EnsureComputed` allocates the whole universe (~3.01 MiB: table+inv for all 2056
+   blocks × 3) even for a DCT-only frame that needs ~1.5 KiB. Biggest first-paint/peak
+   win, but the riskiest: `InvMatrix` has deliberately-zeroed low-frequency entries
+   (`quant_weights.cc` low-freq zeroing) so it is NOT a pure reciprocal — cannot blindly
+   split dequant/inverse storage without auditing every `InvMatrix` caller. Use a
+   `computed_table_mask_` + dual mode (table-granular for sparse decoder requests,
+   one contiguous slab for all-strategy encoder requests). Keep table construction
+   single-threaded before workers read matrix pointers.
+2. **`inv_quant_ac` 256-entry LUT.** `inv_quant_ac(q) = inv_global_scale_ / q` divides
+   per call; valid `q` clamped to [1,256]. Fill `inv_quant_ac_[1..256]` once in
+   `RecomputeFromGlobalScale` (bit-exact, q≤256 exact in float). Worth it only if the
+   call is genuinely in the per-block hot path — profile call rate first; +1 KiB/quantizer.
+3. **`InterpolateVec` `b/a` ratio precompute.** Removes a vector divide per interp, but
+   NOT byte-exact (scalar precompute vs vector `Div` shifts float bits). Bench + matrix
+   bit-hash across HWY targets before landing; only after the byte-exact set is stable.
+4. **`AdjustQuantBias` all-small (0/±1) fast path.** Skip `ApproximateReciprocal` when
+   `AllTrue(is_01)`. Output-exact but distribution-sensitive (the `AllTrue` reduction
+   can lose on dense coefficient blocks). Needs sparse-vs-dense corpus bench.
+5. **SIMD `SetQuantFieldRect`** (currently scalar `ClampVal(qf*scale+0.5)`). MulAdd →
+   clamp-in-float → truncate. Win only for large adaptive-quant maps; setup/dispatch
+   can lose on 8×8. Bench-gated.
+6. **Native-wide `GetQuantWeights`** (it hard-caps `DF4 = HWY_CAPPED(float,4)`; leaves
+   AVX2/512 throughput on the table for 16×16+). Low priority for the WASM target (no
+   gain there); only if native desktop matters after the alloc/cache fixes.
+7. **Trivial cleanliness.** LANDED in commit `9c848f62` (byte-exact by construction):
+   RAW `new std::vector<int>(std::move(qtable))` (was default-construct + copy from named
+   rvalue), and drop the constructor's redundant `inv_quant_dc_` assignment
+   (RecomputeFromGlobalScale already sets it with the identical expression). STILL
+   deferred: `predefined * kNumQuantTables + table` library indexing (dormant — 1
+   predefined set today, pure future-proofing), and init DC padding lane
+   `mul_dc_[3]/inv_mul_dc_[3] = 1.0f`. The DC-lane init is NOT shippable as "byte-exact"
+   without auditing the 4 raw-pointer `MulDC()`/`InvMulDC()` consumers (dec_frame.cc:354,
+   dec_modular.cc:477, enc_cache.cc:244, enc_modular.cc:1860) for a 4-wide load that uses
+   lane 3 — if one exists it currently reads uninitialized memory and the init would
+   change output (a latent-bug fix, not byte-exact); if none, it is harmless robustness.
+8. **inv_quant_ac 256-LUT — re-evaluated, staying deferred (now with flipflop model
+   data).** Single caller (`enc_group.cc:397`) calls it once per BLOCK and broadcasts the
+   result with `Set`, so it removes one division per block, not per coefficient — and the
+   div is already amortized over the block's ~kDCTBlockSize/lanes coefficient ops. The
+   eager LUT refill is 256 divisions on every `RecomputeFromGlobalScale` (ctor + 2× in
+   `ComputeGlobalScaleAndQuant` + `ScaleGlobalScale` + `Decode`), so it does pure-waste
+   work on the DECODE path (only the encoder reads the table). Byte-exact + bounded
+   ([1,256]).
+
+   Three byte-identical strategies flipflopped (`.flipflop/tests/inv-quant-ac-lazyfill.mjs`,
+   JS model of the encode access pattern — directional only, NOT real WASM): DIV (current)
+   vs EAGER LUT (refill every recompute) vs LAZY LUT (fill once on first use, decode
+   skips). `equal()` = bit-identical accumulator (byte-exact re-proof). Result (min_ms,
+   clean mandel workload; all rows trust:low — V8 GC/JIT noise + desktop thermal-unknown):
+   EAGER ~+13-15%, LAZY ~+5-12% vs DIV; EAGER ≳ LAZY on encode (lazy's `if(!ready)` branch
+   + first-block fill). So LAZY's only real edge is removing the decode-path refill.
+
+   LANDED as EAGER in commit `9e685f77` (byte-exact). Variant decision reversed from
+   "prefer lazy": `inv_quant_ac` is read concurrently by the per-group parallel
+   `ComputeCoefficients` on the shared `enc_state->shared.quantizer`, so a lazy
+   fill-on-first-use would WRITE the table during the parallel phase = data race (UB) —
+   invisible to the single-threaded flipflop. Eager fills in the single-threaded
+   `RecomputeFromGlobalScale`; parallel groups only read, under the same "global scale
+   frozen during encode" invariant the existing `inv_global_scale_` read already depends
+   on. Eager was also the faster arm; its only cost (decode-path refill) is 256 divs per
+   decode recompute = negligible. Real end-to-end gain is a fraction of encode (div is
+   amortized over the block coefficient loop) — real WASM enc A/B remains the integrator
+   confirmation gate. Lazy-fill rejected (see docs/1 rejected optimizations.md).
+
+Integrator gate for the landed branch: WASM enc A/B (fusion's real FastPowf/sqrt gain is
+codegen-dependent; harness microbench is scalar/pow-dominated = 1.17x floor, not the
+SIMD number) + full libjxl compile (third_party submodules were not init in the worktree,
+so no real compile ran — scalar harness proves the loop-restructure byte-exact only).
