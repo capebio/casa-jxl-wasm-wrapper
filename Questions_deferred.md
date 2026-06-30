@@ -771,3 +771,30 @@ need the integrator's full toolchain and are deferred:
    semantics), but the workflow gates output-shape changes on decode/enc SHA, not theory.
 
 Harness to reproduce timing: `clang++ -O3 -std=c++17 tools/enc_bit_writer_append_ab.cc -o bw_ab`.
+## 2026-06-30 — jxl_casaencoder output-drain fix (branch fix/jxl-encoder-output-drain-jun30-d7k3)
+
+Landed: commit emitted tail (`set_len(pos)`) before every `reserve()` in the
+`JxlEncoderProcessOutput` drain loop (Vec only preserves bytes below `len` across a
+reallocation, so the prior loop silently dropped output on `JXL_ENC_NEED_MORE_OUTPUT`);
+`truncate(base)` on encoder error so `encode_into` is length-atomic; `Cell<f32>` →
+plain `&mut self` field; folded alpha validation into the planar-extra pass (rejects
+duplicate planar alpha); lossless output hint now counts planar extra channels.
+Verified: 12/12 `jxl_casaencoder` lib tests pass under MSVC, incl. a forced-growth
+regression that proves byte-for-byte preservation across the grow path.
+
+Deferred (spec author flagged; each needs libjxl FFI-version confirmation + a corpus
+benchmark before it can land):
+
+1. **Chunked/streaming input** (`JxlEncoderAddChunkedFrame` machinery) — would let the
+   encoder ingest the frame in pieces instead of one `AddImageFrame`. Memory win only on
+   very large frames; needs FFI binding + bench.
+2. **Custom allocator** (`JxlMemoryManager`) — route libjxl allocations through a Rust
+   arena/pool. Unproven benefit for the one-shot encode path; FFI-version dependent.
+3. **Output processor** (`JxlEncoderSetOutputProcessor`) — drain via callback instead of
+   the `ProcessOutput` pull loop. Alternative to the fix above, not a replacement; only
+   worth it if a zero-copy sink (mmap/OPFS) materialises. Needs corpus bench vs the
+   current pull loop.
+
+No flipflop tournament run: this is a correctness fix, not two valid perf variants — the
+old drain path was unsound (output corruption), so there is no "least optimal" to remove.
+The buffer-hint allocation strategy (bpp_ema EMA) is unchanged in shape, only made sound.
