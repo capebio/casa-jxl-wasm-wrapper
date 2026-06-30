@@ -45,6 +45,10 @@ struct HuffTable {
     // fallback; `fast8` by peek(8) for the hot ≤8-bit path.
     lookup: Vec<u16>, // index = peek(max_bits). 0 if invalid.
     max_bits: u8,
+    // Largest Huffman *value* (category) in the table. Validated once against the
+    // SOF precision in `LjpegPlan::prepare`; lets the per-symbol decode skip the
+    // category-vs-precision guard entirely.
+    max_symbol: u8,
     // Fast 8-bit prefix table: 512 B (was 1 KiB as u32) → better L1 residency on
     // the per-symbol hot path. 0 means the code is longer than 8 bits — fall back
     // to `lookup`.
@@ -61,6 +65,7 @@ impl HuffTable {
         let mut code: u32 = 0;
         let mut idx = 0usize;
         let mut max_bits = 0u8;
+        let mut max_symbol = 0u8;
         for len_minus_1 in 0..16usize {
             let n = bits[len_minus_1] as usize;
             let code_len = (len_minus_1 + 1) as u8;
@@ -73,11 +78,15 @@ impl HuffTable {
                 if code >= limit {
                     bail!("ljpeg: oversubscribed huffman table");
                 }
-                codes.push((code_len, values[idx], code));
+                let value = values[idx];
+                codes.push((code_len, value, code));
                 idx += 1;
                 code += 1;
                 if code_len > max_bits {
                     max_bits = code_len;
+                }
+                if value > max_symbol {
+                    max_symbol = value;
                 }
             }
             code <<= 1;
@@ -108,7 +117,7 @@ impl HuffTable {
                 }
             }
         }
-        Ok(HuffTable { lookup, max_bits, fast8 })
+        Ok(HuffTable { lookup, max_bits, max_symbol, fast8 })
     }
 
 }
@@ -150,8 +159,6 @@ struct BitReader<'a, const COLLECT_STATS: bool> {
     bits: u64,
     nbits: u32,
     finished: bool,
-    real_in_buf: u32,
-    truncated: bool,
     // Diagnostics — only written when COLLECT_STATS, so the production decode path
     // (decode_tile) carries no refill telemetry stores at all.
     fill_calls: u64,
@@ -167,8 +174,6 @@ impl<'a, const COLLECT_STATS: bool> BitReader<'a, COLLECT_STATS> {
             bits: 0,
             nbits: 0,
             finished: false,
-            real_in_buf: 0,
-            truncated: false,
             fill_calls: 0,
             bulk_hits: 0,
             slow_hits: 0,
@@ -180,6 +185,14 @@ impl<'a, const COLLECT_STATS: bool> BitReader<'a, COLLECT_STATS> {
         if COLLECT_STATS {
             self.fill_calls += 1;
         }
+        // Drop the already-consumed high bits once per refill instead of on every
+        // `consume`/`get_bits`. `peek`/`get_bits` ignore bits above `nbits` (they
+        // shift+mask the live window), so leaving stale high bits between refills
+        // is harmless; we only clear them here so the `<< 32` below cannot fold
+        // stale bits back into the live window. fill() is reached only when
+        // nbits < n ≤ 16, so `1 << nbits` never overflows.
+        debug_assert!(self.nbits < 16);
+        self.bits &= (1u64 << self.nbits).wrapping_sub(1);
         while self.nbits <= 48 && !self.finished {
             let remaining = self.src.len().saturating_sub(self.pos);
             // Fast bulk path: load 4 non-FF bytes as one 32-bit word.
@@ -197,7 +210,6 @@ impl<'a, const COLLECT_STATS: bool> BitReader<'a, COLLECT_STATS> {
                         | (b3 as u64);
                     self.bits = (self.bits << 32) | word;
                     self.nbits += 32;
-                    self.real_in_buf += 32;
                     self.pos += 4;
                     if COLLECT_STATS {
                         self.bulk_hits += 1;
@@ -226,7 +238,6 @@ impl<'a, const COLLECT_STATS: bool> BitReader<'a, COLLECT_STATS> {
                     self.pos += 1;
                     self.bits = (self.bits << 8) | 0xFF;
                     self.nbits += 8;
-                    self.real_in_buf += 8;
                 } else {
                     // Marker — end of compressed stream.
                     self.finished = true;
@@ -235,7 +246,6 @@ impl<'a, const COLLECT_STATS: bool> BitReader<'a, COLLECT_STATS> {
             } else {
                 self.bits = (self.bits << 8) | (b as u64);
                 self.nbits += 8;
-                self.real_in_buf += 8;
             }
         }
     }
@@ -257,47 +267,38 @@ impl<'a, const COLLECT_STATS: bool> BitReader<'a, COLLECT_STATS> {
         }
     }
 
+    /// Drop `n` bits from the live window. Returns `false` (truncated) if fewer
+    /// than `n` real bits remain — `nbits` is exactly the count of real buffered
+    /// bits (zero padding past end-of-stream is virtual, applied only inside
+    /// `peek`), so `nbits < n` is the truncation signal that `real_in_buf` used
+    /// to carry. No mask: stale high bits are cleared lazily in `fill`.
     #[inline(always)]
-    fn consume(&mut self, n: u32) {
-        if n > self.real_in_buf {
-            self.truncated = true;
-            self.real_in_buf = 0;
-        } else {
-            self.real_in_buf -= n;
-        }
-        if self.nbits >= n {
-            self.nbits -= n;
-            self.bits &= (1u64 << self.nbits).wrapping_sub(1);
-        } else {
+    fn consume(&mut self, n: u32) -> bool {
+        if self.nbits < n {
             self.nbits = 0;
             self.bits = 0;
+            return false;
         }
+        self.nbits -= n;
+        true
     }
 
+    /// Read and drop `n` bits (n ≤ 16). Returns `None` (truncated) if fewer than
+    /// `n` real bits remain after a refill, replacing the old `truncated` flag.
     #[inline(always)]
-    fn get_bits(&mut self, n: u32) -> u32 {
+    fn get_bits(&mut self, n: u32) -> Option<u32> {
         if n == 0 {
-            return 0;
+            return Some(0);
         }
         if self.nbits < n {
             self.fill();
         }
-        if n > self.real_in_buf {
-            self.truncated = true;
+        if self.nbits < n {
+            return None;
         }
-        let avail = self.nbits.min(n);
-        let mut v = if avail > 0 {
-            ((self.bits >> (self.nbits - avail)) & ((1u64 << avail) - 1)) as u32
-        } else {
-            0
-        };
-        self.nbits -= avail;
-        self.bits &= (1u64 << self.nbits).wrapping_sub(1);
-        self.real_in_buf = self.real_in_buf.saturating_sub(avail);
-        if avail < n {
-            v <<= n - avail;
-        }
-        v
+        let v = ((self.bits >> (self.nbits - n)) & ((1u64 << n) - 1)) as u32;
+        self.nbits -= n;
+        Some(v)
     }
 }
 
@@ -306,12 +307,13 @@ fn extend(diff: i32, t: u32) -> i32 {
     if t == 0 {
         return 0;
     }
+    // Branchless sign-extend: residual signs are ~50/50, so the old `diff < half`
+    // branch is unpredictable. `(diff - half) >> 31` is all-ones when diff < half
+    // (the negative case) and zero otherwise; ANDing the `(1<<t)-1` correction by
+    // that mask reproduces `diff - ((1<<t)-1)` vs `diff` with no branch.
     let half = 1i32 << (t - 1);
-    if diff < half {
-        diff - ((1i32 << t) - 1)
-    } else {
-        diff
-    }
+    let neg_mask = (diff - half) >> 31;
+    diff - (neg_mask & ((1i32 << t) - 1))
 }
 
 #[derive(Default, Debug)]
@@ -583,11 +585,24 @@ impl LjpegPlan {
 
         // Resolve the Huffman table for each scan component once, so the kernels
         // index a small Arc array instead of re-looking-up by DHT id per pixel.
+        // Also validate the table's largest category against precision here, once
+        // per table, so the per-symbol decode carries no category-vs-precision
+        // guard. A category t means t magnitude bits (t == precision is the
+        // T.81 Annex H special diff), so any value > precision is malformed.
         let mut tables: [Option<Arc<HuffTable>>; MAX_COMPONENTS] = Default::default();
         for c in 0..cps {
             let id = sos.dht_id[c] as usize;
             match &dhts[id] {
-                Some(t) if t.max_bits > 0 => tables[c] = Some(t.clone()),
+                Some(t) if t.max_bits > 0 => {
+                    if t.max_symbol > sof.precision {
+                        bail!(
+                            "ljpeg: category {} exceeds precision {}",
+                            t.max_symbol,
+                            sof.precision
+                        );
+                    }
+                    tables[c] = Some(t.clone());
+                }
                 _ => bail!("ljpeg: missing huffman table {}", id),
             }
         }
@@ -725,45 +740,40 @@ fn next_category<const COLLECT_STATS: bool>(
             category_hist[t as usize] += 1;
         }
     }
-    br.consume(consume as u32);
-    if br.truncated {
+    if !br.consume(consume as u32) {
         bail!("ljpeg: entropy bitstream exhausted");
     }
     Ok(t)
 }
 
-/// Resolve the signed predictor difference for category `t`. `PRECISION` is a
-/// const so the category/precision guards fold at compile time. Bit-identical
-/// to the original inline diff math; shared by the monomorphized kernels.
+/// Resolve the signed predictor difference for category `t`. Category bounds
+/// (`t ≤ precision`, and `t == 16` only when `precision == 16`) are validated
+/// once per table in [`LjpegPlan::prepare`] (`max_symbol ≤ precision`), so this
+/// per-symbol path carries no precision guard. Shared by the kernels.
 #[inline(always)]
-fn decode_diff<const PRECISION: u8, const COLLECT_STATS: bool>(
+fn decode_diff<const COLLECT_STATS: bool>(
     br: &mut BitReader<'_, COLLECT_STATS>,
     t: u8,
     get_bits_calls: &mut u64,
     get_bits_total_bits: &mut u64,
 ) -> Result<i32> {
-    if t == 16 {
-        // JPEG T.81 Annex H: category=precision means diff = -2^(P-1) with no
-        // additional bits read. Only valid when precision is exactly 16.
-        if PRECISION != 16 {
-            bail!("ljpeg: category 16 exceeds precision {}", PRECISION);
-        }
-        return Ok(-32768i32);
-    } else if t > PRECISION {
-        bail!("ljpeg: category {} exceeds precision {}", t, PRECISION);
-    }
     if t == 0 {
         return Ok(0);
+    }
+    if t == 16 {
+        // JPEG T.81 Annex H: category == precision (== 16) ⇒ diff = -2^15 with no
+        // magnitude bits read. Only reachable when precision is exactly 16; the
+        // prepare-time max_symbol ≤ precision check rejects t == 16 otherwise.
+        return Ok(-32768i32);
     }
     if COLLECT_STATS {
         *get_bits_calls += 1;
         *get_bits_total_bits += t as u64;
     }
-    let bits = br.get_bits(t as u32) as i32;
-    if br.truncated {
-        bail!("ljpeg: entropy bitstream exhausted");
+    match br.get_bits(t as u32) {
+        Some(bits) => Ok(extend(bits as i32, t as u32)),
+        None => bail!("ljpeg: entropy bitstream exhausted"),
     }
-    Ok(extend(bits, t as u32))
 }
 
 /// Monomorphized single-component (CFA RAW) kernel. `PRECISION` is a const so
@@ -795,8 +805,10 @@ fn decode_c1<const PRECISION: u8, const COLLECT_STATS: bool>(
     let mut get_bits_total_bits = 0u64;
     let mut category_hist = [0u64; 17];
 
-    // Predictor-1 state: column-0 value of the previous row (scalar).
-    let mut prev_row_first = 0i32;
+    // Predictor-1 state: column-0 value of the previous row (scalar). Seeded to
+    // base_pred so row 0 / col 0 needs no `row == 0` special case (overwritten
+    // with the decoded value as each row's column 0 completes).
+    let mut prev_row_first = base_pred;
 
     for row in 0..height {
         let row_base = base + row * stride_pixels;
@@ -804,7 +816,7 @@ fn decode_c1<const PRECISION: u8, const COLLECT_STATS: bool>(
         let mut left = 0i32;
         for col in 0..width {
             let predictor = if col == 0 {
-                if row == 0 { base_pred } else { prev_row_first }
+                prev_row_first
             } else {
                 left
             };
@@ -813,7 +825,7 @@ fn decode_c1<const PRECISION: u8, const COLLECT_STATS: bool>(
                 &mut br, table, &mut fast8_hits, &mut slow_huffman_hits, &mut total_symbols,
                 &mut category_hist,
             )?;
-            let diff = decode_diff::<PRECISION, COLLECT_STATS>(
+            let diff = decode_diff::<COLLECT_STATS>(
                 &mut br, t, &mut get_bits_calls, &mut get_bits_total_bits,
             )?;
 
@@ -881,9 +893,11 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
     let mut get_bits_total_bits = 0u64;
     let mut category_hist = [0u64; 17];
 
-    // Column-0 value of the previous row, per component (scalars).
-    let mut prev0 = 0i32;
-    let mut prev1 = 0i32;
+    // Column-0 value of the previous row, per component (scalars). Seeded to
+    // base_pred so row 0 / col 0 needs no `row == 0` special case (each is
+    // overwritten with the decoded value as the row's column 0 completes).
+    let mut prev0 = base_pred;
+    let mut prev1 = base_pred;
 
     for row in 0..height {
         let row_base = base + row * stride_pixels;
@@ -894,7 +908,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
             let at_col0 = col == 0;
             // --- component 0 ---
             let pred0 = if at_col0 {
-                if row == 0 { base_pred } else { prev0 }
+                prev0
             } else {
                 left0
             };
@@ -902,7 +916,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
                 &mut br, table0, &mut fast8_hits, &mut slow_huffman_hits, &mut total_symbols,
                 &mut category_hist,
             )?;
-            let diff0 = decode_diff::<PRECISION, COLLECT_STATS>(
+            let diff0 = decode_diff::<COLLECT_STATS>(
                 &mut br, t0, &mut get_bits_calls, &mut get_bits_total_bits,
             )?;
             let val0 = pred0.wrapping_add(diff0);
@@ -911,7 +925,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
 
             // --- component 1 ---
             let pred1 = if at_col0 {
-                if row == 0 { base_pred } else { prev1 }
+                prev1
             } else {
                 left1
             };
@@ -919,7 +933,7 @@ fn decode_c2<const PRECISION: u8, const COLLECT_STATS: bool>(
                 &mut br, table1, &mut fast8_hits, &mut slow_huffman_hits, &mut total_symbols,
                 &mut category_hist,
             )?;
-            let diff1 = decode_diff::<PRECISION, COLLECT_STATS>(
+            let diff1 = decode_diff::<COLLECT_STATS>(
                 &mut br, t1, &mut get_bits_calls, &mut get_bits_total_bits,
             )?;
             let val1 = pred1.wrapping_add(diff1);
@@ -994,7 +1008,10 @@ fn decode_generic<const COLLECT_STATS: bool>(
     }
 
     // Per-component column-0 value of the previous row (stack, no heap alloc).
-    let mut prev_row_first = [0i32; MAX_COMPONENTS];
+    // Seeded to base_pred so row 0, col 0 needs no `row == 0` special case:
+    // each component's first-pixel predictor is base_pred, and it is overwritten
+    // with the decoded value as each row's column 0 completes.
+    let mut prev_row_first = [base_pred; MAX_COMPONENTS];
 
     let mut total_symbols = 0u64;
     let mut fast8_hits = 0u64;
@@ -1013,7 +1030,7 @@ fn decode_generic<const COLLECT_STATS: bool>(
             let mut raw_col = col * cps;
             for comp in 0..cps {
                 let predictor = if first_col {
-                    if row == 0 { base_pred } else { prev_row_first[comp] }
+                    prev_row_first[comp]
                 } else {
                     left[comp]
                 };
@@ -1025,30 +1042,12 @@ fn decode_generic<const COLLECT_STATS: bool>(
                     &mut category_hist,
                 )?;
 
-                if t == 16 {
-                    if precision != 16 {
-                        bail!("ljpeg: category 16 exceeds precision {}", precision);
-                    }
-                } else if t > precision {
-                    bail!("ljpeg: category {} exceeds precision {}", t, precision);
-                }
-                let diff = if t == 0 {
-                    0
-                } else if t == 16 {
-                    // JPEG T.81 Annex H: category=precision means diff = -2^(P-1)
-                    // with no additional bits read.
-                    -32768i32
-                } else {
-                    if COLLECT_STATS {
-                        get_bits_calls += 1;
-                        get_bits_total_bits += t as u64;
-                    }
-                    let bits = br.get_bits(t as u32) as i32;
-                    if br.truncated {
-                        bail!("ljpeg: entropy bitstream exhausted");
-                    }
-                    extend(bits, t as u32)
-                };
+                // Category bounds were validated per table in prepare; decode_diff
+                // (shared with the monomorphized kernels) handles t==0 / t==16 /
+                // magnitude-receive without a per-symbol precision guard.
+                let diff = decode_diff::<COLLECT_STATS>(
+                    &mut br, t, &mut get_bits_calls, &mut get_bits_total_bits,
+                )?;
 
                 let val = predictor.wrapping_add(diff);
                 left[comp] = val;
