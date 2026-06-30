@@ -578,12 +578,24 @@ need measured WASM A/B and/or are not byte-exact-trivial:
 6. **Native-wide `GetQuantWeights`** (it hard-caps `DF4 = HWY_CAPPED(float,4)`; leaves
    AVX2/512 throughput on the table for 16×16+). Low priority for the WASM target (no
    gain there); only if native desktop matters after the alloc/cache fixes.
-7. **Trivial cleanliness (not perf, deferred to keep this PR byte-exact-only):** RAW
-   move semantics (`new std::vector<int>(std::move(qtable))` + move-assign + self-assign
-   guard), `predefined * kNumQuantTables + table` library indexing (dormant: 1 predefined
-   set today), init DC padding lane `mul_dc_[3]/inv_mul_dc_[3] = 1.0f`, drop the
-   constructor's redundant `inv_quant_dc_` assignment (RecomputeFromGlobalScale already
-   sets it).
+7. **Trivial cleanliness.** LANDED in commit `9c848f62` (byte-exact by construction):
+   RAW `new std::vector<int>(std::move(qtable))` (was default-construct + copy from named
+   rvalue), and drop the constructor's redundant `inv_quant_dc_` assignment
+   (RecomputeFromGlobalScale already sets it with the identical expression). STILL
+   deferred: `predefined * kNumQuantTables + table` library indexing (dormant — 1
+   predefined set today, pure future-proofing), and init DC padding lane
+   `mul_dc_[3]/inv_mul_dc_[3] = 1.0f`. The DC-lane init is NOT shippable as "byte-exact"
+   without auditing the 4 raw-pointer `MulDC()`/`InvMulDC()` consumers (dec_frame.cc:354,
+   dec_modular.cc:477, enc_cache.cc:244, enc_modular.cc:1860) for a 4-wide load that uses
+   lane 3 — if one exists it currently reads uninitialized memory and the init would
+   change output (a latent-bug fix, not byte-exact); if none, it is harmless robustness.
+8. **inv_quant_ac 256-LUT — re-evaluated, staying deferred.** Single caller
+   (`enc_group.cc:397`) calls it once per BLOCK and broadcasts the result with `Set`, so
+   it removes one division per block, not per coefficient. The LUT refill is 256
+   divisions on every `RecomputeFromGlobalScale` (called 2–3× per `ComputeGlobalScaleAndQuant`
+   plus each `ScaleGlobalScale`), so for small/few-block frames it can do MORE total
+   divisions than it saves. Byte-exact + bounded ([1,256]), but net timing ambiguous and
+   not measurable on the scalar harness → needs a real WASM enc A/B before landing.
 
 Integrator gate for the landed branch: WASM enc A/B (fusion's real FastPowf/sqrt gain is
 codegen-dependent; harness microbench is scalar/pow-dominated = 1.17x floor, not the
