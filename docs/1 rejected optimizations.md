@@ -1264,3 +1264,20 @@ encodes would run multithreaded too and pay runner overhead on images far below 
 encoder reuse that this branch exists to provide. Fails rule-10's "provably never worse".
 The pyramid path already banks this win correctly because its full-res encode is a
 *separate, post-barrier* `Encoder` distinct from the per-level fan-out.
+## XYB-GATHER-R1 — 16-px gather unroll (avx2 `pixels_to_xyb_avx2`) — REJECTED (flip)
+
+Branch `perf/xyb-gather-scalarlut-jun30-g3w7`. While exploring the XYB gather seam,
+a control candidate `pixels_to_xyb_avx2_gather16` kept the three `vgatherdps` but
+unrolled to 16 px/iter with two independent gather chains to expose gather-level ILP.
+
+3-way flip (`examples/xyb_gather_flip.rs`, i7-10850H Comet Lake, 1/6/24 MP, bit-exact):
+- gather16 vs gather baseline: only **+8–14%** (`1.08–1.16×`).
+- scalar-LUT assembly vs same baseline: **+61–66%** (`2.6–2.9×`).
+
+The gather unroll barely moves the needle because the bottleneck is `vgatherdps`
+*throughput* on the gather execution port, not latency that ILP could hide — so adding
+parallel gather chains still competes for the same port. The scalar-LUT route removes
+the gathers entirely and wins decisively, so gather16 was dropped (code removed; result
+kept here so the unroll is not re-attempted). The scalar-LUT kernel
+(`pixels_to_xyb_avx2_scalar_lut`) is now the wired AVX2 path; the gather baseline is
+retained only as the flip's A-arm + the bit-exact reference oracle.
