@@ -589,13 +589,27 @@ need measured WASM A/B and/or are not byte-exact-trivial:
    dec_modular.cc:477, enc_cache.cc:244, enc_modular.cc:1860) for a 4-wide load that uses
    lane 3 — if one exists it currently reads uninitialized memory and the init would
    change output (a latent-bug fix, not byte-exact); if none, it is harmless robustness.
-8. **inv_quant_ac 256-LUT — re-evaluated, staying deferred.** Single caller
-   (`enc_group.cc:397`) calls it once per BLOCK and broadcasts the result with `Set`, so
-   it removes one division per block, not per coefficient. The LUT refill is 256
-   divisions on every `RecomputeFromGlobalScale` (called 2–3× per `ComputeGlobalScaleAndQuant`
-   plus each `ScaleGlobalScale`), so for small/few-block frames it can do MORE total
-   divisions than it saves. Byte-exact + bounded ([1,256]), but net timing ambiguous and
-   not measurable on the scalar harness → needs a real WASM enc A/B before landing.
+8. **inv_quant_ac 256-LUT — re-evaluated, staying deferred (now with flipflop model
+   data).** Single caller (`enc_group.cc:397`) calls it once per BLOCK and broadcasts the
+   result with `Set`, so it removes one division per block, not per coefficient — and the
+   div is already amortized over the block's ~kDCTBlockSize/lanes coefficient ops. The
+   eager LUT refill is 256 divisions on every `RecomputeFromGlobalScale` (ctor + 2× in
+   `ComputeGlobalScaleAndQuant` + `ScaleGlobalScale` + `Decode`), so it does pure-waste
+   work on the DECODE path (only the encoder reads the table). Byte-exact + bounded
+   ([1,256]).
+
+   Three byte-identical strategies flipflopped (`.flipflop/tests/inv-quant-ac-lazyfill.mjs`,
+   JS model of the encode access pattern — directional only, NOT real WASM): DIV (current)
+   vs EAGER LUT (refill every recompute) vs LAZY LUT (fill once on first use, decode
+   skips). `equal()` = bit-identical accumulator (byte-exact re-proof). Result (min_ms,
+   clean mandel workload; all rows trust:low — V8 GC/JIT noise + desktop thermal-unknown):
+   EAGER ~+13-15%, LAZY ~+5-12% vs DIV; EAGER ≳ LAZY on encode (lazy's `if(!ready)` branch
+   + first-block fill). So LAZY's only real edge is removing the decode-path refill.
+
+   Decision: do NOT land on trust:low JS evidence. Unlike the shipped byte-exact work
+   (pure work-removal), a LUT ADDS mutable state + a branch to a hot inline; needs a real
+   WASM enc A/B (where div is relatively costlier, so the LUT win is likely larger) before
+   committing. If landed, prefer LAZY (no decode penalty) over EAGER.
 
 Integrator gate for the landed branch: WASM enc A/B (fusion's real FastPowf/sqrt gain is
 codegen-dependent; harness microbench is scalar/pow-dominated = 1.17x floor, not the
