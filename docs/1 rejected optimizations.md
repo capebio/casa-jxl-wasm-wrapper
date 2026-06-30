@@ -1179,3 +1179,44 @@ path was proven byte-exact-equal to the register path then removed via interleav
 **Already present, not re-applied:** the per-chunk pairwise integer reduction + single
 Kahan step (proposal called this new) was already shipped as FS-002. The "register
 reduction of chunk_sum" and "widen luma² unsigned" ideas were folded into FS-003.
+## ENC-CASA-R1: Reset the output-reserve EMA on a settings change (2026-06-30)
+
+**Target:** `jxl_casaencoder.rs` `set_raw` / `set_options` / `options_mut`.
+**Proposed (ChatGPT pass 1):** Discard the reserve-hint estimate whenever a compression-affecting
+setting changes, so a q95→q50 variant switch doesn't provision the next output from a stale ratio.
+**Rejected:** The dominant caller (`casabio_encode.rs`) reuses **one** `Encoder` across the
+thumb→preview→full ladder of the *same image at similar quality*, calling `set_options` between each
+level. Resetting on `set_options` throws away the warm-up the small levels build for the full-res
+encode — a regression on the hot path. The companion fix (normalize the EMA by input footprint, branch
+`perf/casaencoder-hint-norm-k9x`) makes the metric format/scale-stable, so reuse no longer needs a
+reset at all; a big quality swing merely over-reserves from the seed by ≤33% for one frame (safe, no
+grow). Reset removed; normalization kept.
+
+## ENC-CASA-R2: Skip the default sRGB/linear color-encoding FFI on `color == None` (2026-06-30)
+
+**Target:** `jxl_casaencoder.rs` color-encoding block.
+**Proposed (ChatGPT pass 3 #5):** When `opts.color` is `None`, omit `JxlColorEncodingSetToSRGB` /
+`SetColorEncoding` and rely on libjxl's documented default (nonlinear sRGB for int, linear for float).
+**Rejected:** Not provably byte-exact. The default-encoding path inside libjxl can signal the color
+space differently in the codestream than an explicit `SetColorEncoding`, so output bytes are not
+guaranteed identical — and this file's contract is reset-clean, bit-exact reuse with roundtrip tests
+pinning exactness. The saving is 2 FFI calls per encode, negligible against the libjxl-internal encode
+that dominates wall time. Not worth the exactness risk for an unmeasurable gain.
+
+## ENC-CASA-R3: `align: 0` → `align_of::<S>()` on `JxlPixelFormat` (2026-06-30)
+
+**Target:** `jxl_casaencoder.rs` color + extra `JxlPixelFormat`.
+**Proposed (ChatGPT pass 3 #6):** Advertise the natural sample alignment of the tightly-packed typed
+slices so libjxl may use aligned-scanline assumptions.
+**Rejected (no evidence):** Self-described as "benchmark-gated"; no benchmark shows libjxl reads this
+field on the `AddImageFrame` copy path, and the encode is libjxl-internal-bound. Adding an unverified
+micro-tweak to the hottest encode file without measurement violates the "no tunables without evidence"
+rule. Left at `align: 0` (no requirement) until a measurement justifies it.
+
+## ENC-CASA-R4: `num_extra` u32-overflow guard (2026-06-30)
+
+**Target:** `jxl_casaencoder.rs` `num_extra = alpha_extra + frame.extra.len() as u32`.
+**Proposed (ChatGPT pass 1 #5):** Guard `frame.extra.len()` against `u32::MAX` truncation.
+**Rejected (theater):** Each extra channel is `width*height` borrowed samples; reaching `u32::MAX`
+(~4.3 billion) extra channels would exhaust memory by ~18 orders of magnitude first. The guard protects
+against a physically unreachable state and adds branch + error-variant noise to the validation path.

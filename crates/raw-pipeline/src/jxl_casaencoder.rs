@@ -115,13 +115,16 @@ impl ExtraKind {
 }
 
 /// A planar extra channel (hyperspectral band, depth, thermal, …). `data` is
-/// `width * height` samples, borrowed (zero-copy).
+/// `width * height` samples, borrowed until `encode` returns. libjxl copies the
+/// buffer during submission; the wrapper adds no Rust-side staging copy.
 pub struct ExtraChannel<'a, S: Sample> {
     pub kind: ExtraKind,
     pub data: &'a [S],
 }
 
-/// One image to encode. `color` is interleaved and borrowed (zero-copy in).
+/// One image to encode. `color` is interleaved and borrowed until `encode`
+/// returns; the wrapper hands it straight to libjxl without Rust-side staging
+/// (libjxl copies it internally during submission).
 pub struct Frame<'a, S: Sample> {
     /// Interleaved color (+ interleaved alpha when `alpha`); borrowed.
     pub color: &'a [S],
@@ -327,17 +330,27 @@ pub struct Encoder {
     /// Optional thread-parallel runner, owned; null when single-threaded.
     runner: *mut c_void,
     opts: EncodeOptions,
-    /// EMA of compressed-bytes-per-pixel for the *lossy* paths. Seeds the output
-    /// buffer hint on the next encode so the drain loop almost never grows after
-    /// the first frame. Interior-mutable (`Cell`) so the hot `&self` encode path
-    /// can update it; sound because `Encoder` is `!Sync`. Lossless ignores this
-    /// (its hint is the exact uncompressed footprint).
-    bpp_ema: Cell<f32>,
+    /// EMA of compressed-output bytes per *input* byte for the lossy paths.
+    /// Normalizing by the full submitted footprint (not pixel count) makes the
+    /// next-encode reserve hint stable when one held encoder is reused across
+    /// RGB/RGBA, 8/16-bit, float, or planar-extra frames — so it never needs a
+    /// reset on a format/quality change. Interior-mutable (`Cell`) so the hot
+    /// `&self` encode path can update it; sound because `Encoder` is `!Sync`.
+    /// Lossless ignores this (its hint is the exact uncompressed footprint).
+    output_ratio_ema: Cell<f32>,
 }
 
-/// Initial lossy bytes/pixel guess before the EMA warms. JXL q90 photos land
-/// ~0.1–0.4 bpp; 0.5 is conservative without zeroing many× the real output.
-const BPP_SEED: f32 = 0.5;
+/// Initial lossy output/input ratio before the EMA warms. Equals the prior
+/// 0.5 bytes/pixel seed for RGB8 (0.5 / 3 source bytes), so the warmed behaviour
+/// on the dominant 8-bit path is unchanged.
+const OUTPUT_TO_INPUT_SEED: f32 = 1.0 / 6.0;
+/// Reserve-hint clamp. Floor avoids many tiny grows on small frames; ceiling
+/// caps the speculative reservation for very large inputs.
+const OUTPUT_HINT_MIN: usize = 1 << 16;
+const OUTPUT_HINT_MAX: usize = 256 << 20;
+/// Lossless output ≈ uncompressed input; this slack covers codestream headers
+/// so the final grow almost never fires.
+const LOSSLESS_OUTPUT_OVERHEAD: usize = 1 << 14;
 
 // libjxl looks up its LCMS context per-use (not stored), same justification as
 // upstream: safe to move across threads, not to share.
@@ -354,7 +367,7 @@ impl Encoder {
             enc,
             runner: ptr::null_mut(),
             opts,
-            bpp_ema: Cell::new(BPP_SEED),
+            output_ratio_ema: Cell::new(OUTPUT_TO_INPUT_SEED),
         })
     }
 
@@ -484,6 +497,17 @@ impl Encoder {
             }
         }
 
+        // Exact source footprint submitted to libjxl: interleaved color samples
+        // plus every planar extra channel. Drives the output-reserve hint below;
+        // including the extras keeps the lossless reserve from under-budgeting
+        // wide spectral/depth stacks. Saturating: the per-channel sizes were
+        // already validated against `frame.color.len()`, so this cannot wrap on
+        // any input libjxl would accept.
+        let total_samples = px
+            .saturating_mul(frame.interleaved_channels() as usize)
+            .saturating_add(px.saturating_mul(frame.extra.len()));
+        let input_bytes = total_samples.saturating_mul(std::mem::size_of::<S>());
+
         let enc = self.enc;
 
         // ── parallel runner (must precede basic info / first frame) ────────
@@ -600,7 +624,7 @@ impl Encoder {
             set_opt(fs, enc, id, val)?;
         }
 
-        // ── add interleaved color frame (zero-copy) ────────────────────────
+        // ── add interleaved color frame (no Rust-side staging; libjxl copies) ─
         let pf = ffi::JxlPixelFormat {
             num_channels: frame.interleaved_channels(),
             data_type: S::data_type(),
@@ -619,7 +643,7 @@ impl Encoder {
             enc,
         )?;
 
-        // ── supply planar extra-channel buffers (zero-copy) ────────────────
+        // ── supply planar extra-channel buffers (no Rust-side staging) ─────
         let pf1 = ffi::JxlPixelFormat {
             num_channels: 1,
             data_type: S::data_type(),
@@ -649,20 +673,12 @@ impl Encoder {
         // wrote. `out`'s len stays at `base` for the whole loop, so the existing
         // append-and-truncate semantics of `encode_into` are preserved exactly.
         //
-        // Rate-aware hint: lossless budgets the exact uncompressed pixel footprint
-        // (worst case). Lossy seeds from the per-encoder EMA of compressed
-        // bytes/pixel (warms to the real ratio after the first frame → the grow
-        // branch below almost never fires). Clamped to [64 KiB, 256 MiB].
-        let px_count = (frame.width as usize).saturating_mul(frame.height as usize);
+        // Rate-aware hint (see `output_hint_bytes`): lossless budgets the exact
+        // uncompressed footprint (color + extras); lossy scales the same
+        // footprint by the warmed output/input EMA, so the grow branch below
+        // almost never fires after the first frame. Clamped to [64 KiB, 256 MiB].
         let lossy = !matches!(self.opts.rate, Rate::Lossless);
-        let hint_bytes = if lossy {
-            ((px_count as f32) * self.bpp_ema.get()) as usize
-        } else {
-            px_count
-                .saturating_mul(std::mem::size_of::<S>())
-                .saturating_mul(frame.interleaved_channels() as usize)
-        }
-        .clamp(1 << 16, 256 << 20);
+        let hint_bytes = output_hint_bytes(input_bytes, lossy, self.output_ratio_ema.get());
 
         let base = out.len();
         out.reserve(hint_bytes); // raw capacity; not zeroed
@@ -677,10 +693,11 @@ impl Encoder {
             pos += written;
             if st == ffi::JxlEncoderStatus::JXL_ENC_SUCCESS {
                 out.set_len(pos); // commit only the bytes libjxl wrote
-                if lossy && px_count > 0 {
-                    let bpp = (pos - base) as f32 / px_count as f32;
+                if lossy && input_bytes != 0 {
+                    let ratio = (pos - base) as f64 / input_bytes as f64;
                     // 50/50 EMA: tracks content drift without overreacting.
-                    self.bpp_ema.set(0.5 * self.bpp_ema.get() + 0.5 * bpp);
+                    self.output_ratio_ema
+                        .set(0.5 * self.output_ratio_ema.get() + 0.5 * ratio as f32);
                 }
                 break;
             } else if st == ffi::JxlEncoderStatus::JXL_ENC_NEED_MORE_OUTPUT {
@@ -710,6 +727,20 @@ impl Drop for Encoder {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+/// Reserve hint for the output drain, computed without initializing the bytes.
+/// `input_bytes` is the exact source footprint submitted to libjxl (interleaved
+/// color samples plus every planar extra). Lossy scales it by the warmed
+/// output/input EMA; lossless reserves the footprint plus header slack. Both are
+/// clamped to `[OUTPUT_HINT_MIN, OUTPUT_HINT_MAX]`.
+fn output_hint_bytes(input_bytes: usize, lossy: bool, output_ratio: f32) -> usize {
+    let estimate = if lossy {
+        (input_bytes as f64 * output_ratio as f64) as usize
+    } else {
+        input_bytes.saturating_add(LOSSLESS_OUTPUT_OVERHEAD)
+    };
+    estimate.clamp(OUTPUT_HINT_MIN, OUTPUT_HINT_MAX)
+}
 
 /// Like `check_status` but also surfaces the libjxl error code for diagnostics.
 unsafe fn check_enc(
@@ -782,6 +813,28 @@ mod tests {
     fn ramp_u8(channels: u32) -> Vec<u8> {
         let n = (W * H * channels) as usize;
         (0..n).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn output_hint_scales_with_total_input_footprint() {
+        // Lossy hint scales with submitted bytes, not pixel count: doubling the
+        // footprint (alpha / a planar plane / 8→16 bit) doubles the reservation.
+        assert_eq!(output_hint_bytes(1 << 20, true, 0.5), 512 << 10);
+        assert_eq!(output_hint_bytes(2 << 20, true, 0.5), 1 << 20);
+        // Lossless reserves the exact footprint plus header slack.
+        assert_eq!(
+            output_hint_bytes(1 << 20, false, OUTPUT_TO_INPUT_SEED),
+            (1 << 20) + LOSSLESS_OUTPUT_OVERHEAD,
+        );
+        // Clamp floor holds for tiny / zero inputs.
+        assert_eq!(output_hint_bytes(0, true, 0.5), OUTPUT_HINT_MIN);
+        // RGB8 seed reproduces the old 0.5 bytes/pixel reservation exactly
+        // (px chosen above the 64 KiB clamp floor so the equality is real).
+        let px = 1usize << 18;
+        assert_eq!(
+            output_hint_bytes(px * 3, true, OUTPUT_TO_INPUT_SEED),
+            (px as f64 * 0.5) as usize,
+        );
     }
 
     // ── per-sample-type lossless round-trips (bit-exact for int) ────────────

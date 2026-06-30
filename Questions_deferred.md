@@ -888,3 +888,70 @@ needs the hash; exposure/contrast triage (`mean_luma`, `luma_variance`) does not
 separate metrics-only entry (no hash, no `vpmulld` dependency chain) would let those
 callers run faster. Worth it only as a deliberate API split with a real caller that wants
 metrics without the change-id — not a runtime flag inside the hot loop.
+## jxl_casaencoder.rs — deferred structural levers (2026-06-30)
+
+Context: final optimization pass on the encoder wrapper. The landed change
+(`perf/casaencoder-hint-norm-k9x`) is allocation-only and byte-exact. The wrapper
+is now well-shaped; its remaining *real* cost is the libjxl-internal copy of every
+submitted plane, which no Rust-side micro-op can remove. The items below are the
+genuine large levers — all are **features needing new `jxl-ffi` bindings** and/or
+behavioral changes, so they are out of scope for a surgical byte-exact pass and are
+deferred to the integrator/owner with explicit cost notes.
+
+1. **Chunked / streaming zero-copy input (highest peak-memory lever).**
+   `JxlEncoderAddImageFrame` and `JxlEncoderSetExtraChannelBuffer` both **copy**
+   their input into libjxl before any compression — a full extra memory-bandwidth
+   pass over the whole RGB16/RGBA16 frame (the real RAW pipeline feeds u16). The
+   only way around it is a second input path on `JxlEncoderAddChunkedFrame` +
+   `JxlChunkedFrameInputSource` + `JxlEncoderSetOutputProcessor`, exposing
+   callbacks that hand libjxl bounded rectangles straight from the caller's
+   immutable buffers (also fixes padded-stride/tiled sources without a repack).
+   **Needs:** new bindings in `jxl-ffi` (chunked input source, chunked frame,
+   output processor, `FlushInput`); a separate `StreamingFrame`/`encode_to<W: Write>`
+   API kept distinct from the compact in-memory `encode_into` (do not mix the two
+   output modes — libjxl forbids it). Gate behind a `jxl-ffi` capability feature.
+   Benchmark buffering modes 1/2 (lower peak memory, may trade density/progressive
+   order). Use `AddImageFrame` for small images, chunked for large RAW frames.
+
+2. **Explicit auto-threaded reusable encoder + resizable runner.**
+   `Encoder::new` and the `encode_rgb8`/`encode_rgba8` helpers allocate no runner →
+   default single-threaded. `casabio_encode.rs` already calls `with_threads` on the
+   full-res path, but a `with_auto_threads` (via
+   `JxlThreadParallelRunnerDefaultNumWorkerThreads`) and a resizable runner
+   (`JxlResizableParallelRunner*` + `SuggestThreads(w,h)`) would right-size threads
+   per frame for mixed thumbnail/full-RAW batches and let a batch scheduler cap
+   `cores/active_encodes`. **Do NOT** silently auto-thread `new()` — a pipeline that
+   already parallelizes image jobs externally would oversubscribe. **Needs:** runner
+   bindings; behavioral (libjxl encode stays deterministic across thread counts, so
+   output is unaffected). Adopt at the call site, not by changing `new()`.
+
+3. **Native 10/12/14-bit-in-u16 input depth.** The `Sample for u16` impl hard-codes
+   `bits_per_sample = 16`; many RAW paths carry right-aligned 12/14-bit code values
+   in u16 storage. `JxlEncoderSetFrameBitDepth(JXL_BIT_DEPTH_FROM_CODESTREAM)` +
+   a per-`Frame` `bits_per_sample`/`IntegerInputRange` lets libjxl read them
+   correctly and can drop an upstream normalization pass. **Needs:** `SetFrameBitDepth`
+   binding + `Frame` field. Feature/behavioral — defer.
+
+4. **Mixed-precision planar extra channels.** `ExtraChannel<'a, S>` forces every
+   extra plane to the color sample type, which can force a conversion buffer (e.g.
+   float RGB + u16 depth/thermal, or mixed-precision HSI). libjxl accepts an
+   independent `JxlPixelFormat` + `JxlExtraChannelInfo` per extra channel. Replacing
+   the generic with a small tagged `ExtraData` enum (U8/U16/F16/F32) + optional
+   per-extra distance preserves native side-channel layout. **Needs:** API change
+   (breaks the `ExtraChannel<S>` signature); no FFI additions. Defer — out of scope
+   for a byte-exact pass, but the cleanest of the four to land.
+
+5. **Sealed `Sample` trait + `const` metadata.** `Sample` is `pub` and hands raw
+   bytes to C; a downstream impl on a padded type declared as a libjxl pixel format
+   is a footgun. Sealing it and turning `data_type()`/`bits_per_sample()` into assoc
+   `const`s removes the extension point and lets LLVM drop the tiny metadata call
+   layer. Pure safety/codegen; no external impls exist today, so it's churn-for-~0 —
+   deferred as optional hardening, not a perf win.
+
+**Measurement note (rule 9):** the landed hint change is not meaningfully
+flip-floppable — encode wall time is libjxl-internal-bound and a same-format reuse
+is neutral; the win is fewer first-frame grow-loop reallocations on u16/float/extra
+frames and a footprint-stable estimate across reuse. Adopted under rule 10
+(theoretically better metric, provably never worse, output byte-exact). A direct
+reserve-accuracy micro-benchmark (count grow-loop iterations per format) is possible
+if a number is wanted, but wall-time A/B would only measure libjxl noise.
