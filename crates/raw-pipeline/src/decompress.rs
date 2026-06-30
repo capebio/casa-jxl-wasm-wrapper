@@ -9,6 +9,17 @@
 /// Skip count before the bitstream begins (dcraw `fseek(ifp, 7, SEEK_CUR)`).
 const HEADER_SKIP: usize = 7;
 
+/// Cold, out-of-line constructor for the only error the decode hot-loop raises.
+/// `#[cold]`/`#[inline(never)]` keep the `format!` machinery out of the per-pixel
+/// inlined body so the hot loop stays dense in I-cache. (NB: the four per-pixel
+/// truncation checks are intentionally NOT folded — see `dec_variant` bisect and
+/// `docs/1 rejected optimizations.md` D9: folding them measured +13% on x86.)
+#[cold]
+#[inline(never)]
+fn bitstream_exhausted(width: usize, nrows: usize) -> String {
+    format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows)
+}
+
 pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Result<Vec<u16>, String> {
     decompress_rows(compressed, width, height, height)
 }
@@ -89,9 +100,13 @@ pub fn decompress_rows_into(
             let bitlen = 32 - carry_lo.leading_zeros() as i32;
             let nbits = (2 + i as i32).max(bitlen - i as i32).min(16) as usize;
 
+            // NB: per-read truncation checks are kept deliberately (NOT folded to
+            // one). They break the BitReader state-dependency chain between reads,
+            // letting truncation bookkeeping resolve off the inter-pixel critical
+            // path; folding them measured +13% on x86 (rejected D9 — see bisect).
             let sb = br.read_bits(3);
             if br.truncated {
-                return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+                return Err(bitstream_exhausted(width, nrows));
             }
             let low = (sb & 3) as i32;
             // arithmetic shift spreads top bit of the 3-bit field into a -1/0 mask
@@ -99,7 +114,7 @@ pub fn decompress_rows_into(
 
             let high0 = br.read_huff();
             if br.truncated {
-                return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+                return Err(bitstream_exhausted(width, nrows));
             }
             // Escape path reads (16 - nbits) bits — NOT a flat 16.  Then drop LSB.
             let high = if high0 == 12 {
@@ -109,14 +124,14 @@ pub fn decompress_rows_into(
                 high0 as i32
             };
             if br.truncated {
-                return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+                return Err(bitstream_exhausted(width, nrows));
             }
 
             // carry[0] = (high << nbits) | nbits-bit literal.  `low` is NOT
             // OR'ed in here — it is applied to the diff when storing the pixel.
             acarry[parity][0] = (high << (nbits as u32)) | (br.read_bits(nbits as u32) as i32);
             if br.truncated {
-                return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+                return Err(bitstream_exhausted(width, nrows));
             }
             let diff = (acarry[parity][0] ^ sign) + acarry[parity][1];
             // Running average uses the carry's OWN previous value (carry[1]),
@@ -129,18 +144,22 @@ pub fn decompress_rows_into(
             };
 
             // D1 predictor using delay lines (bit-exact with u16-masked re-reads).
+            // D10: load this column's north sample ONCE (row>=2). The raw-pointer
+            // store below defeats CSE of `north_row[col]`, so the old code reloaded
+            // it (with a fresh bounds check) for the north_west update — fold to one.
+            let north = if row >= 2 { north_row[col] as i32 } else { 0 };
             let pred = if row < 2 && col < 2 {
                 0
             } else if row < 2 {
                 west[parity]
             } else if col < 2 {
-                north_row[col] as i32
+                north
             } else {
                 // Branchless: flatten the nested data-dependent branches (every
                 // pixel mispredicted) into precomputed candidates + cmov selects.
                 // Bit-exact with the original gradient predictor.
                 let w_ = west[parity];
-                let n_ = north_row[col] as i32;
+                let n_ = north;
                 let nw = north_west[parity];
                 let awn = (w_ - nw).abs();
                 let ann = (n_ - nw).abs();
@@ -161,12 +180,12 @@ pub fn decompress_rows_into(
             unsafe { *cur_row_ptr.add(col) = v as u16; }
             west[parity] = v;
             if row >= 2 {
-                north_west[parity] = north_row[col] as i32;
+                north_west[parity] = north;
             }
         }
     }
     if br.truncated {
-        return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+        return Err(bitstream_exhausted(width, nrows));
     }
     Ok(nrows)
 }
@@ -177,7 +196,6 @@ struct BitReader<'a> {
     pos: usize,
     buf: u64,
     nbits: u32,
-    padded: bool,
     // real_in_buf: count of high bits in buf that came from real data (for truncation detect)
     real_in_buf: u32,
     // set if any *consumed* bits (not just peek window) came from zero-pad
@@ -191,7 +209,6 @@ impl<'a> BitReader<'a> {
             pos: 0,
             buf: 0,
             nbits: 0,
-            padded: false,
             real_in_buf: 0,
             truncated: false,
         }
@@ -210,11 +227,11 @@ impl<'a> BitReader<'a> {
         self.pos += in_bounds;
         self.nbits += (in_bounds as u32) * 8;
         self.real_in_buf += (in_bounds as u32) * 8;
-        // Zero-pad if at end of stream. (set padded per D4; truncation decided at consume)
+        // Zero-pad if at end of stream. (truncation is decided at consume time via
+        // real_in_buf, not here — so no separate `padded` flag is needed.)
         while self.nbits < need {
             self.buf <<= 8;
             self.nbits += 8;
-            self.padded = true;
             // pad bits appended low; real_in_buf (high real) unchanged
         }
     }
@@ -433,5 +450,287 @@ mod tests {
     #[ignore]
     fn d6_skip_zero_init_reject() {
         // no MaybeUninit in hot path. vec![0] retained.
+    }
+
+    // ---- D9/D10 byte-exact oracle + A/B timing harness -------------------------
+    //
+    // Verbatim copy of the pre-D9/D10 decoder (four per-pixel `br.truncated`
+    // checks; `north_row[col]` reloaded for the north_west update). Kept here as
+    // the differential oracle: it must produce byte-identical pixels (and the
+    // identical Err on truncation) to the production `decompress_rows_into`.
+    fn decompress_rows_into_old(
+        compressed: &[u8],
+        width: usize,
+        height: usize,
+        max_rows: usize,
+        out: &mut [u16],
+    ) -> Result<usize, String> {
+        let nrows = max_rows.min(height);
+        let n = width
+            .checked_mul(nrows)
+            .ok_or_else(|| format!("decompress: {}x{} overflows", width, nrows))?;
+        if out.len() < n {
+            return Err(format!("decompress: output too small ({} < {})", out.len(), n));
+        }
+        if nrows == 0 {
+            return Ok(0);
+        }
+        if compressed.len() <= HEADER_SKIP {
+            return Err(format!(
+                "decompress: input too short ({} bytes, need > {})",
+                compressed.len(), HEADER_SKIP
+            ));
+        }
+        let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
+        for row in 0..nrows {
+            let mut acarry = [[0i32; 3]; 2];
+            let row_base = row * width;
+            let row2_base = if row >= 2 { (row - 2) * width } else { 0 };
+            let (above, cur) = out[..n].split_at_mut(row_base);
+            let north_row: &[u16] =
+                if row >= 2 { &above[row2_base..row2_base + width] } else { &[] };
+            let cur_row = &mut cur[..width];
+            let mut west = [0i32; 2];
+            let mut north_west = [0i32; 2];
+            let cur_row_ptr = cur_row.as_mut_ptr();
+            for col in 0..width {
+                let parity = col & 1;
+                let i = if acarry[parity][2] < 3 { 2 } else { 0 };
+                let carry_lo = (acarry[parity][0] as u16) as u32;
+                let bitlen = 32 - carry_lo.leading_zeros() as i32;
+                let nbits = (2 + i as i32).max(bitlen - i as i32).min(16) as usize;
+                let sb = br.read_bits(3);
+                if br.truncated {
+                    return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+                }
+                let low = (sb & 3) as i32;
+                let sign = (((sb as i32) << 29) >> 31) as i32;
+                let high0 = br.read_huff();
+                if br.truncated {
+                    return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+                }
+                let high = if high0 == 12 {
+                    let extra = (16u32).saturating_sub(nbits as u32);
+                    (br.read_bits(extra) >> 1) as i32
+                } else {
+                    high0 as i32
+                };
+                if br.truncated {
+                    return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+                }
+                acarry[parity][0] = (high << (nbits as u32)) | (br.read_bits(nbits as u32) as i32);
+                if br.truncated {
+                    return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+                }
+                let diff = (acarry[parity][0] ^ sign) + acarry[parity][1];
+                acarry[parity][1] = (diff * 3 + acarry[parity][1]) >> 5;
+                acarry[parity][2] = if acarry[parity][0] > 16 { 0 } else { acarry[parity][2] + 1 };
+                let pred = if row < 2 && col < 2 {
+                    0
+                } else if row < 2 {
+                    west[parity]
+                } else if col < 2 {
+                    north_row[col] as i32
+                } else {
+                    let w_ = west[parity];
+                    let n_ = north_row[col] as i32;
+                    let nw = north_west[parity];
+                    let awn = (w_ - nw).abs();
+                    let ann = (n_ - nw).abs();
+                    let between = ((w_ < nw) & (nw < n_)) | ((n_ < nw) & (nw < w_));
+                    let far = (awn > 32) | (ann > 32);
+                    let p_between = if far { w_ + n_ - nw } else { (w_ + n_) >> 1 };
+                    let p_else = if awn > ann { w_ } else { n_ };
+                    if between { p_between } else { p_else }
+                };
+                let v = (pred + ((diff << 2) | low)) & 0xFFFF;
+                unsafe { *cur_row_ptr.add(col) = v as u16; }
+                west[parity] = v;
+                if row >= 2 {
+                    north_west[parity] = north_row[col] as i32;
+                }
+            }
+        }
+        if br.truncated {
+            return Err(format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows));
+        }
+        Ok(nrows)
+    }
+
+    // Bisect vehicle: FOLD = D9 single truncation check; HOIST = D10 north load
+    // hoist. <false,false> == OLD, <true,true> == production. Const generics let
+    // each combo monomorphize to clean branch-free code for relative timing.
+    fn dec_variant<const FOLD: bool, const HOIST: bool>(
+        compressed: &[u8],
+        width: usize,
+        height: usize,
+        max_rows: usize,
+        out: &mut [u16],
+    ) -> Result<usize, String> {
+        let nrows = max_rows.min(height);
+        let n = width.checked_mul(nrows).ok_or_else(|| "ovf".to_string())?;
+        if out.len() < n { return Err("small".into()); }
+        if nrows == 0 { return Ok(0); }
+        if compressed.len() <= HEADER_SKIP { return Err("short".into()); }
+        let mut br = BitReader::new(&compressed[HEADER_SKIP..]);
+        for row in 0..nrows {
+            let mut acarry = [[0i32; 3]; 2];
+            let row_base = row * width;
+            let row2_base = if row >= 2 { (row - 2) * width } else { 0 };
+            let (above, cur) = out[..n].split_at_mut(row_base);
+            let north_row: &[u16] =
+                if row >= 2 { &above[row2_base..row2_base + width] } else { &[] };
+            let cur_row = &mut cur[..width];
+            let mut west = [0i32; 2];
+            let mut north_west = [0i32; 2];
+            let cur_row_ptr = cur_row.as_mut_ptr();
+            for col in 0..width {
+                let parity = col & 1;
+                let i = if acarry[parity][2] < 3 { 2 } else { 0 };
+                let carry_lo = (acarry[parity][0] as u16) as u32;
+                let bitlen = 32 - carry_lo.leading_zeros() as i32;
+                let nbits = (2 + i as i32).max(bitlen - i as i32).min(16) as usize;
+                let sb = br.read_bits(3);
+                if !FOLD && br.truncated { return Err("trunc".into()); }
+                let low = (sb & 3) as i32;
+                let sign = (((sb as i32) << 29) >> 31) as i32;
+                let high0 = br.read_huff();
+                if !FOLD && br.truncated { return Err("trunc".into()); }
+                let high = if high0 == 12 {
+                    let extra = (16u32).saturating_sub(nbits as u32);
+                    (br.read_bits(extra) >> 1) as i32
+                } else { high0 as i32 };
+                if !FOLD && br.truncated { return Err("trunc".into()); }
+                let literal = br.read_bits(nbits as u32) as i32;
+                if br.truncated { return Err("trunc".into()); }
+                acarry[parity][0] = (high << (nbits as u32)) | literal;
+                let diff = (acarry[parity][0] ^ sign) + acarry[parity][1];
+                acarry[parity][1] = (diff * 3 + acarry[parity][1]) >> 5;
+                acarry[parity][2] = if acarry[parity][0] > 16 { 0 } else { acarry[parity][2] + 1 };
+                let north = if HOIST {
+                    if row >= 2 { north_row[col] as i32 } else { 0 }
+                } else { 0 };
+                let pred = if row < 2 && col < 2 {
+                    0
+                } else if row < 2 {
+                    west[parity]
+                } else if col < 2 {
+                    if HOIST { north } else { north_row[col] as i32 }
+                } else {
+                    let w_ = west[parity];
+                    let n_ = if HOIST { north } else { north_row[col] as i32 };
+                    let nw = north_west[parity];
+                    let awn = (w_ - nw).abs();
+                    let ann = (n_ - nw).abs();
+                    let between = ((w_ < nw) & (nw < n_)) | ((n_ < nw) & (nw < w_));
+                    let far = (awn > 32) | (ann > 32);
+                    let p_between = if far { w_ + n_ - nw } else { (w_ + n_) >> 1 };
+                    let p_else = if awn > ann { w_ } else { n_ };
+                    if between { p_between } else { p_else }
+                };
+                let v = (pred + ((diff << 2) | low)) & 0xFFFF;
+                unsafe { *cur_row_ptr.add(col) = v as u16; }
+                west[parity] = v;
+                if row >= 2 {
+                    north_west[parity] = if HOIST { north } else { north_row[col] as i32 };
+                }
+            }
+        }
+        if br.truncated { return Err("trunc".into()); }
+        Ok(nrows)
+    }
+
+    // Deterministic synthetic payload. 4 bytes/pixel = 32 bits >= the 31-bit
+    // per-pixel worst case (3 sign/low + 12 huff + 16 escape/literal), so a full
+    // decode of this stream never truncates — every pixel is exercised.
+    fn synth_payload(width: usize, height: usize, seed: u64) -> Vec<u8> {
+        let nbytes = HEADER_SKIP + width * height * 4;
+        let mut v = Vec::with_capacity(nbytes);
+        let mut s = seed | 1;
+        for _ in 0..nbytes {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            v.push((s >> 24) as u8);
+        }
+        v
+    }
+
+    // Differential byte-exact on non-trivial sizes (odd widths exercise parity
+    // edges) — far stronger than the 4x3 golden. Always runs.
+    #[test]
+    fn decompress_old_vs_new_byteexact() {
+        for (w, h, seed) in [(128usize, 96usize, 0x1234u64), (255, 64, 0xBEEF), (64, 255, 0xABCDEF), (3, 257, 0x55)] {
+            let payload = synth_payload(w, h, seed);
+            let mut a = vec![0u16; w * h];
+            let mut b = vec![0u16; w * h];
+            let ra = decompress_rows_into_old(&payload, w, h, h, &mut a);
+            let rb = decompress_rows_into(&payload, w, h, h, &mut b);
+            assert!(ra.is_ok(), "oracle truncated unexpectedly w={} h={}", w, h);
+            assert_eq!(ra, rb, "rows/Err differ w={} h={}", w, h);
+            assert_eq!(a, b, "pixels differ w={} h={}", w, h);
+        }
+        // Truncation parity: a short payload must yield the identical Err from both.
+        let short = synth_payload(64, 64, 7)[..HEADER_SKIP + 40].to_vec();
+        let mut a = vec![0u16; 64 * 64];
+        let mut b = vec![0u16; 64 * 64];
+        let ra = decompress_rows_into_old(&short, 64, 64, 64, &mut a);
+        let rb = decompress_rows_into(&short, 64, 64, 64, &mut b);
+        assert!(ra.is_err());
+        assert_eq!(ra, rb, "truncation Err differs");
+    }
+
+    // Rule-9 A/B timing. Interleaved with per-iteration start rotation to cancel
+    // thermal drift. Run: cargo test --release --lib decompress::decompress_ab_timing
+    //                       -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn decompress_ab_timing() {
+        use std::time::Instant;
+        let (w, h) = (1024usize, 1024usize);
+        let payload = synth_payload(w, h, 0x9E3779B97F4A7C15);
+
+        // 4 variants: base / fold-only / hoist-only / both(==production path).
+        type F = fn(&[u8], usize, usize, usize, &mut [u16]) -> Result<usize, String>;
+        let variants: [(&str, F); 5] = [
+            ("base    ", dec_variant::<false, false>),
+            ("fold    ", dec_variant::<true, false>),
+            ("hoist   ", dec_variant::<false, true>),
+            ("fold+hst", dec_variant::<true, true>),
+            ("PROD    ", decompress_rows_into),
+        ];
+
+        // All variants must be byte-identical to the production fn and each other.
+        let mut gold = vec![0u16; w * h];
+        decompress_rows_into(&payload, w, h, h, &mut gold).unwrap();
+        for (name, f) in &variants {
+            let mut b = vec![0u16; w * h];
+            f(&payload, w, h, h, &mut b).unwrap();
+            assert_eq!(b, gold, "variant {} not byte-exact", name.trim());
+        }
+
+        let iters = 120u32;
+        let nv = variants.len();
+        let mut acc = vec![0u128; nv];
+        let mut buf = vec![0u16; w * h];
+        for k in 0..iters {
+            // rotate start index each iter to cancel ordering/thermal drift
+            let start = (k as usize) % nv;
+            for j in 0..nv {
+                let idx = (start + j) % nv;
+                let t = Instant::now();
+                let _ = (variants[idx].1)(&payload, w, h, h, &mut buf);
+                acc[idx] += t.elapsed().as_nanos();
+            }
+        }
+        let base_ms = acc[0] as f64 / iters as f64 / 1e6;
+        println!("decompress {}-way {}x{} ({} iters):", nv, w, h, iters);
+        for i in 0..nv {
+            let ms = acc[i] as f64 / iters as f64 / 1e6;
+            println!(
+                "  {}: {:.3} ms  ({:+.2}% vs base)",
+                variants[i].0, ms, (ms - base_ms) / base_ms * 100.0
+            );
+        }
     }
 }

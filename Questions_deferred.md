@@ -1046,3 +1046,29 @@ untouched and want their own flip/parity before any change:
   which can overflow on adversarial `n`. A division form (`n <= px.len()/4`) avoids it.
   Cosmetic robustness only (callers are always sized); fold into the next avx2.rs edit
   rather than a standalone change.
+
+## decompress.rs (branch perf/decompress-trunc-fold-jul01-q8z) — deferred
+
+Landed this pass (byte-exact, +4.5% vs base on synthetic): D10 north-load hoist,
+`#[cold]` error helper, dead `padded` field removal. Rejected: D9 truncation fold
+(+13%, see rejected-optimizations). Deferred (not implemented):
+
+- **Native u64 wide refill in `BitReader::fill`.** The refill is a byte-at-a-time loop
+  (`buf = (buf<<8)|data[pos+i]`). A native unaligned u64 load + bswap could cut refill
+  work, BUT fill already batches to 56 bits so it is called rarely (amortized near-free,
+  cf. rejected D3 one-fill), and WASM lacks a cheap byteswap so it may regress the
+  browser target. Needs a per-target flip (native AND wasm) before adopting.
+- **Min-payload pre-alloc rejection in `decompress_rows`.** The convenience wrapper
+  `vec![0u16; n]` (zero-fills the whole frame) before `decompress_rows_into` discovers a
+  too-short payload — a malformed tiny input with huge claimed WxH causes a large zeroed
+  alloc then immediate Err. A cheap lower-bound (>=6 bits/px + warmup) check could reject
+  first. Hardening only (real callers pass genuine header dims); not a valid-image perf
+  win. `decompress_rows_into` is already the zero-realloc path for hot callers.
+- **`width == 0` degenerate guard.** With width 0 the row loop spins `nrows` times doing
+  no reads/writes; a vast claimed height makes it a no-op DoS. Real ORF is never
+  zero-width. One-line early return; cosmetic robustness.
+- **Streaming two-row / window decode API.** The predictor needs only row, row-2, and
+  two delay values, so a streaming form could hold ~2 rows instead of the full frame for
+  preview/thumbnail/downstream-transform pipelines (mem WxH -> Wx3). New public API; the
+  current full-frame `decompress_rows_into` (output-buffer-as-history) stays optimal for
+  callers that need the whole image. Design task, not a micro-op.
