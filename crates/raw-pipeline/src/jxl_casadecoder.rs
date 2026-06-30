@@ -1353,6 +1353,24 @@ impl TilePixels {
 // free fn used; the free fn now delegates here with the cache disabled, so its
 // regression tests exercise this code too.
 
+/// Whether the session emits an alpha channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmitAlpha {
+    /// Always emit RGBA (4 bpp / 8 bpp@16-bit). On a no-alpha container libjxl
+    /// fills opaque alpha. This is the legacy free-fn contract — the default.
+    Always,
+    /// Emit RGB (3 bpp / 6 bpp@16-bit) when the container header says no alpha,
+    /// RGBA otherwise. Saves ~25% output + the alpha-synthesis work for opaque
+    /// imagery.
+    FromHeader,
+}
+
+impl Default for EmitAlpha {
+    fn default() -> Self {
+        EmitAlpha::Always
+    }
+}
+
 /// What a per-tile failure does to the whole viewport result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JxtcFailurePolicy {
@@ -1376,6 +1394,9 @@ pub struct JxtcRegionOptions {
     /// cache entirely (every call re-decodes — the stateless free-fn behaviour).
     pub cache_bytes: usize,
     pub failure_policy: JxtcFailurePolicy,
+    /// Alpha emission policy (see [`EmitAlpha`]). Default `Always` keeps the
+    /// historical RGBA output; `FromHeader` lets opaque containers decode as RGB.
+    pub emit_alpha: EmitAlpha,
     /// Inherited by every tile decoder (`cancel` / `limits` / `keep_orientation`).
     /// `parallel` and `allow_partial` are forced off for tiles regardless (rayon
     /// owns tile parallelism; a tile is always a whole cache unit).
@@ -1387,6 +1408,7 @@ impl Default for JxtcRegionOptions {
         JxtcRegionOptions {
             cache_bytes: 128 * 1024 * 1024,
             failure_policy: JxtcFailurePolicy::Strict,
+            emit_alpha: EmitAlpha::Always,
             decode: DecodeOptions::default(),
         }
     }
@@ -1536,6 +1558,9 @@ pub struct JxtcRegionDecoder<'a> {
     header: JxtcHeader,
     index_start: usize,
     index_end: usize,
+    /// Interleaved channels requested per tile (3 = RGB, 4 = RGBA), fixed by
+    /// `emit_alpha` + the header's alpha flag at construction.
+    channels: u32,
     bytes_per_pixel: usize,
     options: JxtcRegionOptions,
     cache: TileCache,
@@ -1562,13 +1587,22 @@ impl<'a> JxtcRegionDecoder<'a> {
         if container.len() < index_end {
             return Err(JxtcRegionError::InvalidContainer);
         }
-        let bytes_per_pixel = if header.bits_per_sample == 16 { 8 } else { 4 };
+        // Channel count is fixed for the session: RGBA unless the caller opted into
+        // header-driven alpha AND the container is alpha-free.
+        let emit_alpha = match options.emit_alpha {
+            EmitAlpha::Always => true,
+            EmitAlpha::FromHeader => header.has_alpha,
+        };
+        let channels: u32 = if emit_alpha { 4 } else { 3 };
+        let sample = if header.bits_per_sample == 16 { 2 } else { 1 };
+        let bytes_per_pixel = channels as usize * sample;
         let cache_bytes = options.cache_bytes;
         Ok(JxtcRegionDecoder {
             container,
             header,
             index_start,
             index_end,
+            channels,
             bytes_per_pixel,
             options,
             cache: TileCache::new(cache_bytes),
@@ -1739,12 +1773,14 @@ impl<'a> JxtcRegionDecoder<'a> {
         let header = self.header;
         let index_start = self.index_start;
         let index_end = self.index_end;
+        let channels = self.channels;
 
         // One miss → reuse the held serial decoder (the 1-tile interactive pan).
         if misses.len() == 1 {
             let key = misses[0];
             let dec = self.serial_decoder()?;
-            let res = decode_one_jxtc_tile(container, header, index_start, index_end, dec, key);
+            let res =
+                decode_one_jxtc_tile(container, header, index_start, index_end, channels, dec, key);
             return Ok(vec![(key, res)]);
         }
 
@@ -1756,9 +1792,15 @@ impl<'a> JxtcRegionDecoder<'a> {
                 move || Decoder::new(opts.clone()),
                 |slot, &key| {
                     let res = match slot.as_mut() {
-                        Some(dec) => {
-                            decode_one_jxtc_tile(container, header, index_start, index_end, dec, key)
-                        }
+                        Some(dec) => decode_one_jxtc_tile(
+                            container,
+                            header,
+                            index_start,
+                            index_end,
+                            channels,
+                            dec,
+                            key,
+                        ),
                         None => Err(JxtcRegionError::DecoderCreate),
                     };
                     (key, res)
@@ -1837,19 +1879,20 @@ fn decode_one_jxtc_tile(
     header: JxtcHeader,
     index_start: usize,
     index_end: usize,
+    channels: u32,
     dec: &mut Decoder,
     key: (u32, u32),
 ) -> Result<CachedTile, JxtcRegionError> {
     let (x, y) = key;
     let stream = jxtc_tile_stream(container, header, index_start, index_end, key)?;
     let (pixels, tw, th) = if header.bits_per_sample == 16 {
-        match dec.run_raw::<u16>(stream, 4) {
+        match dec.run_raw::<u16>(stream, channels) {
             Ok((w, h, _, data)) => (TilePixels::U16(data), w, h),
             Err(DecodeError::Cancelled) => return Err(JxtcRegionError::Cancelled),
             Err(_) => return Err(JxtcRegionError::Tile { x, y }),
         }
     } else {
-        match dec.run_raw::<u8>(stream, 4) {
+        match dec.run_raw::<u8>(stream, channels) {
             Ok((w, h, _, data)) => (TilePixels::U8(data), w, h),
             Err(DecodeError::Cancelled) => return Err(JxtcRegionError::Cancelled),
             Err(_) => return Err(JxtcRegionError::Tile { x, y }),
@@ -1859,7 +1902,8 @@ fn decode_one_jxtc_tile(
     if tw != ew || th != eh {
         return Err(JxtcRegionError::InvalidTileDimensions { x, y });
     }
-    let bpp = if header.bits_per_sample == 16 { 8usize } else { 4usize };
+    let sample = if header.bits_per_sample == 16 { 2usize } else { 1usize };
+    let bpp = channels as usize * sample;
     let expected = (tw as usize)
         .checked_mul(th as usize)
         .and_then(|px| px.checked_mul(bpp))
@@ -1925,6 +1969,7 @@ pub fn decode_jxtc_region(
         JxtcRegionOptions {
             cache_bytes: 0,
             failure_policy: JxtcFailurePolicy::Preview,
+            emit_alpha: EmitAlpha::Always, // legacy callers expect RGBA always
             decode: DecodeOptions::default(),
         },
     )
@@ -2730,5 +2775,106 @@ mod tests {
         let free = decode_jxtc_region(&container, 0, 0, iw, ih).unwrap();
         assert_eq!(region.pixels, free, "16-bit session matches the free fn");
         assert_eq!(region.pixels, u16_samples_to_ne_bytes(&full));
+    }
+
+    fn gradient_rgb8(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0u8; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 3) as usize;
+                v[i] = (x % 256) as u8;
+                v[i + 1] = (y % 256) as u8;
+                v[i + 2] = ((x + y) % 256) as u8;
+            }
+        }
+        v
+    }
+
+    /// Build an **alpha-free** 8-bit JXTC container: RGB (3-channel) tiles, header
+    /// flags = 0 (no alpha, 8-bit).
+    fn build_jxtc_rgb8(ref_rgb: &[u8], w: u32, h: u32, tile_size: u32) -> Vec<u8> {
+        let tiles_x = w.div_ceil(tile_size);
+        let tiles_y = h.div_ceil(tile_size);
+        let num_tiles = (tiles_x * tiles_y) as usize;
+        let mut streams: Vec<Vec<u8>> = Vec::with_capacity(num_tiles);
+        for ty in 0..tiles_y {
+            for tx in 0..tiles_x {
+                let (tx0, ty0) = (tx * tile_size, ty * tile_size);
+                let tw = tile_size.min(w - tx0);
+                let th = tile_size.min(h - ty0);
+                let mut tile = vec![0u8; (tw * th * 3) as usize];
+                for ry in 0..th {
+                    for rx in 0..tw {
+                        let s = (((ty0 + ry) * w + (tx0 + rx)) * 3) as usize;
+                        let d = ((ry * tw + rx) * 3) as usize;
+                        tile[d..d + 3].copy_from_slice(&ref_rgb[s..s + 3]);
+                    }
+                }
+                streams.push(enc_lossless(&Frame::rgb(&tile, tw, th)));
+            }
+        }
+        let index_bytes = num_tiles * JXTC_INDEX_ENTRY_BYTES;
+        let mut c: Vec<u8> = Vec::new();
+        c.extend_from_slice(&JXTC_MAGIC.to_le_bytes());
+        c.extend_from_slice(&JXTC_VERSION.to_le_bytes());
+        c.extend_from_slice(&w.to_le_bytes());
+        c.extend_from_slice(&h.to_le_bytes());
+        c.extend_from_slice(&tile_size.to_le_bytes());
+        c.extend_from_slice(&tiles_x.to_le_bytes());
+        c.extend_from_slice(&tiles_y.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes()); // flags: no alpha, 8-bit
+        let mut cursor = JXTC_HEADER_BYTES + index_bytes;
+        for s in &streams {
+            c.extend_from_slice(&(cursor as u32).to_le_bytes());
+            c.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            cursor += s.len();
+        }
+        for s in &streams {
+            c.extend_from_slice(s);
+        }
+        c
+    }
+
+    fn assert_region_ch(out: &[u8], reference: &[u8], img_w: u32, rx: u32, ry: u32, rw: u32, rh: u32, ch: usize) {
+        for dy in 0..rh {
+            for dx in 0..rw {
+                let s = (((ry + dy) * img_w + (rx + dx)) as usize) * ch;
+                let d = ((dy * rw + dx) as usize) * ch;
+                assert_eq!(&out[d..d + ch], &reference[s..s + ch], "px ({dx},{dy})");
+            }
+        }
+    }
+
+    #[test]
+    fn jxtc_session_alpha_free_emits_rgb_in_fromheader_mode() {
+        let (w, h, ts) = (64u32, 48u32, 32u32);
+        let rgb = gradient_rgb8(w, h);
+        let container = build_jxtc_rgb8(&rgb, w, h, ts);
+
+        // FromHeader on a no-alpha container → RGB (3 bpp): 25% smaller output and
+        // no alpha-synthesis work.
+        let mut s = JxtcRegionDecoder::new(
+            &container,
+            JxtcRegionOptions { emit_alpha: EmitAlpha::FromHeader, ..Default::default() },
+        )
+        .unwrap();
+        let r = s.decode(ImageRegion { x: 0, y: 0, w, h }).unwrap();
+        assert_eq!(r.bytes_per_pixel, 3, "alpha-free FromHeader emits RGB");
+        assert_eq!(r.pixels.len(), (w * h * 3) as usize);
+        assert_region_ch(&r.pixels, &rgb, w, 0, 0, w, h, 3);
+
+        // Always (default) → RGBA (4 bpp), libjxl fills opaque alpha. Preserves the
+        // legacy contract even on a no-alpha container.
+        let mut s2 = JxtcRegionDecoder::new(&container, JxtcRegionOptions::default()).unwrap();
+        let r2 = s2.decode(ImageRegion { x: 0, y: 0, w, h }).unwrap();
+        assert_eq!(r2.bytes_per_pixel, 4);
+        for i in 0..(w * h) as usize {
+            assert_eq!(&r2.pixels[i * 4..i * 4 + 3], &rgb[i * 3..i * 3 + 3], "rgb px {i}");
+            assert_eq!(r2.pixels[i * 4 + 3], 255, "opaque alpha px {i}");
+        }
+
+        // Free fn is unchanged: always RGBA.
+        let free = decode_jxtc_region(&container, 0, 0, w, h).unwrap();
+        assert_eq!(free.len(), (w * h * 4) as usize, "free fn keeps the RGBA contract");
     }
 }

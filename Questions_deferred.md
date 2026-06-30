@@ -1127,3 +1127,27 @@ Still deferred (now refinements on the landed session, not the session itself):
 - **Animation / multi-frame** explicit policy (decoder still returns first frame only).
 - **Interactive wall-clock bench**: decode-COUNT reduction is proven by metrics; a
   real pan-loop timing (native Tauri or a bench harness) would quantify ms saved.
+
+### UPDATE 2026-07-01b — alpha-free native RGB LANDED (same branch)
+
+The "alpha-free native RGB tiles" refinement is now implemented. Added
+`EmitAlpha { Always, FromHeader }` to `JxtcRegionOptions` (default `Always`).
+`FromHeader` on a no-alpha container (`has_alpha=false`) decodes tiles as RGB
+(3 bpp / 6 bpp@16-bit) instead of RGBA — ~25% less output and no alpha-synthesis.
+The session fixes channel count + bytes_per_pixel once in `new()`; tile decode and
+the compositor were already bpp-generic. `decode_jxtc_region` stays `EmitAlpha::Always`
+(RGBA contract preserved; libjxl fills opaque alpha on no-alpha streams — verified).
+New test `jxtc_session_alpha_free_emits_rgb_in_fromheader_mode` (RGB output + opaque-
+alpha RGBA control + free-fn-unchanged guard). 217/217 crate tests green (MSVC).
+
+Remaining deferred (with honest blockers):
+- **Strip-staged compositing** — needs per-allocation peak-RSS measurement to justify;
+  no clean way to measure that in a Win unit test, and it only helps the whole-image
+  anti-pattern. Not tackled.
+- **Extra-channel completeness contract** (monolithic `decode` path) — an API-semantics
+  decision that ripples the `Image` type. Out of scope for the JXTC session.
+- **Animation / multi-frame policy** — cheap doc clarification only (decoder returns
+  first frame); real frame selection needs a new iterator API.
+- **Wall-clock pan bench** — decode-COUNT reduction is proven by metrics; a wall-clock
+  number is noise-dominated at test-tile scale and needs real-size fixtures + a native
+  pan-loop (Tauri) to be meaningful.
