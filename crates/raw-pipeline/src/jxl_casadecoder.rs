@@ -260,6 +260,23 @@ pub struct Decoder {
 // libjxl context is looked up per-use, not stored → Send, not Sync.
 unsafe impl Send for Decoder {}
 
+/// Resets the libjxl handle on drop, so a reusable [`Decoder`] returns to a clean
+/// state on **every** exit from a decode that runs a user callback — success,
+/// error, *and* a panic-unwind through the callback (`decode_view`'s `f`,
+/// `decode_progressive`'s `on_event`). The non-callback decodes reset inline
+/// (no Rust code between the C decode and the reset can unwind), so they don't
+/// need this; the callback paths do, or a panicking callback would skip the reset
+/// and poison the next decode on the same handle.
+struct ResetGuard {
+    handle: *mut ffi::JxlDecoder,
+}
+
+impl Drop for ResetGuard {
+    fn drop(&mut self) {
+        unsafe { ffi::JxlDecoderReset(self.handle) };
+    }
+}
+
 impl Decoder {
     /// Construct a decoder. `JxlDecoderCreate` is a cheap malloc; the (costly)
     /// thread runner is created once here and held across decodes when
@@ -281,6 +298,33 @@ impl Decoder {
             // Reconcile opts.parallel with the actual runner state: if runner
             // creation failed (null), opts.parallel must reflect single-threaded
             // reality so attach_runner and callers are not misled.
+            let mut opts = opts;
+            opts.parallel = !runner.is_null();
+            Some(Decoder {
+                handle,
+                runner,
+                opts,
+            })
+        }
+    }
+
+    /// Like [`Decoder::new`] but pins the thread runner to an **explicit**
+    /// `num_threads` instead of `available_parallelism()`. `num_threads <= 1`
+    /// means single-threaded (no runner). This is the honest path for benchmark
+    /// callers that request a specific thread width (`decode_full_threaded`);
+    /// `new()` deliberately keeps its auto-width behaviour. `opts.parallel` is
+    /// reconciled to the actual runner state, exactly as in `new()`.
+    pub fn with_threads(opts: DecodeOptions, num_threads: usize) -> Option<Self> {
+        unsafe {
+            let handle = ffi::JxlDecoderCreate(std::ptr::null());
+            if handle.is_null() {
+                return None;
+            }
+            let runner = if num_threads > 1 {
+                ffi::JxlThreadParallelRunnerCreate(std::ptr::null(), num_threads)
+            } else {
+                std::ptr::null_mut()
+            };
             let mut opts = opts;
             opts.parallel = !runner.is_null();
             Some(Decoder {
@@ -375,9 +419,13 @@ impl Decoder {
         ch: Channels,
         f: impl FnOnce(ImageView<S>) -> R,
     ) -> Result<R, DecodeError> {
+        // RAII reset: fires on the normal return *and* if `f` panics — without it
+        // a panicking analysis closure would leave the handle un-reset and poison
+        // the next decode (the Decoder is built to be reused).
+        let _reset = ResetGuard { handle: self.handle };
         let mut data: Vec<S> = Vec::new();
         let r = unsafe { self.run_full_into::<S>(jxl, ch.count(), &mut data, true) };
-        let out = match r {
+        match r {
             Ok((w, h, meta, extra)) => {
                 let view = ImageView {
                     width: w,
@@ -390,9 +438,7 @@ impl Decoder {
                 Ok(f(view))
             }
             Err(e) => Err(e),
-        };
-        unsafe { ffi::JxlDecoderReset(self.handle) };
-        out
+        }
     }
 
     /// Region decode (AR / digital-twin / tile seam) of a **monolithic** codestream.
@@ -428,6 +474,13 @@ impl Decoder {
                 extra: Vec::new(),
                 meta: full.meta,
             });
+        }
+        // Whole-image fast path: a viewport that (after clamping) equals the full
+        // frame needs no crop — hand back the decoded image directly instead of
+        // re-allocating and row-copying colour + every extra plane into an
+        // identical-size buffer. Byte-identical result; saves one full-frame copy.
+        if x == 0 && y == 0 && w == full.width && h == full.height {
+            return Ok(full);
         }
         let row = w as usize * cc;
         let mut data: Vec<S> = Vec::with_capacity(h as usize * row);
@@ -469,9 +522,10 @@ impl Decoder {
         ch: Channels,
         mut on_event: impl FnMut(DecodeEvent<S>) -> ProgressControl,
     ) -> Result<Image<S>, DecodeError> {
-        let r = unsafe { self.run_progressive_into::<S>(jxl, ch.count(), &mut on_event) };
-        unsafe { ffi::JxlDecoderReset(self.handle) };
-        r
+        // RAII reset: fires on success/error *and* on a panic-unwind through
+        // `on_event`, keeping the reused handle clean. (See `ResetGuard`.)
+        let _reset = ResetGuard { handle: self.handle };
+        unsafe { self.run_progressive_into::<S>(jxl, ch.count(), &mut on_event) }
     }
 
     /// Timing-only full decode at a fixed **RGBA8** output (measurement path;
@@ -908,10 +962,12 @@ pub fn decode_full(jxl_bytes: &[u8]) -> Option<Duration> {
 /// setup is excluded from timing, as before). Mirrors the prior `jpegxl-sys`
 /// `ThreadsRunner` decode.
 pub fn decode_full_threaded(jxl_bytes: &[u8], num_threads: usize) -> Option<Duration> {
-    let mut dec = Decoder::new(DecodeOptions {
-        parallel: num_threads > 1,
-        ..Default::default()
-    })?;
+    // Honour the requested width: `with_threads` pins the runner to exactly
+    // `num_threads`. The prior `parallel: num_threads > 1` only toggled a bool,
+    // then `new()` sized the runner to `available_parallelism()` — so a caller
+    // asking for 2 threads silently got the whole machine, poisoning constrained
+    // benchmark numbers.
+    let mut dec = Decoder::with_threads(DecodeOptions::default(), num_threads)?;
     dec.time_full_decode(jxl_bytes)
         .ok()
         .map(|m| Duration::from_secs_f64(m.decode_ms / 1000.0))
@@ -1107,9 +1163,13 @@ where
     })
 }
 
-/// Timing-only wrapper around [`decode_progressive_frames`].
+/// Timing-only wrapper. Uses the **borrowed** progressive path so the measurement
+/// reflects decoder work, not the legacy per-pass frame clone: the retaining
+/// `decode_progressive_frames` `to_vec()`s every flush, but this helper discards
+/// each frame, so cloning would only pollute the timing (and allocate
+/// passes × w × h × 4 bytes for nothing).
 pub fn decode_progressive_first_total(jxl_bytes: &[u8]) -> Option<(f64, f64)> {
-    decode_progressive_frames(jxl_bytes, |_| {})
+    decode_progressive_frames_borrowed(jxl_bytes, |_| {})
 }
 
 pub use decode_full as bench_jxl_decode_lowlevel_full;
@@ -1366,12 +1426,17 @@ pub fn decode_jxtc_region(
                 // Keep tiles in their native sample width — the 16-bit branch no
                 // longer copies into an intermediate Vec<u8>; the compositor takes a
                 // byte view (TilePixels::as_bytes) at copy time instead.
+                //
+                // `run_raw` (not `decode`) on purpose: JXTC composites interleaved
+                // RGBA bytes only, so `decode`'s `want_extra = true` would size,
+                // allocate and decode every planar extra channel a tile happens to
+                // carry — then drop them all. `run_raw` requests colour only.
                 let (pixels, tw, th) = if is16 {
-                    let img = dec.decode::<u16>(tile_jxl, Channels::Rgba).ok()?;
-                    (TilePixels::U16(img.data), img.width, img.height)
+                    let (w, h, _, data) = dec.run_raw::<u16>(tile_jxl, 4).ok()?;
+                    (TilePixels::U16(data), w, h)
                 } else {
-                    let img = dec.decode::<u8>(tile_jxl, Channels::Rgba).ok()?;
-                    (TilePixels::U8(img.data), img.width, img.height)
+                    let (w, h, _, data) = dec.run_raw::<u8>(tile_jxl, 4).ok()?;
+                    (TilePixels::U8(data), w, h)
                 };
 
                 // saturating_sub: malformed headers can have tiles_x > ceil(image_w/tile_size);
@@ -1384,8 +1449,9 @@ pub fn decode_jxtc_region(
                 Some(((tx, ty), pixels, tw, th))
             },
         )
-        .collect::<Vec<Option<_>>>()
-        .into_iter()
+        // `map_init` yields `Option<_>`; `flatten()` drops the `None`s (skipped
+        // tiles) in-parallel — no intermediate `Vec<Option<_>>` to allocate and
+        // re-walk (rayon flattens `Option` via its `IntoParallelIterator` impl).
         .flatten()
         .collect();
 
@@ -1549,6 +1615,30 @@ mod tests {
         let img = dec.decode::<u8>(&jxl, Channels::Rgba).unwrap();
         let sum_owned: u64 = img.data.iter().map(|&b| b as u64).sum();
         assert_eq!(sum_view, sum_owned);
+    }
+
+    #[test]
+    fn panicking_view_callback_leaves_decoder_reusable() {
+        // The ResetGuard must reset the handle even when the analysis closure
+        // unwinds, or the next decode on the reused Decoder would be poisoned.
+        let (w, h) = (32u32, 32u32);
+        let rgba = gradient_rgba8(w, h);
+        let jxl = enc_lossless(&Frame::rgba8(&rgba, w, h));
+        let mut dec = Decoder::new(DecodeOptions::default()).unwrap();
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = dec.decode_view::<u8, ()>(&jxl, Channels::Rgba, |_| panic!("boom"));
+        }));
+        std::panic::set_hook(prev);
+        assert!(caught.is_err(), "callback panic must propagate");
+
+        // Same decoder, after the panic-unwind → still decodes correctly.
+        let img = dec
+            .decode::<u8>(&jxl, Channels::Rgba)
+            .expect("decoder reusable after a panicking view callback");
+        assert_eq!((img.width, img.height), (w, h));
     }
 
     #[test]
