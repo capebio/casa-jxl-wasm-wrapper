@@ -4,6 +4,36 @@ This document records optimizations proposed during pipeline reviews that were f
 
 ---
 
+## ANS-R1..R3: ans_common.cc / .h ChatGPT pass (2026-06-30)
+
+Ground-truthed an external (ChatGPT) optimization pass for `lib/jxl/ans_common.{cc,h,_test.cc}` against the real libjxl-012 source and both call sites (`enc_ans.cc:706`, `dec_ans.cc:274`).
+
+**ANS-R1 — "single_symbol path hard-wired to `ANS_TAB_SIZE` instead of `range` is a bug." — FALSE (not a live bug).**
+Claim: `InitAliasTable` lines 68/82 use `ANS_TAB_SIZE` where `range` is meant, breaking tables when `log_range != ANS_LOG_TAB_SIZE`.
+Reality: **Both and only callers pass `ANS_LOG_TAB_SIZE` as `log_range`** (`enc_ans.cc:706`, `dec_ans.cc:274`). `ANS_LOG_TAB_SIZE` is a fixed `#define` = 12 (`ans_params.h:18`). Therefore `range == ANS_TAB_SIZE == 4096` on every real call. The proposed `range` substitution is behaviorally a no-op. Defensive-only; no behavior change, no perf. Same false-bug pattern as prior ChatGPT "P0 inverted AllFalse" and "LLF-mask bug" rejections.
+
+**ANS-R2 — "parameters can exceed `Entry` field widths; add bounds JXL_ENSUREs." — Defensive-only, unreachable.**
+`log_alpha_size` ≤ 8 (table_size ≤ 256 = `ANS_MAX_ALPHABET_SIZE`), so `right_value`/index fit uint8; `entry_size = 4096 >> log_alpha_size` ∈ [16,128] for the live range (log_alpha_size 5..8), so `cutoff` < entry_size < 256 fits uint8. No reachable truncation/overflow given validated inputs (`dec_ans.cc:251` already rejects oversize alphabets; counts are normalized to sum==range upstream). Extra guards change nothing for valid input; pure robustness, out of scope for a perf pass.
+
+**ANS-R3 — "force branchless mask-select in `Lookup` (GCC emits a branch otherwise)." — ALREADY IN TRUNK + wrong compiler target.**
+The shipped `Lookup` (`ans_common.h:108-141`) **already** implements the branchless form: single 64-bit `memcpy` load, `conditional = greater ? entry : 0` (CMOV/AND), XOR freq selection, with an explicit `// WARNING: moving this code may interfere with CMOV heuristics` comment. ChatGPT's `0 - (uint64_t)greater` mask is the same code clang already generates. Its GCC-vs-CMOV microbenchmark is moot: the browser ships **WASM via emscripten/clang**, not GCC. No change. (Same "headline already in trunk" pattern as conv5 y-ring.)
+
+Also concur with ChatGPT's own self-rejections: typed `uint64_t*` load over `memcpy` (alias/alignment risk, no gain), 4096-entry direct decode table (blows per-context cache footprint; Entry is deliberately 8 bytes, ~64×256 working set), `Entry` layout expansion, narrowing `Symbol` fields.
+
+**Surviving REAL (byte-exact, setup-cost only) items** — not rejected, tracked separately: (a) allocation-free construction (3 heap `std::vector` → 2 `std::array<uint8_t,256>` stacks + reuse `Entry::freq1_xor_freq0` as transient cutoff scratch); (b) trailing-zero trim without mutating/copying the by-value `distribution` (dec already `std::move`s it, so this only helps the enc caller's `Counts()` copy); (c) `CreateFlatHistogram` write `min(rem, len-rem)` entries. All are setup/table-build cost, NOT decoder-hot; `Lookup` stays byte-identical. Marginal for the app's RAW→JXL O1 workload (table build ≪ pixel work). See Questions_deferred.md.
+
+---
+
+## BW-R1: enc_bit_writer.cc `Write()` widen single-byte load to 64-bit `memcpy` — FALSE (bug) (2026-06-30)
+
+**Target:** `BitWriter::Write` (`enc_bit_writer.cc:191`), little-endian branch.
+**Proposed (external pass):** replace `uint64_t v = *p;` with `uint64_t v; memcpy(&v, p, sizeof(v));` "for a portable unaligned 64-bit load."
+**Rejected — would corrupt the stream.** `*p` is a **single** `uint8_t` zero-extended into `v`; it is deliberately *not* a 64-bit load. The algorithm relies on the high 7 bytes of `v` being zero so that `v |= (bits << in_first)` followed by the 8-byte store **zero-initializes the bytes ahead** (the zero-tail invariant; see the in-code comment and `JXL_DASSERT(v >> bits_in_first_byte == 0)`). PaddedBytes only guarantees the *first* new byte is zero, not the next 7. Widening the load reads uninitialized/garbage trailing storage, the store no longer zeroes ahead, and the assertion fires (debug) / the stream is corrupted (release). `Write()` left byte-for-byte unchanged on branch `perf/enc-bit-writer-append-jun30-w8k4`. Same "plausible portability fix that is actually a correctness regression" class as prior ChatGPT false bugs (inverted AllFalse, LLF-mask).
+
+*(The same external pass's genuinely-good items — bulk/56-bit `AppendUnaligned`, templated `WithMaxBits`, append-grow-to-endpoint, logical `ZeroPadToByte` — WERE implemented on that branch; only the `Write()` load-widening was rejected.)*
+
+---
+
 ## CR2-R1: SIMD for crop compaction (2026-06-15)
 
 **Target:** `cr2.rs` in-place crop loop (`copy_within` per row).  
@@ -937,3 +967,93 @@ unsafe policy.
 out of the tone path, pack to LE bytes in `take_rgb16_full`. Zero `unsafe`, byte-exact, **−32%
 process-compute peak** (−56.7 MB @9.9 MP; verified wasm A/B). Details: `CrawlBot2000Findings.md` →
 "A-5 follow-up (2026-06-29)"; branch `crawlbot/a5-pack-rgb16-deferred-jun29-x7q3`.
+
+---
+
+## 2026-06-30 — quantizer.{cc,h,-inl.h} seam-traced rejections
+
+Follow-up to a multi-file "holographic" optimization pass on the Quantizer. After
+tracing every consumer of the affected state, four proposed changes are rejected.
+The byte-exact survivors landed on submodule branch
+`capebio/perf/quantizer-byteexact-jun30-q5x7` (PUSHED, not merged): one-buffer
+median/MAD in `SetQuantField`, single `RecomputeFromGlobalScale` in
+`ComputeGlobalScaleAndQuant`, removal of the write-only `zero_bias_[3]` member.
+
+**Q1 — `mul_dc_[3]/inv_mul_dc_[3] = 1.0f` "fourth-lane init bug" — REJECTED (dead store).**
+Claim: `RecomputeFromGlobalScale` fills only lanes 0..2 while `ClearDCMul` fills 4,
+so lane 3 is "uninitialized" and must be set to identity. **Seam trace says lane 3
+is never read.** Every consumer of `MulDC()/InvMulDC()` indexes channels 0..2
+scalar: `compressed_dc.cc` `ComputePixelChannel`/`DequantDC` do
+`Set(df, dc_factors[c] * mul)` for c in {0,1,2} (no 4-lane vector load of the
+pointer); `enc_cache.cc:143` reads `MulDC()[c]` for c<3. The `[4]` sizing is
+historical padding; `ClearDCMul`'s 4-fill is a harmless over-fill. Adding the lane-3
+writes to the hot per-frame recompute is pure dead store, not a fix.
+
+**Q2 — `quantizer-inl.h AdjustQuantBias` reciprocal reschedule — REJECTED/HOLD (no proven win).**
+Claim: hoisting `ApproximateReciprocal(quant)` and the `Set(df, biases[c])` /
+`Set(df, biases[3])` broadcasts earlier overlaps reciprocal latency. The ops are
+already independent and each `Set` already appears once — this is a pure
+source-level reorder the compiler's scheduler performs at -O2/-O3, and it lengthens
+the reciprocal's live range (possible extra register pressure / spill). Byte-exact
+but neutral-to-negative; this helper is in the dec_group + enc_group AC hot path, so
+"theoretically better" is not established. Not landed without per-target assembly +
+flipflop evidence (deferred — see Questions_deferred.md).
+
+**Q3 — `std::max(1, ...)` / `std::max(1.0f, fval)` clamps in ScaleGlobalScale and
+ComputeGlobalScaleAndQuant — REJECTED (not byte-exact).** These add a lower bound the
+upstream code does not have. They change output when the clamped path is reachable
+(e.g. `fval < 1` → `quant_dc_` would become 0 → `inv_quant_dc_ = inf`). That is a
+behavioral hardening change, not an optimization, and reachability on real inputs is
+unproven. Excluded from the byte-exact branch; deferred as a correctness question.
+
+**Q4 — `dc_quant_scale_ = global_scale_float_ * quant_dc_` precompute — DROPPED (negligible).**
+Saves 2 float multiplies per `RecomputeFromGlobalScale` (a per-frame call) at the cost
+of a new 4-byte member that works against the cache-line footprint win from removing
+`zero_bias_`. Net wash; not worth the extra state.
+
+---
+
+## enc_cluster pass (2026-06-30) — branch capebio/perf/enc-cluster-fuse-reindex-jun30-v8n3
+
+Landed: fused add+entropy, branchless distance/KL, in-place cycle-sort reindex,
+union-find renumbering, scratch merge-cost, empty-input guard (all byte-exact).
+Items considered and NOT taken in this pass:
+
+- **EC-R1 — Remove `#include <cstring>` from enc_cluster.h.** Rejected (kept).
+  Genuinely unused in the header, but it is a transitive include other TUs may
+  rely on; removing it risks breaking unrelated translation units for zero perf
+  value. Surgical-scope: not worth it. (`<map>` in the .cc WAS removed — its
+  only use, the std::map in HistogramReindex, is deleted.)
+
+- **EC-R2 — Cosmetic rewrites of HistogramCondition / HistogramEntropy**
+  (cache `Lanes(di)` in a local, `entropy = ...` instead of `+=`). Skipped.
+  `Lanes(di)` for a fixed HWY_CAPPED descriptor is already a compile-time
+  constant and the `+=` runs after an unconditional `entropy = 0`, so both are
+  pure no-ops at -O2. No measurable effect; left untouched to keep the diff
+  surgical.
+
+- **EC-FIX — float rounding order in merge cost (caught, fixed before landing).**
+  The reviewed `HistogramMergeCost` returned `cost - first.entropy -
+  second.entropy` = `(cost - a) - b`, but the original was `cost -= a + b` =
+  `cost - (a + b)`. Different float rounding can flip a `cost >= 0` merge
+  decision => NOT byte-exact. Landed version uses `cost - (first.entropy +
+  second.entropy)` to preserve the original order. (Not a rejection of the opt,
+  a correctness fix to it.)
+
+- **EC-R3 — Cache the merged ANS population cost in `HistogramPair`.** Rejected.
+  When a pair is enqueued, `HistogramMergeCost` already computes the exact
+  merged `ANSPopulationCost`; on accept the loop recomputes it for
+  `(*out)[first].entropy`. Caching the absolute cost in the pair (16->20 byte
+  entry) would save one ANSPopulationCost per *accepted* merge — only ~N of the
+  ~1.5*N^2 total ANSPopulationCost calls (<1% for realistic N), while the queue
+  holds O(N^2) entries, so the wider struct is a net memory/bandwidth loss.
+  Not worth it. (ChatGPT "seam #3"; same conclusion.)
+
+  Second harness landed alongside the prior run's `enc_cluster_reindex_ab.cc`:
+  `tools/enc_cluster_ab.cc` (standalone, no libjxl build) — 200k random
+  kernel pairs (entropy/KL/distance OLD==NEW), 6000 end-to-end cases
+  (kBest/kFast/kFastest x prev=0/>0) ALL BYTE-EXACT, and a deterministic
+  allocation count showing the kBest pipeline drops 5806->2746 heap
+  allocations (-52.7%). Wall-clock ~1.1-1.3x but allocator-noise bound (the
+  mock cost is far cheaper than real ANSPopulationCost, so the alloc saving is
+  a larger fraction here than in production — real speedup will be smaller).
