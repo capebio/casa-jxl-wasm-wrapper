@@ -971,3 +971,29 @@ Also rejected the same pass (consistent with prior logs): **uint16 natural-order
 ZeroDensity table** (8 KiB displaces hot data). The **`InterpolateVec` `b/a` ratio
 precompute** is NOT rejected but deferred — it removes a vector divide yet is not
 byte-exact (scalar precompute vs vector divide shifts float bits); see Questions_deferred.
+
+---
+
+## 2026-06-30 — inv_quant_ac LAZY-fill LUT (fill on first use) — REJECTED (data race), EAGER landed instead
+
+The `inv_quant_ac` 256-entry LUT was landed (commit `9e685f77`) to replace a per-block
+float division with a load. The **lazy** variant — `RecomputeFromGlobalScale` only
+invalidates a `ready` flag, and the table is filled on the first `inv_quant_ac()` call —
+was considered (and modeled favourably in a single-threaded flipflop) but **rejected as a
+data race.** `inv_quant_ac` is read by `QuantizeRoundtripYBlockAC` →
+`ComputeCoefficients(group_idx, …)`, which runs **per-group in parallel** (RunOnPool) on
+the single shared `enc_state->shared.quantizer`. A lazy fill would perform the table WRITE
+(and `ready`-flag write) during that parallel phase: concurrent writers to the same
+addresses + an unsynchronized flag = UB, with a real torn-read window (a thread can see
+`ready==true` without a happens-before on the array stores). The single-threaded flipflop
+could not surface this.
+
+**Landed instead: EAGER fill** in the single-threaded `RecomputeFromGlobalScale`. Parallel
+groups only READ the table, under the same "global scale is frozen during encode"
+invariant the pre-existing `inv_global_scale_` read already relies on (if that invariant
+were violated, today's division would already be racy). Eager was also the faster arm in
+the flipflop (~+13-15% vs lazy ~+5-12% min_ms), and its only downside — a 256-division
+refill on the decode path — is negligible (Decode recomputes once and never reads the
+table). Note the headline %saved is on the `inv_quant_ac` access pattern in isolation; the
+division is amortized over each block's coefficient loop, so the end-to-end encode gain is
+a fraction of that. Real WASM enc A/B is the integrator confirmation gate.

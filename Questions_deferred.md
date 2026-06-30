@@ -606,10 +606,17 @@ need measured WASM A/B and/or are not byte-exact-trivial:
    EAGER ~+13-15%, LAZY ~+5-12% vs DIV; EAGER ≳ LAZY on encode (lazy's `if(!ready)` branch
    + first-block fill). So LAZY's only real edge is removing the decode-path refill.
 
-   Decision: do NOT land on trust:low JS evidence. Unlike the shipped byte-exact work
-   (pure work-removal), a LUT ADDS mutable state + a branch to a hot inline; needs a real
-   WASM enc A/B (where div is relatively costlier, so the LUT win is likely larger) before
-   committing. If landed, prefer LAZY (no decode penalty) over EAGER.
+   LANDED as EAGER in commit `9e685f77` (byte-exact). Variant decision reversed from
+   "prefer lazy": `inv_quant_ac` is read concurrently by the per-group parallel
+   `ComputeCoefficients` on the shared `enc_state->shared.quantizer`, so a lazy
+   fill-on-first-use would WRITE the table during the parallel phase = data race (UB) —
+   invisible to the single-threaded flipflop. Eager fills in the single-threaded
+   `RecomputeFromGlobalScale`; parallel groups only read, under the same "global scale
+   frozen during encode" invariant the existing `inv_global_scale_` read already depends
+   on. Eager was also the faster arm; its only cost (decode-path refill) is 256 divs per
+   decode recompute = negligible. Real end-to-end gain is a fraction of encode (div is
+   amortized over the block coefficient loop) — real WASM enc A/B remains the integrator
+   confirmation gate. Lazy-fill rejected (see docs/1 rejected optimizations.md).
 
 Integrator gate for the landed branch: WASM enc A/B (fusion's real FastPowf/sqrt gain is
 codegen-dependent; harness microbench is scalar/pow-dominated = 1.17x floor, not the
