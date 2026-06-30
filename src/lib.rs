@@ -168,6 +168,14 @@ pub struct ProcessResult {
     pub tonemap_ms: f64,
     #[wasm_bindgen(readonly)]
     pub orient_ms: f64,
+    /// ISO-gated luminance NR. Previously hidden — ran after demosaic_ms closed, so a
+    /// demosaic "win" could just be NR cost moving. 0.0 when NR did not fire.
+    #[wasm_bindgen(readonly)]
+    pub nr_ms: f64,
+    /// Unsharp/texture/clarity, split out of tonemap_ms (which now times only the tone
+    /// pass). 0.0 when no unsharp ran. Was previously folded into tonemap_ms.
+    #[wasm_bindgen(readonly)]
+    pub unsharp_ms: f64,
     #[wasm_bindgen(readonly)]
     pub preview_demosaic_ms: f64,  // fast planar bilinear demosaic for lb/thumb previews
     #[wasm_bindgen(readonly)]
@@ -430,20 +438,27 @@ fn downscale_rgb_float_path<F>(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    // x-spans depend only on dx, not dy — compute once (dw entries) instead of dw×dh
+    // times inside the row loop. Byte-exact: identical f32→usize derivation, hoisted.
+    let x_spans: Vec<(usize, usize)> = (0..dw)
+        .map(|dx| {
+            let x0 = (dx as f32 * xr) as usize;
+            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
+            let x1 = x1.max(x0 + 1);
+            (x0, x1 - x0)
+        })
+        .collect();
     let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
-        let y1 = y1.max(y0 + 1);
-        for dx in 0..dw {
-            let x0 = (dx as f32 * xr) as usize;
-            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
-            let x1 = x1.max(x0 + 1);
-            let n = ((y1 - y0) * (x1 - x0)).max(1) as u32;
+        let yspan = y1.max(y0 + 1) - y0;
+        for &(x0, x_count) in &x_spans {
+            let n = (yspan * x_count).max(1) as u32;
             let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
-            let mut row_base = y0 * sw;
-            for _y in y0..y1 {
-                for x in x0..x1 {
+            let mut row_base = y0 * sw + x0;
+            for _y in 0..yspan {
+                for x in 0..x_count {
                     let (r, g, b) = read_pixel(row_base + x);
                     rr += r;
                     gg += g;
@@ -642,6 +657,7 @@ struct OrfDecoded {
     info: tiff::OrfInfo,
     decompress_ms: f64,
     demosaic_ms: f64,
+    nr_ms: f64,
     wb_from_camera: bool,
     params: pipeline::PipelineParams,
     color_matrix_from_mn: bool,
@@ -784,6 +800,9 @@ fn decode_orf_raw(data: &[u8], output_flags: u32) -> Result<OrfDecoded, JsError>
     drop(raw);
 
     // ISO-gated luminance NR on the MHC output — only relevant for full-rgb paths.
+    // Timed separately: it runs after demosaic_ms closes, so it was previously
+    // invisible (a demosaic "win" could just be NR cost moving into an untimed stage).
+    let mut nr_ms = 0.0;
     if need_full_rgb {
         let nr_strength = match info.iso.unwrap_or(0) {
             iso if iso >= 6400 => 0.50f32,
@@ -792,7 +811,9 @@ fn decode_orf_raw(data: &[u8], output_flags: u32) -> Result<OrfDecoded, JsError>
             _ => 0.0,
         };
         if nr_strength > 0.0 {
+            let t_nr = now_ms();
             pipeline::apply_luminance_nr(&mut rgb16, w, h, nr_strength);
+            nr_ms = now_ms() - t_nr;
         }
     }
 
@@ -803,6 +824,7 @@ fn decode_orf_raw(data: &[u8], output_flags: u32) -> Result<OrfDecoded, JsError>
         info,
         decompress_ms,
         demosaic_ms,
+        nr_ms,
         wb_from_camera,
         params,
         color_matrix_from_mn,
@@ -834,6 +856,7 @@ fn process_orf_impl(
         info,
         decompress_ms,
         demosaic_ms,
+        nr_ms,
         wb_from_camera,
         mut params,
         color_matrix_from_mn,
@@ -895,8 +918,7 @@ fn process_orf_impl(
         look.clarity,
     );
 
-    let t = now_ms();
-    let (final_rgb, final_w, final_h, tonemap_ms, orient_ms, rgb16_full) =
+    let (final_rgb, final_w, final_h, tonemap_ms, unsharp_ms, orient_ms, rgb16_full) =
         if output_flags & OUT_FULL_RGB8 != 0 {
             // Unsharp mutates rgb16 in place; the 16-bit master export is the *pre-unsharp*
             // image (as the former eager pack was), so snapshot before mutating in that
@@ -907,16 +929,20 @@ fn process_orf_impl(
             } else {
                 None
             };
+            // Time unsharp (texture/clarity) on its own so it doesn't inflate tonemap_ms.
+            let t_us = now_ms();
             if will_unsharp {
                 pipeline::apply_unsharp_masks(&mut rgb16, w, h, &params);
             }
+            let unsharp_ms = now_ms() - t_us;
             // Lens 23/24: use process_into + preallocated buffer to avoid internal Vec alloc
             // inside the tone path (reuses the "into" pattern from demosaic/pipeline).
             let mut rgb8 = vec![0u8; w * h * 3];
             // Chapter 1: SIMD bulk tone on wasm/x86 for the plain path (the 90% case),
             // scalar parity path only for perceptual_constancy. The big full-res win.
+            let t_tone = now_ms();
             pipeline::process_into_auto(&rgb16, &params, &mut rgb8);
-            let tonemap_ms = now_ms() - t;
+            let tonemap_ms = now_ms() - t_tone;
             // rgb16's last read is done: move it into the 16-bit master (common, no copy),
             // use the pre-unsharp snapshot, or release it. Freed before orientation either way.
             let rgb16_full = if want_full16 {
@@ -934,10 +960,10 @@ fn process_orf_impl(
             } else {
                 pipeline::apply_orientation(rgb8, w, h, info.orientation)
             };
-            (fr, fw, fh, tonemap_ms, now_ms() - t2, rgb16_full)
+            (fr, fw, fh, tonemap_ms, unsharp_ms, now_ms() - t2, rgb16_full)
         } else {
             let rgb16_full = if want_full16 { rgb16 } else { Vec::new() };
-            (vec![], 0, 0, 0.0, 0.0, rgb16_full)
+            (vec![], 0, 0, 0.0, 0.0, 0.0, rgb16_full)
         };
 
     Ok(ProcessResult {
@@ -949,6 +975,8 @@ fn process_orf_impl(
         demosaic_ms,
         tonemap_ms,
         orient_ms,
+        nr_ms,
+        unsharp_ms,
         preview_demosaic_ms,
         preview_downscale_ms,
         fast_preview,
@@ -1249,20 +1277,25 @@ pub fn downscale_rgb(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    // x-spans depend only on dx — hoist out of the dy loop (byte-exact: same f32→usize).
+    let x_spans: Vec<(usize, usize)> = (0..dw)
+        .map(|dx| {
+            let x0 = (dx as f32 * xr) as usize;
+            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
+            let x1 = x1.max(x0 + 1);
+            (x0, x1 - x0)
+        })
+        .collect();
     let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
-        let y1 = y1.max(y0 + 1);
-        for dx in 0..dw {
-            let x0 = (dx as f32 * xr) as usize;
-            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
-            let x1 = x1.max(x0 + 1);
-            let x_count = x1 - x0;
-            let n = ((y1 - y0) * x_count).max(1) as u32;
+        let yspan = y1.max(y0 + 1) - y0;
+        for &(x0, x_count) in &x_spans {
+            let n = (yspan * x_count).max(1) as u32;
             let (mut rr, mut gg, mut bb) = (0u32, 0u32, 0u32);
             let mut row_base = (y0 * sw + x0) * 3;
-            for _y in y0..y1 {
+            for _y in 0..yspan {
                 let mut i = row_base;
                 for _ in 0..x_count {
                     rr += src[i] as u32;
@@ -1384,20 +1417,25 @@ pub fn downscale_rgba(
 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
+    // x-spans depend only on dx — hoist out of the dy loop (byte-exact: same f32→usize).
+    let x_spans: Vec<(usize, usize)> = (0..dw)
+        .map(|dx| {
+            let x0 = (dx as f32 * xr) as usize;
+            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
+            let x1 = x1.max(x0 + 1);
+            (x0, x1 - x0)
+        })
+        .collect();
     let mut o = 0usize;
     for dy in 0..dh {
         let y0 = (dy as f32 * yr) as usize;
         let y1 = ((dy as f32 + 1.0) * yr).min(sh as f32) as usize;
-        let y1 = y1.max(y0 + 1);
-        for dx in 0..dw {
-            let x0 = (dx as f32 * xr) as usize;
-            let x1 = ((dx as f32 + 1.0) * xr).min(sw as f32) as usize;
-            let x1 = x1.max(x0 + 1);
-            let x_count = x1 - x0;
-            let n = ((y1 - y0) * x_count).max(1) as u32;
+        let yspan = y1.max(y0 + 1) - y0;
+        for &(x0, x_count) in &x_spans {
+            let n = (yspan * x_count).max(1) as u32;
             let (mut rr, mut gg, mut bb, mut aa) = (0u32, 0u32, 0u32, 0u32);
             let mut row_base = (y0 * sw + x0) * 4;
-            for _y in y0..y1 {
+            for _y in 0..yspan {
                 let mut i = row_base;
                 for _ in 0..x_count {
                     rr += src[i]     as u32;
@@ -2109,6 +2147,7 @@ struct DngDecoded {
     color_matrix_flat: [f32; 9],
     decode_ms: f64,
     demosaic_ms: f64,
+    nr_ms: f64,
     orientation: u16,
     make: String,
     model: String,
@@ -2179,8 +2218,11 @@ fn decode_dng_raw(data: &[u8]) -> Result<DngDecoded, JsError> {
         iso if iso >= 1600 => 0.20,
         _ => 0.0,
     };
+    let mut nr_ms = 0.0;
     if nr_strength > 0.0 {
+        let t_nr = now_ms();
         pipeline::apply_luminance_nr(&mut rgb16, aw, ah, nr_strength);
+        nr_ms = now_ms() - t_nr;
     }
 
     Ok(DngDecoded {
@@ -2191,6 +2233,7 @@ fn decode_dng_raw(data: &[u8]) -> Result<DngDecoded, JsError> {
         color_matrix_flat,
         decode_ms,
         demosaic_ms,
+        nr_ms,
           orientation: img.orientation,
           make: img.make,
           model: img.model,
@@ -2214,6 +2257,7 @@ fn process_dng_impl(
         color_matrix_flat,
         decode_ms,
         demosaic_ms,
+        nr_ms,
         orientation,
         make,
         model,
@@ -2274,8 +2318,7 @@ fn process_dng_impl(
         look.clarity,
     );
 
-    let t = now_ms();
-    let (final_rgb, final_w, final_h, tonemap_ms, orient_ms, rgb16_full) =
+    let (final_rgb, final_w, final_h, tonemap_ms, unsharp_ms, orient_ms, rgb16_full) =
         if output_flags & OUT_FULL_RGB8 != 0 {
             // 16-bit master export is the pre-unsharp image; snapshot only when unsharp
             // would mutate rgb16 (rare). Common path moves rgb16 out for free.
@@ -2285,12 +2328,16 @@ fn process_dng_impl(
             } else {
                 None
             };
+            // Time unsharp on its own so it doesn't inflate tonemap_ms.
+            let t_us = now_ms();
             if will_unsharp {
                 pipeline::apply_unsharp_masks(&mut rgb16, aw, ah, &params);
             }
+            let unsharp_ms = now_ms() - t_us;
             // Chapter 1: SIMD bulk tone (DNG + CR2 share this impl). See process_into_auto.
+            let t_tone = now_ms();
             let rgb8 = pipeline::process_auto(&rgb16, &params);
-            let tonemap_ms = now_ms() - t;
+            let tonemap_ms = now_ms() - t_tone;
             // rgb16's last read is done: move it into the 16-bit master (common, no copy),
             // use the pre-unsharp snapshot, or release it. Freed before orientation either way.
             let rgb16_full = if want_full16 {
@@ -2306,10 +2353,10 @@ fn process_dng_impl(
             } else {
                 pipeline::apply_orientation(rgb8, aw, ah, orientation)
             };
-            (fr, fw, fh, tonemap_ms, now_ms() - t2, rgb16_full)
+            (fr, fw, fh, tonemap_ms, unsharp_ms, now_ms() - t2, rgb16_full)
         } else {
             let rgb16_full = if want_full16 { rgb16 } else { Vec::new() };
-            (vec![], 0, 0, 0.0, 0.0, rgb16_full)
+            (vec![], 0, 0, 0.0, 0.0, 0.0, rgb16_full)
         };
 
     Ok(ProcessResult {
@@ -2321,6 +2368,8 @@ fn process_dng_impl(
         demosaic_ms,
         tonemap_ms,
         orient_ms,
+        nr_ms,
+        unsharp_ms,
         preview_demosaic_ms: 0.0,
         preview_downscale_ms: 0.0,
         fast_preview: false,
@@ -2466,6 +2515,7 @@ struct Cr2Decoded {
     color_matrix_flat: [f32; 9],
     decode_ms: f64,
     demosaic_ms: f64,
+    nr_ms: f64,
     orientation: u16,
     make: String,
     model: String,
@@ -2595,8 +2645,11 @@ fn decode_cr2_raw(data: &[u8]) -> Result<Cr2Decoded, JsError> {
         iso if iso >= 1600 => 0.20,
         _ => 0.0,
     };
+    let mut nr_ms = 0.0;
     if nr_strength > 0.0 {
+        let t_nr = now_ms();
         pipeline::apply_luminance_nr(&mut rgb16, w, h, nr_strength);
+        nr_ms = now_ms() - t_nr;
     }
 
     Ok(Cr2Decoded {
@@ -2607,6 +2660,7 @@ fn decode_cr2_raw(data: &[u8]) -> Result<Cr2Decoded, JsError> {
         color_matrix_flat,
         decode_ms,
         demosaic_ms,
+        nr_ms,
         orientation: cr2.orientation,
         make: cr2.make,
         model: cr2.model,
@@ -2624,6 +2678,7 @@ impl From<Cr2Decoded> for DngDecoded {
             color_matrix_flat:  c.color_matrix_flat,
             decode_ms:          c.decode_ms,
             demosaic_ms:        c.demosaic_ms,
+            nr_ms:              c.nr_ms,
             orientation:        c.orientation,
             make:               c.make,
             model:              c.model,
@@ -2754,9 +2809,12 @@ impl PerceptualComparer {
             "PerceptualComparer: ref_rgba.len() ({}) != width*height*4 ({}×{}×4={})",
             ref_rgba.len(), width, height, expected,
         );
-        let n = width.saturating_mul(height);
         let inner = PerceptualCore::new(ref_rgba, width, height, Opts::default());
-        PerceptualComparer { inner, scratch: vec![0u8; n.saturating_mul(4)] }
+        // Defer the RGBA staging alloc: callers using only the copying convenience
+        // methods (all/butteraugli/ssim/psnr) never touch `scratch`. `input_ptr`
+        // grows it on the first zero-copy request. Saves a width*height*4 alloc
+        // (~96 MB @24 MP) on the copy-path-only callers.
+        PerceptualComparer { inner, scratch: Vec::new() }
     }
 
     /// Copying convenience path: pass RGBA, get {butteraugli, ssim, psnr} as a JS object.
@@ -3373,9 +3431,22 @@ impl DecodedImage {
     /// RGBA16 packed little-endian, 8 bytes/px (bit_depth == 16). Empty otherwise.
     pub fn take_rgba16_le(&mut self) -> Vec<u8> {
         let v = std::mem::take(&mut self.u16buf);
-        let mut out = Vec::with_capacity(v.len() * 2);
-        for s in v {
-            out.extend_from_slice(&s.to_le_bytes());
+        let mut out = vec![0u8; v.len() * 2];
+        #[cfg(target_endian = "little")]
+        {
+            // Packed LE bytes are exactly the u16 slice's byte image on a LE target
+            // (wasm32, x86_64) — single memcpy, no per-sample from_le_bytes/extend.
+            // Same trick as pack_rgb16_full / unpack_rgb16_le.
+            // SAFETY: &[u16] reinterpreted as &[u8] (len*2 bytes); u8 align 1 ≤ u16 align,
+            // exactly v.len()*2 source bytes copied into the equal-sized `out`.
+            let src_bytes = unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 2) };
+            out.copy_from_slice(src_bytes);
+        }
+        #[cfg(target_endian = "big")]
+        {
+            for (chunk, s) in out.chunks_exact_mut(2).zip(v.iter()) {
+                chunk.copy_from_slice(&s.to_le_bytes());
+            }
         }
         out
     }

@@ -837,3 +837,32 @@ black-frame fix, PIPE-013 perceptual-grid OnceLock, dead LN/EXP-LUT removal.
    are active (not the default ingest hot path), the blur kernels are already heavily flip-tuned
    (`blur_mul_add_flip`, `blur_cache_tile_flip`, y-ring), and the change is intricate with a real
    regression risk. Needs a dedicated planar-vs-interleaved flip with byte parity before landing.
+## WORKSTREAM: lib.rs final-round audit (2026-06-30, branch perf/librs-safe-microops-jun30-v7q9)
+
+Landed this pass (separate memo): byte-exact downscale x-span hoist (×3 float paths),
+`take_rgba16_le` LE memcpy, `PerceptualComparer` lazy scratch, `nr_ms`/`unsharp_ms`
+stage-timing split (ORF+DNG+CR2). Deferred / not-done, with reasons:
+
+1. **`fs_core_simd` word-hash lane re-extract.** The wasm128 kernel re-reads 4× scalar
+   `u32::from_le_bytes(d[i..])` per 16-byte chunk even though the same bytes are already
+   in the loaded `v128`; on LE these equal `i32x4_extract_lane(v)`, so the scalar reloads
+   are removable byte-exact. NOT done: the function is `#[cfg(target_arch="wasm32")]`-only
+   (native falls back to `fs_core_word_scalar`), so it can't be verified by `cargo test`
+   or the standalone rustc harness — only a real WASM rebuild + run, which this round was
+   scoped to avoid. Also low value: it's the frame-stats/telemetry path, not RAW decode.
+   Do it in a round that already rebuilds WASM, behind a flipflopdom byte-exact check.
+2. **ORF preview-planning split (thumb-only / lightbox-only).** `decode_orf_raw` builds
+   both lb+thumb downscales whenever any preview flag is set, and gates the ½-res superpixel
+   route on lightbox dims even for thumb-only. Real but **app-dead**: no production caller
+   passes OUT_THUMB or OUT_LIGHTBOX alone — the app uses `process_orf` (all-7, shared demosaic,
+   no waste) or encode-flags (no preview). Only the bench harness (`jxl-preset-benchmark.js`)
+   exercises single-preview flags. Skip until a real single-preview caller exists.
+3. **Dual-demosaic seam (preview ½/planar vs reuse-MHC).** On all-7, the preview path runs
+   `demosaic_rggb_half`/`_planar` AND full `demosaic_rggb_mhc`. Reusing MHC RGB16 for previews
+   would drop the second demosaic but reads a ~24 MP buffer for a ¼-res target and changes
+   preview pixels — likely slower, sensor-size dependent. Needs a real WASM flipflop A/B
+   (pixel-exact impossible; perceptual gate). Scoped out this round (rebuild required).
+4. **Gate bench exports behind a non-default feature.** `bench_decode_orf`, the `fstats_*`
+   probes and the demosaic flip-flop exports are `#[wasm_bindgen]` → retained in shipped WASM,
+   keeping otherwise-dead demosaic/stat impls reachable (binary size / cold-start, not runtime).
+   Needs two WASM builds (with/without) to measure `.wasm` size + instantiate delta. Deferred.
