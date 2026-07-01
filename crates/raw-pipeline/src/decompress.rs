@@ -221,6 +221,74 @@ pub fn decompress_rows_into(
     Ok(nrows)
 }
 
+/// A source of decoded raw rows, produced strictly top-to-bottom. The extension
+/// seam for other decoders (LJPEG/DNG) — implemented only by ORF today.
+pub trait RawRowSource {
+    fn width(&self) -> usize;
+    fn height(&self) -> usize;
+    /// Decode the next row into `dst` (len >= width). Ok(true) = a row was written
+    /// to dst[..width]; Ok(false) = end of image; Err = corrupt/truncated stream.
+    fn next_row_into(&mut self, dst: &mut [u16]) -> Result<bool, String>;
+}
+
+/// Streaming Olympus ORF row decoder. Holds only a 3-row ring (the predictor needs
+/// row r-2), not the full frame. Yields rows byte-identical to `decompress_rows_into`.
+pub struct OrfRowDecoder<'a> {
+    br: BitReader<'a, WIDE_FILL>,
+    width: usize,
+    height: usize,
+    row: usize,
+    ring: Vec<u16>, // 3 * max(width,1); row r lives in slot (r % 3)
+}
+
+impl<'a> OrfRowDecoder<'a> {
+    pub fn new(compressed: &'a [u8], width: usize, height: usize) -> Result<Self, String> {
+        if compressed.len() <= HEADER_SKIP {
+            return Err(format!(
+                "decompress: input too short ({} bytes, need > {})",
+                compressed.len(), HEADER_SKIP
+            ));
+        }
+        Ok(Self {
+            br: BitReader::<WIDE_FILL>::new(&compressed[HEADER_SKIP..]),
+            width,
+            height,
+            row: 0,
+            ring: vec![0u16; 3 * width.max(1)],
+        })
+    }
+}
+
+impl RawRowSource for OrfRowDecoder<'_> {
+    fn width(&self) -> usize { self.width }
+    fn height(&self) -> usize { self.height }
+
+    fn next_row_into(&mut self, dst: &mut [u16]) -> Result<bool, String> {
+        if self.row >= self.height {
+            return Ok(false);
+        }
+        let r = self.row;
+        let w = self.width;
+        if w == 0 {
+            self.row += 1;
+            return Ok(true); // zero-width: no pixels, matches decompress_rows_into contract
+        }
+        // north = row r-2 from the ring (immutable), a field disjoint from br/dst.
+        let north: &[u16] = if r >= 2 {
+            let s = ((r - 2) % 3) * w;
+            &self.ring[s..s + w]
+        } else {
+            &[]
+        };
+        decode_row_into::<WIDE_FILL>(&mut self.br, r, w, self.height, north, &mut dst[..w])?;
+        // Stash into the ring so rows r+2 can read it as north.
+        let cs = (r % 3) * w;
+        self.ring[cs..cs + w].copy_from_slice(&dst[..w]);
+        self.row += 1;
+        Ok(true)
+    }
+}
+
 /// Native targets use the u64 wide-load refill; wasm keeps the byte loop (no
 /// cheap byteswap there — see `docs`/Questions_deferred D-wide-refill).
 #[cfg(not(target_arch = "wasm32"))]
@@ -733,6 +801,38 @@ mod tests {
             v.push((s >> 24) as u8);
         }
         v
+    }
+
+    #[test]
+    fn stream_rows_equal_full_decode() {
+        for (w, h, seed) in [(128usize, 96usize, 0x1234u64), (255, 64, 0xBEEF), (64, 255, 0xABCD), (3, 257, 0x55)] {
+            let payload = synth_payload(w, h, seed);
+            let mut full = vec![0u16; w * h];
+            decompress_rows_into(&payload, w, h, h, &mut full).unwrap();
+
+            let mut dec = OrfRowDecoder::new(&payload, w, h).unwrap();
+            assert_eq!(dec.width(), w);
+            assert_eq!(dec.height(), h);
+            let mut streamed = Vec::with_capacity(w * h);
+            let mut rowbuf = vec![0u16; w];
+            while dec.next_row_into(&mut rowbuf).unwrap() {
+                streamed.extend_from_slice(&rowbuf);
+            }
+            assert_eq!(streamed, full, "streamed != full for {}x{}", w, h);
+        }
+        // truncation surfaces as Err mid-stream
+        let short = synth_payload(64, 64, 7)[..HEADER_SKIP + 40].to_vec();
+        let mut dec = OrfRowDecoder::new(&short, 64, 64).unwrap();
+        let mut rowbuf = vec![0u16; 64];
+        let mut err = false;
+        loop {
+            match dec.next_row_into(&mut rowbuf) {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(_) => { err = true; break; }
+            }
+        }
+        assert!(err, "truncated stream should error");
     }
 
     // Differential byte-exact on non-trivial sizes (odd widths exercise parity
