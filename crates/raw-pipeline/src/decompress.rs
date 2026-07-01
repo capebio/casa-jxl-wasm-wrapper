@@ -289,6 +289,41 @@ impl RawRowSource for OrfRowDecoder<'_> {
     }
 }
 
+/// Pull rows from `src` into a reused `scratch` (strip_rows * width) and hand each
+/// full strip — and the final partial strip — to `sink(first_row, n_rows, &band)`.
+/// One `scratch` allocation for the whole decode. `strip_rows` should be even when
+/// the consumer pairs rows (e.g. half-demosaic); this wrapper is parity-agnostic.
+pub fn for_each_strip<S: RawRowSource>(
+    src: &mut S,
+    strip_rows: usize,
+    scratch: &mut Vec<u16>,
+    mut sink: impl FnMut(usize, usize, &[u16]) -> Result<(), String>,
+) -> Result<(), String> {
+    assert!(strip_rows > 0, "strip_rows must be > 0");
+    let w = src.width();
+    scratch.resize(strip_rows * w.max(1), 0);
+    let mut first = 0usize;
+    loop {
+        let mut k = 0usize;
+        while k < strip_rows {
+            let dst = &mut scratch[k * w..(k + 1) * w];
+            if !src.next_row_into(dst)? {
+                break;
+            }
+            k += 1;
+        }
+        if k == 0 {
+            break;
+        }
+        sink(first, k, &scratch[..k * w])?;
+        first += k;
+        if k < strip_rows {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Native targets use the u64 wide-load refill; wasm keeps the byte loop (no
 /// cheap byteswap there — see `docs`/Questions_deferred D-wide-refill).
 #[cfg(not(target_arch = "wasm32"))]
@@ -833,6 +868,28 @@ mod tests {
             }
         }
         assert!(err, "truncated stream should error");
+    }
+
+    #[test]
+    fn for_each_strip_reconstructs_full() {
+        let (w, h) = (17usize, 20usize); // odd width, strip not dividing height
+        let payload = synth_payload(w, h, 0xF00D);
+        let mut full = vec![0u16; w * h];
+        decompress_rows_into(&payload, w, h, h, &mut full).unwrap();
+
+        let mut dec = OrfRowDecoder::new(&payload, w, h).unwrap();
+        let mut scratch = Vec::new();
+        let mut got = Vec::new();
+        let mut strips = 0;
+        for_each_strip(&mut dec, 6, &mut scratch, |first, k, band| {
+            assert_eq!(first, got.len() / w);
+            assert!(k <= 6 && k > 0);
+            got.extend_from_slice(&band[..k * w]);
+            strips += 1;
+            Ok(())
+        }).unwrap();
+        assert_eq!(got, full);
+        assert_eq!(strips, 4); // 6+6+6+2
     }
 
     // Differential byte-exact on non-trivial sizes (odd widths exercise parity
