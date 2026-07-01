@@ -20,6 +20,116 @@ fn bitstream_exhausted(width: usize, nrows: usize) -> String {
     format!("decompress: bitstream exhausted before {}x{} pixels", width, nrows)
 }
 
+/// Decode one full row of `width` pixels into `cur_row` (len == width).
+/// `north_row` is the row two above (same CFA parity), length == width, or `&[]`
+/// for the first two rows. `acarry`/`west`/`north_west` are row-local and reset
+/// here every call (dcraw resets carry per row). Byte-exact with the pre-refactor
+/// inline loop; `#[inline(always)]` so `decompress_rows_into` codegen is unchanged.
+#[inline(always)]
+fn decode_row_into<const WIDE: bool>(
+    br: &mut BitReader<'_, WIDE>,
+    row: usize,
+    width: usize,
+    nrows: usize,
+    north_row: &[u16],
+    cur_row: &mut [u16],
+) -> Result<(), String> {
+    // acarry[parity] = [last_value, running_avg_signed, stable_counter]
+    let mut acarry = [[0i32; 3]; 2];
+    let mut west = [0i32; 2];
+    let mut north_west = [0i32; 2];
+    let cur_row_ptr = cur_row.as_mut_ptr();
+    for col in 0..width {
+        let parity = col & 1;
+        let i = if acarry[parity][2] < 3 { 2 } else { 0 };
+        // D2: leading_zeros equiv to the search loop (tested in D8(b)).
+        let carry_lo = (acarry[parity][0] as u16) as u32;
+        let bitlen = 32 - carry_lo.leading_zeros() as i32;
+        let nbits = (2 + i as i32).max(bitlen - i as i32).min(16) as usize;
+
+        // NB: per-read truncation checks are kept deliberately (NOT folded to
+        // one). They break the BitReader state-dependency chain between reads,
+        // letting truncation bookkeeping resolve off the inter-pixel critical
+        // path; folding them measured +13% on x86 (rejected D9 — see bisect).
+        let sb = br.read_bits(3);
+        if br.truncated {
+            return Err(bitstream_exhausted(width, nrows));
+        }
+        let low = (sb & 3) as i32;
+        // arithmetic shift spreads top bit of the 3-bit field into a -1/0 mask
+        let sign = (((sb as i32) << 29) >> 31) as i32;
+
+        let high0 = br.read_huff();
+        if br.truncated {
+            return Err(bitstream_exhausted(width, nrows));
+        }
+        // Escape path reads (16 - nbits) bits — NOT a flat 16.  Then drop LSB.
+        let high = if high0 == 12 {
+            let extra = (16u32).saturating_sub(nbits as u32);
+            (br.read_bits(extra) >> 1) as i32
+        } else {
+            high0 as i32
+        };
+        if br.truncated {
+            return Err(bitstream_exhausted(width, nrows));
+        }
+
+        // carry[0] = (high << nbits) | nbits-bit literal.  `low` is NOT
+        // OR'ed in here — it is applied to the diff when storing the pixel.
+        acarry[parity][0] = (high << (nbits as u32)) | (br.read_bits(nbits as u32) as i32);
+        if br.truncated {
+            return Err(bitstream_exhausted(width, nrows));
+        }
+        let diff = (acarry[parity][0] ^ sign) + acarry[parity][1];
+        // Running average uses the carry's OWN previous value (carry[1]),
+        // not carry[0].  This is the dcraw / LibRaw / rawloader form.
+        acarry[parity][1] = (diff * 3 + acarry[parity][1]) >> 5;
+        acarry[parity][2] = if acarry[parity][0] > 16 {
+            0
+        } else {
+            acarry[parity][2] + 1
+        };
+
+        // D1 predictor using delay lines (bit-exact with u16-masked re-reads).
+        // D10: load this column's north sample ONCE (row>=2). The raw-pointer
+        // store below defeats CSE of `north_row[col]`, so the old code reloaded
+        // it (with a fresh bounds check) for the north_west update — fold to one.
+        let north = if row >= 2 { north_row[col] as i32 } else { 0 };
+        let pred = if row < 2 && col < 2 {
+            0
+        } else if row < 2 {
+            west[parity]
+        } else if col < 2 {
+            north
+        } else {
+            // Branchless: flatten the nested data-dependent branches (every
+            // pixel mispredicted) into precomputed candidates + cmov selects.
+            // Bit-exact with the original gradient predictor.
+            let w_ = west[parity];
+            let n_ = north;
+            let nw = north_west[parity];
+            let awn = (w_ - nw).abs();
+            let ann = (n_ - nw).abs();
+            let between = ((w_ < nw) & (nw < n_)) | ((n_ < nw) & (nw < w_));
+            let far = (awn > 32) | (ann > 32);
+            let p_between = if far { w_ + n_ - nw } else { (w_ + n_) >> 1 };
+            let p_else = if awn > ann { w_ } else { n_ };
+            if between { p_between } else { p_else }
+        };
+
+        let v = (pred + ((diff << 2) | low)) & 0xFFFF;
+        // SAFETY: cur_row_ptr from cur_row (len == width); col < width, so
+        // cur_row_ptr.add(col) is in-bounds and exclusively owned; north_row is a
+        // disjoint borrow. Same invariant as the pre-refactor inline loop.
+        unsafe { *cur_row_ptr.add(col) = v as u16; }
+        west[parity] = v;
+        if row >= 2 {
+            north_west[parity] = north;
+        }
+    }
+    Ok(())
+}
+
 pub fn decompress(compressed: &[u8], width: usize, height: usize) -> Result<Vec<u16>, String> {
     decompress_rows(compressed, width, height, height)
 }
@@ -97,113 +207,13 @@ pub fn decompress_rows_into(
     let mut br = BitReader::<WIDE_FILL>::new(&compressed[HEADER_SKIP..]);
 
     for row in 0..nrows {
-        // acarry[parity] = [last_value, running_avg_signed, stable_counter]
-        // Reset per row (dcraw: `memset(acarry, 0, sizeof acarry);`).
-        let mut acarry = [[0i32; 3]; 2];
         let row_base  = row * width;
         let row2_base = if row >= 2 { (row - 2) * width } else { 0 };
-
-        // D1: delay lines replace re-reads of out[] (west/nw from col-2 same parity).
-        // north_row borrows the prior row slice; cur_row mut for current.
+        // D1: north_row borrows the row two above (disjoint from cur via split_at_mut);
+        // the per-row decode + predictor lives in the shared `decode_row_into` helper.
         let (above, cur) = out[..n].split_at_mut(row_base);
         let north_row: &[u16] = if row >= 2 { &above[row2_base..row2_base + width] } else { &[] };
-        let cur_row = &mut cur[..width];
-
-        let mut west = [0i32; 2];
-        let mut north_west = [0i32; 2];
-        // Lens 23: pointer for cur_row writes (advance instead of index)
-        let cur_row_ptr = cur_row.as_mut_ptr();
-        for col in 0..width {
-            let parity = col & 1;
-            let i = if acarry[parity][2] < 3 { 2 } else { 0 };
-            // D2: leading_zeros equiv to the search loop (tested in D8(b)).
-            let carry_lo = (acarry[parity][0] as u16) as u32;
-            let bitlen = 32 - carry_lo.leading_zeros() as i32;
-            let nbits = (2 + i as i32).max(bitlen - i as i32).min(16) as usize;
-
-            // NB: per-read truncation checks are kept deliberately (NOT folded to
-            // one). They break the BitReader state-dependency chain between reads,
-            // letting truncation bookkeeping resolve off the inter-pixel critical
-            // path; folding them measured +13% on x86 (rejected D9 — see bisect).
-            let sb = br.read_bits(3);
-            if br.truncated {
-                return Err(bitstream_exhausted(width, nrows));
-            }
-            let low = (sb & 3) as i32;
-            // arithmetic shift spreads top bit of the 3-bit field into a -1/0 mask
-            let sign = (((sb as i32) << 29) >> 31) as i32;
-
-            let high0 = br.read_huff();
-            if br.truncated {
-                return Err(bitstream_exhausted(width, nrows));
-            }
-            // Escape path reads (16 - nbits) bits — NOT a flat 16.  Then drop LSB.
-            let high = if high0 == 12 {
-                let extra = (16u32).saturating_sub(nbits as u32);
-                (br.read_bits(extra) >> 1) as i32
-            } else {
-                high0 as i32
-            };
-            if br.truncated {
-                return Err(bitstream_exhausted(width, nrows));
-            }
-
-            // carry[0] = (high << nbits) | nbits-bit literal.  `low` is NOT
-            // OR'ed in here — it is applied to the diff when storing the pixel.
-            acarry[parity][0] = (high << (nbits as u32)) | (br.read_bits(nbits as u32) as i32);
-            if br.truncated {
-                return Err(bitstream_exhausted(width, nrows));
-            }
-            let diff = (acarry[parity][0] ^ sign) + acarry[parity][1];
-            // Running average uses the carry's OWN previous value (carry[1]),
-            // not carry[0].  This is the dcraw / LibRaw / rawloader form.
-            acarry[parity][1] = (diff * 3 + acarry[parity][1]) >> 5;
-            acarry[parity][2] = if acarry[parity][0] > 16 {
-                0
-            } else {
-                acarry[parity][2] + 1
-            };
-
-            // D1 predictor using delay lines (bit-exact with u16-masked re-reads).
-            // D10: load this column's north sample ONCE (row>=2). The raw-pointer
-            // store below defeats CSE of `north_row[col]`, so the old code reloaded
-            // it (with a fresh bounds check) for the north_west update — fold to one.
-            let north = if row >= 2 { north_row[col] as i32 } else { 0 };
-            let pred = if row < 2 && col < 2 {
-                0
-            } else if row < 2 {
-                west[parity]
-            } else if col < 2 {
-                north
-            } else {
-                // Branchless: flatten the nested data-dependent branches (every
-                // pixel mispredicted) into precomputed candidates + cmov selects.
-                // Bit-exact with the original gradient predictor.
-                let w_ = west[parity];
-                let n_ = north;
-                let nw = north_west[parity];
-                let awn = (w_ - nw).abs();
-                let ann = (n_ - nw).abs();
-                let between = ((w_ < nw) & (nw < n_)) | ((n_ < nw) & (nw < w_));
-                let far = (awn > 32) | (ann > 32);
-                let p_between = if far { w_ + n_ - nw } else { (w_ + n_) >> 1 };
-                let p_else = if awn > ann { w_ } else { n_ };
-                if between { p_between } else { p_else }
-            };
-
-            let v = (pred + ((diff << 2) | low)) & 0xFFFF;
-            // SAFETY (SEC-004 / PARSERS-013 / CONC-05): cur_row_ptr is derived from
-            // `cur_row = &mut cur[..width]` (len = width).  The loop invariant `col <
-            // width` ensures `col` is always a valid index into cur_row, so
-            // `cur_row_ptr.add(col)` is always in-bounds and exclusively owned (no
-            // aliasing: `north_row` borrows `above` which is disjoint from `cur`
-            // due to `split_at_mut`; `cur_row_ptr` is not captured elsewhere).
-            unsafe { *cur_row_ptr.add(col) = v as u16; }
-            west[parity] = v;
-            if row >= 2 {
-                north_west[parity] = north;
-            }
-        }
+        decode_row_into::<WIDE_FILL>(&mut br, row, width, nrows, north_row, &mut cur[..width])?;
     }
     if br.truncated {
         return Err(bitstream_exhausted(width, nrows));
