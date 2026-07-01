@@ -436,6 +436,13 @@ impl<'a, const WIDE: bool> BitReader<'a, WIDE> {
     }
 }
 
+/// Test-only bridge so sibling modules (e.g. `stream_preview`) can reuse the
+/// deterministic synthetic ORF payload generator.
+#[cfg(test)]
+pub(crate) fn tests_synth_payload(width: usize, height: usize, seed: u64) -> Vec<u8> {
+    tests::synth_payload(width, height, seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,7 +832,7 @@ mod tests {
     // Deterministic synthetic payload. 4 bytes/pixel = 32 bits >= the 31-bit
     // per-pixel worst case (3 sign/low + 12 huff + 16 escape/literal), so a full
     // decode of this stream never truncates — every pixel is exercised.
-    fn synth_payload(width: usize, height: usize, seed: u64) -> Vec<u8> {
+    pub(crate) fn synth_payload(width: usize, height: usize, seed: u64) -> Vec<u8> {
         let nbytes = HEADER_SKIP + width * height * 4;
         let mut v = Vec::with_capacity(nbytes);
         let mut s = seed | 1;

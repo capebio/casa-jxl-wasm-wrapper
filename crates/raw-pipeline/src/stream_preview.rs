@@ -1,6 +1,13 @@
 //! Streaming, bounded-memory ORF preview build: decode → half-demosaic →
 //! box-downscale, one strip at a time. Byte-identical to the full-frame path.
 
+use crate::decompress::{for_each_strip, OrfRowDecoder};
+use crate::demosaic::demosaic_half_band;
+
+/// Even strip height. ~0.75 MB raw strip at 6000 px width; keeps demosaic par grain.
+/// Bench-adjustable const (see the perf flipflop), not a user tunable.
+pub const STRIP_ROWS: usize = 64;
+
 #[inline(always)]
 fn write_rgb16_le(out: &mut [u8], o: usize, r: u16, g: u16, b: u16) {
     out[o] = r as u8; out[o + 1] = (r >> 8) as u8;
@@ -134,6 +141,49 @@ impl StreamingBoxDownscale {
     }
 }
 
+/// Fully streaming ORF preview build. Decodes `compressed` in even strips, half-
+/// demosaics each strip, and box-downscales into one packed LE u16 buffer per target
+/// (width,height). Never materializes the full raw or the full half-res image. Byte-
+/// identical to `decompress -> demosaic_rggb_half -> downscale_rgb16_impl`.
+pub fn build_previews_streaming(
+    compressed: &[u8],
+    w: usize,
+    h: usize,
+    targets: &[(usize, usize)],
+) -> Result<Vec<Vec<u8>>, String> {
+    let (hw, hh) = (w / 2, h / 2);
+    if hw == 0 || hh == 0 {
+        return Err(format!("stream_preview: {}×{} too small for half-res", w, h));
+    }
+    let mut dec = OrfRowDecoder::new(compressed, w, h)?;
+    let mut downs: Vec<StreamingBoxDownscale> =
+        targets.iter().map(|&(dw, dh)| StreamingBoxDownscale::new(hw, hh, dw, dh)).collect();
+
+    let mut scratch: Vec<u16> = Vec::new();
+    let mut half_strip = vec![0u16; (STRIP_ROWS / 2) * hw * 3];
+
+    for_each_strip(&mut dec, STRIP_ROWS, &mut scratch, |_first_row, k, raw_strip| {
+        // Only whole 2-row pairs demosaic; a trailing odd row (only possible on the
+        // final strip when h is odd) is dropped, matching hh = h/2.
+        let keven = k & !1;
+        if keven == 0 {
+            return Ok(());
+        }
+        let half_rows = keven / 2;
+        let hs = &mut half_strip[..half_rows * hw * 3];
+        demosaic_half_band(&raw_strip[..keven * w], w, keven, hs);
+        for hr in 0..half_rows {
+            let row = &hs[hr * hw * 3..(hr + 1) * hw * 3];
+            for d in downs.iter_mut() {
+                d.push_row(row);
+            }
+        }
+        Ok(())
+    })?;
+
+    Ok(downs.into_iter().map(|d| d.finish()).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +267,25 @@ mod tests {
             let got = stream_all(&src, sw, sh, dw, dh);
             assert_eq!(got, want, "{}x{} -> {}x{}", sw, sh, dw, dh);
         }
+    }
+
+    #[test]
+    fn build_previews_matches_manual_composition() {
+        use crate::{decompress, demosaic};
+
+        let (w, h) = (64usize, 48usize);
+        let payload = decompress::tests_synth_payload(w, h, 0xC0FFEE);
+        let (hw, hh) = (w / 2, h / 2);
+
+        // manual: full decode -> half demosaic -> downscale (the current path)
+        let raw = decompress::decompress(&payload, w, h).unwrap();
+        let half = demosaic::demosaic_rggb_half(&raw, w, h).unwrap();
+        let lb = reference_downscale(&half, hw, hh, 20, 15); // float dims
+        let th = reference_downscale(&half, hw, hh, 8, 6);   // integer dims
+
+        // streaming
+        let got = build_previews_streaming(&payload, w, h, &[(20, 15), (8, 6)]).unwrap();
+        assert_eq!(got[0], lb, "lightbox differs");
+        assert_eq!(got[1], th, "thumb differs");
     }
 }
