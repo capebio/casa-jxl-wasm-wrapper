@@ -4,9 +4,11 @@
 use crate::decompress::{for_each_strip, OrfRowDecoder};
 use crate::demosaic::demosaic_half_band;
 
-/// Even strip height. ~0.75 MB raw strip at 6000 px width; keeps demosaic par grain.
-/// Bench-adjustable const (see the perf flipflop), not a user tunable.
-pub const STRIP_ROWS: usize = 64;
+/// Even strip height. Larger = fewer rayon dispatches + coarser demosaic grain
+/// (better throughput); smaller = lower peak. 128 keeps the raw strip ~1 MB at
+/// 4000 px while roughly halving par-dispatch overhead vs 64. Bench-adjustable
+/// const (see `preview_build_ab_timing`), not a user tunable.
+pub const STRIP_ROWS: usize = 128;
 
 #[inline(always)]
 fn write_rgb16_le(out: &mut [u8], o: usize, r: u16, g: u16, b: u16) {
@@ -261,6 +263,14 @@ mod tests {
             (64usize, 48usize, 16usize, 12usize), // exact 4x
             (100, 75, 30, 21),                    // float
             (99, 60, 25, 17),                     // float, odd
+            // Float floor-boundary ratios — a sibling agent flagged a 7:3 fusion
+            // counterexample; prove the streaming accumulator still matches the
+            // one-shot box filter exactly at these boundaries (both axes).
+            (7, 7, 3, 3),
+            (7, 5, 3, 2),
+            (13, 9, 4, 3),
+            (33, 17, 10, 6),
+            (7, 4, 3, 3),   // dh=3 from sh=4 (thin vertical spans)
         ] {
             let src: Vec<u16> = (0..(sw * sh * 3)).map(|i| ((i * 31 + 7) & 0xffff) as u16).collect();
             let want = reference_downscale(&src, sw, sh, dw, dh);
@@ -287,5 +297,40 @@ mod tests {
         let got = build_previews_streaming(&payload, w, h, &[(20, 15), (8, 6)]).unwrap();
         assert_eq!(got[0], lb, "lightbox differs");
         assert_eq!(got[1], th, "thumb differs");
+    }
+
+    // Rule-9 perf gate: streamed preview build vs the manual full composition. Run:
+    // cargo test --release -p raw-pipeline --lib preview_build_ab_timing -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn preview_build_ab_timing() {
+        use crate::{decompress, demosaic};
+        use std::time::Instant;
+        let (w, h) = (2048usize, 2048usize);
+        let payload = decompress::tests_synth_payload(w, h, 0xABBA);
+        let (hw, hh) = (w / 2, h / 2);
+        let targets = [(300usize, 300usize), (120usize, 120usize)];
+
+        let full = || {
+            let raw = decompress::decompress(&payload, w, h).unwrap();
+            let half = demosaic::demosaic_rggb_half(&raw, w, h).unwrap();
+            let _a = reference_downscale(&half, hw, hh, targets[0].0, targets[0].1);
+            let _b = reference_downscale(&half, hw, hh, targets[1].0, targets[1].1);
+        };
+        let stream = || { let _ = build_previews_streaming(&payload, w, h, &targets).unwrap(); };
+
+        let iters = 30u32;
+        let (mut tf, mut ts) = (0u128, 0u128);
+        for k in 0..iters {
+            if k & 1 == 0 {
+                let t = Instant::now(); full();   tf += t.elapsed().as_nanos();
+                let t = Instant::now(); stream(); ts += t.elapsed().as_nanos();
+            } else {
+                let t = Instant::now(); stream(); ts += t.elapsed().as_nanos();
+                let t = Instant::now(); full();   tf += t.elapsed().as_nanos();
+            }
+        }
+        let (mf, ms) = (tf as f64 / iters as f64 / 1e6, ts as f64 / iters as f64 / 1e6);
+        println!("preview build: FULL {:.3} ms  STREAM {:.3} ms  delta {:+.2}%", mf, ms, (ms - mf) / mf * 100.0);
     }
 }

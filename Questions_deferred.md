@@ -1098,3 +1098,24 @@ effort, three of the four deferred items were implementable + verifiable here:
 - **[STILL DEFERRED] streaming two-row / window decode API** — unchanged. New public API
   + caller migration + design buy-in; not a verifiable micro-change. Needs brainstorming,
   not enactment.
+
+## decompress.rs streaming — UPDATE 2026-07-01: IMPLEMENTED (last deferred item done)
+
+The streaming two-row/window API (last remaining deferred item) is now IMPLEMENTED on
+branch perf/decompress-trunc-fold-jul01-q8z, per spec
+docs/superpowers/specs/2026-07-01-streaming-orf-preview-decode-design.md and plan
+docs/superpowers/plans/2026-07-01-streaming-orf-preview-decode.md. Shipped:
+- decompress.rs: decode_row_into shared helper (perf-neutral, bisect PROD -10%),
+  RawRowSource trait, OrfRowDecoder (3-row ring), for_each_strip.
+- demosaic.rs: demosaic_half_band (demosaic_rggb_half delegates).
+- stream_preview.rs (new): StreamingBoxDownscale + build_previews_streaming (STRIP_ROWS=128).
+- src/lib.rs: decode_orf_raw streaming fork (gate: previews && !full_rgb && wb_from_camera
+  && preview_can_halve); rare no-camera-WB bails to the full path.
+
+Verified: byte-exact at every layer (streamed rows==full decode; half-band==full; streaming
+downscale==reference; fused previews==manual composition); MSVC lib suite 215 passed;
+wasm32 check clean; peak-mem working-set ratio 0.269 (~3.7x, scales to ~6x at 24MP where
+the lightbox deliverable dominates); preview-build flipflop -1.5%/-0.7% (neutral, no regression).
+
+Remaining FUTURE (new specs, not deferred-from-this-pass): WB-stats fold-in (so no-camera-WB
+also streams), progressive-paint JS wiring, ROI/window public API, DNG/CR2 RawRowSource impl.
